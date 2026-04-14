@@ -1,0 +1,1034 @@
+from __future__ import annotations
+
+import ctypes
+import os
+import re
+import secrets
+import shlex
+import socket
+import subprocess
+import sys
+import time
+import webbrowser
+import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any
+
+from zapret_hub.domain import ComponentDefinition, ComponentState
+from zapret_hub.services.logging_service import LoggingManager
+from zapret_hub.services.settings import SettingsManager
+from zapret_hub.services.storage import StorageManager
+
+
+class _WindowsJob:
+    def __init__(self) -> None:
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.job = self.kernel32.CreateJobObjectW(None, None)
+        if not self.job:
+            return
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+        JobObjectExtendedLimitInformation = 9
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        self.kernel32.SetInformationJobObject(
+            self.job,
+            JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+
+    def assign_pid(self, pid: int) -> None:
+        if not self.job:
+            return
+        PROCESS_ALL_ACCESS = 0x1F0FFF
+        handle = self.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        if handle:
+            self.kernel32.AssignProcessToJobObject(self.job, handle)
+            self.kernel32.CloseHandle(handle)
+
+
+class ProcessManager:
+    def __init__(
+        self,
+        storage: StorageManager,
+        logging: LoggingManager,
+        settings: SettingsManager,
+    ) -> None:
+        self.storage = storage
+        self.logging = logging
+        self.settings = settings
+        self._processes: dict[str, subprocess.Popen[Any]] = {}
+        self._states: dict[str, ComponentState] = {}
+        self._job = _WindowsJob() if sys.platform.startswith("win") else None
+        self._creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0
+        self._startupinfo: subprocess.STARTUPINFO | None = None
+        if sys.platform.startswith("win"):
+            startup = subprocess.STARTUPINFO()
+            startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startup.wShowWindow = 0
+            self._startupinfo = startup
+
+    def list_components(self) -> list[ComponentDefinition]:
+        raw_items = self.storage.read_json(self.storage.paths.data_dir / "components.json", default=[])
+        settings = self.settings.get()
+        components = [ComponentDefinition(**item) for item in raw_items]
+        for component in components:
+            if settings.enabled_component_ids:
+                component.enabled = component.id in settings.enabled_component_ids
+            if settings.autostart_component_ids:
+                component.autostart = component.id in settings.autostart_component_ids
+        return components
+
+    def list_zapret_generals(self) -> list[dict[str, str]]:
+        options: list[dict[str, str]] = []
+        bundles = self._get_zapret_bundles(enabled_only=True)
+        for bundle in bundles:
+            bundle_id = bundle["id"]
+            bundle_title = bundle["title"]
+            root = bundle["path"]
+            for script in sorted(root.glob("*.bat")):
+                name = script.name.lower()
+                if name.startswith("service"):
+                    continue
+                option_id = f"{bundle_id}|{script.name}"
+                options.append(
+                    {
+                        "id": option_id,
+                        "name": script.name,
+                        "bundle": bundle_title,
+                        "bundle_id": bundle_id,
+                        "path": str(script),
+                    }
+                )
+        return options
+
+    def prompt_telegram_proxy_link(self) -> None:
+        settings = self.settings.get()
+        secret = (settings.tg_proxy_secret or "").strip().lower()
+        if secret.startswith("dd") and len(secret) > 2:
+            secret = secret[2:]
+        if not secret:
+            secret = secrets.token_hex(16)
+            settings = self.settings.update(tg_proxy_secret=secret)
+        self._open_telegram_proxy_link(
+            host=settings.tg_proxy_host,
+            port=int(settings.tg_proxy_port),
+            secret=secret,
+        )
+
+    def list_states(self) -> list[ComponentState]:
+        states: list[ComponentState] = []
+        settings = self.settings.get()
+        for component in self.list_components():
+            state = self._states.get(component.id, ComponentState(component_id=component.id))
+            if component.id == "zapret":
+                state.status = "running" if self._is_image_running("winws.exe") else "stopped"
+                state.pid = None
+            elif component.id == "tg-ws-proxy":
+                worker = self._processes.get(component.id)
+                listening = self._is_port_listening(settings.tg_proxy_host, int(settings.tg_proxy_port))
+                if (worker and worker.poll() is None) or listening:
+                    state.status = "running"
+                    state.pid = worker.pid if worker and worker.poll() is None else None
+                else:
+                    state.status = "stopped"
+                    state.pid = None
+            else:
+                process = self._processes.get(component.id)
+                if process and process.poll() is None:
+                    state.status = "running"
+                    state.pid = process.pid
+                else:
+                    state.status = "stopped"
+                    state.pid = None
+            states.append(state)
+        return states
+
+    def start_component(self, component_id: str) -> ComponentState:
+        component = next(item for item in self.list_components() if item.id == component_id)
+        if component.id == "zapret":
+            return self._start_zapret(component_id)
+        if component.id == "tg-ws-proxy":
+            return self._start_tg_ws_proxy(component_id)
+
+        current = self._processes.get(component_id)
+        if current and current.poll() is None:
+            return self._states.get(component_id, ComponentState(component_id=component_id, status="running", pid=current.pid))
+
+        process = subprocess.Popen(
+            component.command,
+            text=True,
+            creationflags=self._creationflags,
+            startupinfo=self._startupinfo,
+        )
+        if self._job:
+            self._job.assign_pid(process.pid)
+        state = ComponentState(component_id=component_id, status="running", pid=process.pid)
+        self._processes[component_id] = process
+        self._states[component_id] = state
+        self.logging.log("info", "Component started", component_id=component_id, pid=process.pid)
+        return state
+
+    def stop_component(self, component_id: str) -> ComponentState:
+        state = self._states.get(component_id, ComponentState(component_id=component_id))
+
+        if component_id == "zapret":
+            if self._zapret_service_exists():
+                self._run_quiet(["sc", "stop", "zapret"])
+            self._kill_image("winws.exe")
+            state.status = "stopped" if not self._is_image_running("winws.exe") else "running"
+            state.pid = None
+            if state.status != "stopped":
+                state.last_error = "Failed to stop winws.exe"
+            self._states[component_id] = state
+            self.logging.log("info", "Zapret stopped")
+            return state
+
+        if component_id == "tg-ws-proxy":
+            process = self._processes.get(component_id)
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=4)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            if process and process.pid:
+                self._run_quiet(["taskkill", "/PID", str(process.pid), "/F"])
+            self._kill_image("TgWsProxy_windows.exe")
+            state.status = "stopped"
+            state.pid = None
+            self._states[component_id] = state
+            self.logging.log("info", "TG WS Proxy stopped")
+            return state
+
+        process = self._processes.get(component_id)
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        state.status = "stopped"
+        state.pid = None
+        self._states[component_id] = state
+        self.logging.log("info", "Component stopped", component_id=component_id)
+        return state
+
+    def start_enabled_components(self) -> list[ComponentState]:
+        started = []
+        for component in self.list_components():
+            if component.enabled and component.autostart:
+                started.append(self.start_component(component.id))
+        return started
+
+    def stop_all(self) -> list[ComponentState]:
+        return [self.stop_component(component.id) for component in self.list_components()]
+
+    def toggle_component_enabled(self, component_id: str) -> ComponentDefinition:
+        components = self.list_components()
+        target = next(component for component in components if component.id == component_id)
+        target.enabled = not target.enabled
+        enabled_ids = sorted(component.id for component in components if component.enabled)
+        self.settings.update(enabled_component_ids=enabled_ids)
+        if not target.enabled:
+            self.stop_component(component_id)
+        self.logging.log("info", "Component enabled state changed", component_id=component_id, enabled=target.enabled)
+        return target
+
+    def toggle_component_autostart(self, component_id: str) -> ComponentDefinition:
+        components = self.list_components()
+        target = next(component for component in components if component.id == component_id)
+        target.autostart = not target.autostart
+        autostart_ids = sorted(component.id for component in components if component.autostart)
+        self.settings.update(autostart_component_ids=autostart_ids)
+        self.logging.log("info", "Component autostart state changed", component_id=component_id, autostart=target.autostart)
+        return target
+
+    def _start_zapret(self, component_id: str) -> ComponentState:
+        # всегда перезапускаем, чтобы не было конфликтов со сторонними процессами
+        self.stop_component(component_id)
+        selected_option = self._resolve_selected_general_option()
+        if selected_option is None:
+            state = ComponentState(component_id=component_id, status="error", last_error="No general script found.")
+            self._states[component_id] = state
+            return state
+
+        selected_script = Path(selected_option["path"])
+        selected_bundle_root = Path(selected_script).parent
+        active_root = self._prepare_active_zapret_runtime(
+            selected_bundle_root=selected_bundle_root,
+            selected_bundle_id=selected_option["bundle_id"],
+        )
+        self._apply_zapret_runtime_switches(active_root)
+        active_script = active_root / selected_script.name
+        self._ensure_zapret_user_lists(active_root / "lists")
+        bin_dir = active_root / "bin"
+        lists_dir = active_root / "lists"
+        process: subprocess.Popen[Any] | None = None
+        try:
+            winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
+            if not winws_command:
+                state = ComponentState(
+                    component_id=component_id,
+                    status="error",
+                    last_error="Failed to parse winws command from selected general file.",
+                )
+                self._states[component_id] = state
+                self.logging.log("error", "Zapret command parse failed", script=str(active_script))
+                return state
+            process = subprocess.Popen(
+                winws_command,
+                cwd=str(bin_dir),
+                creationflags=self._creationflags,
+                startupinfo=self._startupinfo,
+            )
+            if self._job:
+                self._job.assign_pid(process.pid)
+            self._processes[component_id] = process
+            running = False
+            for _ in range(24):
+                if self._is_image_running("winws.exe"):
+                    running = True
+                    break
+                time.sleep(0.25)
+            if running:
+                state = ComponentState(component_id=component_id, status="running", pid=process.pid)
+                self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0])
+            else:
+                state = ComponentState(
+                    component_id=component_id,
+                    status="error",
+                    last_error="winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert.",
+                )
+                self.logging.log("error", "Zapret failed to start", script=str(active_script))
+        except OSError as error:
+            if getattr(error, "winerror", 0) == 740:
+                state = ComponentState(
+                    component_id=component_id,
+                    status="error",
+                    last_error="Administrator rights are required for winws/WinDivert.",
+                )
+                self.logging.log("error", "Zapret start failed: admin required")
+            else:
+                state = ComponentState(component_id=component_id, status="error", last_error=str(error))
+                self.logging.log("error", "Zapret start failed", error=str(error))
+        self._states[component_id] = state
+        return state
+
+    def _extract_winws_command(self, script_path: Path, bin_dir: Path, lists_dir: Path) -> list[str]:
+        game_filter, game_filter_tcp, game_filter_udp = self._get_game_filter_values(script_path.parent)
+        lines = self._read_batch_logical_lines(script_path)
+        for line in lines:
+            if "winws.exe" not in line.lower():
+                continue
+            try:
+                parts = shlex.split(line, posix=False)
+            except ValueError:
+                continue
+            if not parts:
+                continue
+            winws_idx = next((i for i, item in enumerate(parts) if "winws.exe" in item.lower()), -1)
+            if winws_idx < 0:
+                continue
+
+            executable = self._expand_batch_value(
+                parts[winws_idx],
+                bin_dir=bin_dir,
+                lists_dir=lists_dir,
+                game_filter=game_filter,
+                game_filter_tcp=game_filter_tcp,
+                game_filter_udp=game_filter_udp,
+            ).strip().strip('"')
+            if not executable:
+                continue
+            exe_path = Path(executable)
+            if not exe_path.is_absolute():
+                exe_path = bin_dir / exe_path.name
+            args: list[str] = []
+            for raw_arg in parts[winws_idx + 1 :]:
+                arg = self._expand_batch_value(
+                    raw_arg,
+                    bin_dir=bin_dir,
+                    lists_dir=lists_dir,
+                    game_filter=game_filter,
+                    game_filter_tcp=game_filter_tcp,
+                    game_filter_udp=game_filter_udp,
+                ).strip()
+                if not arg or arg == "^":
+                    continue
+                # убираем лишние кавычки из bat-синтаксиса
+                if arg.startswith('"') and arg.endswith('"') and len(arg) >= 2:
+                    arg = arg[1:-1]
+                if '="' in arg and arg.endswith('"'):
+                    key, value = arg.split('="', 1)
+                    arg = f"{key}={value[:-1]}"
+                args.append(arg)
+            return [str(exe_path), *args]
+        return []
+
+    def _read_batch_logical_lines(self, script_path: Path) -> list[str]:
+        raw_lines = script_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        logical_lines: list[str] = []
+        current = ""
+        for raw in raw_lines:
+            line = raw.strip()
+            if not line or line.startswith("::") or line.lower().startswith("rem "):
+                continue
+            if current:
+                current = f"{current} {line}"
+            else:
+                current = line
+            if current.endswith("^"):
+                current = current[:-1].rstrip()
+                continue
+            logical_lines.append(current)
+            current = ""
+        if current:
+            logical_lines.append(current)
+        return logical_lines
+
+    def _expand_batch_value(
+        self,
+        value: str,
+        *,
+        bin_dir: Path,
+        lists_dir: Path,
+        game_filter: str,
+        game_filter_tcp: str,
+        game_filter_udp: str,
+    ) -> str:
+        result = value
+        replacements = {
+            "%BIN%": str(bin_dir) + os.sep,
+            "%LISTS%": str(lists_dir) + os.sep,
+            "%GameFilter%": game_filter,
+            "%GameFilterTCP%": game_filter_tcp,
+            "%GameFilterUDP%": game_filter_udp,
+        }
+        for key, replacement in replacements.items():
+            result = result.replace(key, replacement).replace(key.lower(), replacement).replace(key.upper(), replacement)
+        return result
+
+    def _get_game_filter_values(self, runtime_root: Path) -> tuple[str, str, str]:
+        mode_from_settings = (self.settings.get().zapret_game_filter_mode or "").strip().lower()
+        if mode_from_settings == "all":
+            return ("1024-65535", "1024-65535", "1024-65535")
+        if mode_from_settings == "tcp":
+            return ("1024-65535", "1024-65535", "12")
+        if mode_from_settings == "udp":
+            return ("1024-65535", "12", "1024-65535")
+        if mode_from_settings == "disabled":
+            return ("12", "12", "12")
+        mode_file = runtime_root / "utils" / "game_filter.enabled"
+        if not mode_file.exists():
+            return ("12", "12", "12")
+        mode = mode_file.read_text(encoding="utf-8", errors="ignore").strip().lower()
+        if mode == "all":
+            return ("1024-65535", "1024-65535", "1024-65535")
+        if mode == "tcp":
+            return ("1024-65535", "1024-65535", "12")
+        if mode == "udp":
+            return ("1024-65535", "12", "1024-65535")
+        return ("12", "12", "12")
+
+    def _apply_zapret_runtime_switches(self, runtime_root: Path) -> None:
+        settings = self.settings.get()
+        lists_dir = runtime_root / "lists"
+        utils_dir = runtime_root / "utils"
+        lists_dir.mkdir(parents=True, exist_ok=True)
+        utils_dir.mkdir(parents=True, exist_ok=True)
+
+        ipset_mode = (settings.zapret_ipset_mode or "loaded").strip().lower()
+        ipset_all = lists_dir / "ipset-all.txt"
+        if ipset_mode == "none":
+            ipset_all.write_text("203.0.113.113/32\n", encoding="utf-8")
+        elif ipset_mode == "any":
+            ipset_all.write_text("", encoding="utf-8")
+        elif not ipset_all.exists():
+            ipset_all.write_text("", encoding="utf-8")
+
+        game_mode = (settings.zapret_game_filter_mode or "disabled").strip().lower()
+        game_flag = utils_dir / "game_filter.enabled"
+        if game_mode in ("all", "tcp", "udp"):
+            game_flag.write_text(game_mode, encoding="utf-8")
+        elif game_flag.exists():
+            game_flag.unlink(missing_ok=True)
+
+    def _start_tg_ws_proxy(self, component_id: str) -> ComponentState:
+        # всегда перезапускаем, чтобы не было конфликтов со сторонними процессами
+        self.stop_component(component_id)
+
+        settings = self.settings.get()
+        secret = (settings.tg_proxy_secret or "").strip().lower()
+        if secret.startswith("dd") and len(secret) > 2:
+            secret = secret[2:]
+        if not secret:
+            secret = secrets.token_hex(16)
+        if secret != settings.tg_proxy_secret:
+            settings = self.settings.update(tg_proxy_secret=secret)
+        # подчищаем старый процесс, если он остался в трее
+        self._kill_image("TgWsProxy_windows.exe")
+        command = self._build_worker_command(
+            "tg-ws-proxy",
+            tg_host=settings.tg_proxy_host,
+            tg_port=int(settings.tg_proxy_port),
+            tg_secret=secret,
+        )
+        process = subprocess.Popen(
+            command,
+            cwd=str(self.storage.paths.install_root),
+            creationflags=self._creationflags,
+            startupinfo=self._startupinfo,
+        )
+        listen_host = settings.tg_proxy_host
+        listen_port = int(settings.tg_proxy_port)
+        ready = False
+        for _ in range(16):
+            if process.poll() is not None:
+                break
+            if self._is_port_listening(listen_host, listen_port):
+                ready = True
+                break
+            time.sleep(0.35)
+        if not ready:
+            error_hint = "TG WS Proxy worker did not open listening port."
+            worker_error_log = self.storage.paths.logs_dir / "tg_worker_error.log"
+            if worker_error_log.exists():
+                error_hint = worker_error_log.read_text(encoding="utf-8")[-1000:]
+            state = ComponentState(
+                component_id=component_id,
+                status="error",
+                last_error=error_hint,
+            )
+            self._states[component_id] = state
+            self.logging.log("error", "TG WS Proxy worker failed to start", error=error_hint)
+            return state
+        if self._job:
+            self._job.assign_pid(process.pid)
+        state = ComponentState(component_id=component_id, status="running", pid=process.pid)
+        self._processes[component_id] = process
+        self._states[component_id] = state
+        self.logging.log("info", "TG WS Proxy worker started", pid=process.pid)
+        signature = f"{settings.tg_proxy_host}:{int(settings.tg_proxy_port)}:{secret}"
+        if settings.tg_proxy_link_prompt_signature != signature:
+            self._open_telegram_proxy_link(
+                host=settings.tg_proxy_host,
+                port=int(settings.tg_proxy_port),
+                secret=secret,
+            )
+            self.settings.update(tg_proxy_link_prompt_signature=signature)
+        return state
+
+    def _build_worker_command(self, worker: str, **kwargs: Any) -> list[str]:
+        cmd: list[str]
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--worker", worker]
+        else:
+            cmd = [sys.executable, "-m", "zapret_hub.main", "--worker", worker]
+
+        for key, value in kwargs.items():
+            option = "--" + key.replace("_", "-")
+            cmd.extend([option, str(value)])
+        return cmd
+
+    def _get_zapret_bundles(self, enabled_only: bool) -> list[dict[str, Any]]:
+        bundles: list[dict[str, Any]] = []
+        base = self.storage.paths.runtime_dir / "zapret-discord-youtube"
+        index_map = {
+            str(item.get("id", "")): str(item.get("name", "")).strip()
+            for item in (self.storage.read_json(self.storage.paths.cache_dir / "mods_index.json", default=[]) or [])
+            if isinstance(item, dict)
+        }
+        if base.exists():
+            bundles.append({"id": "base", "title": "", "path": base})
+
+        installed_raw = self.storage.read_json(self.storage.paths.data_dir / "installed_mods.json", default=[]) or []
+        for raw in installed_raw:
+            if raw.get("source_type") != "zapret_bundle":
+                continue
+            if enabled_only and not raw.get("enabled"):
+                continue
+            path = Path(raw.get("path", ""))
+            if not path.exists():
+                continue
+            mod_id = str(raw.get("id", "bundle"))
+            title = str(raw.get("name") or "").strip() or index_map.get(mod_id) or mod_id
+            bundles.append({"id": mod_id, "title": title, "path": path})
+        return bundles
+
+    def _resolve_selected_general_option(self) -> dict[str, str] | None:
+        options = self.list_zapret_generals()
+        if not options:
+            return None
+        settings = self.settings.get()
+        selected = settings.selected_zapret_general
+        picked = next((item for item in options if item["id"] == selected), None)
+        if picked is None:
+            preferred = next((item for item in options if item["name"].lower() == "general.bat"), options[0])
+            selected = preferred["id"]
+            self.settings.update(selected_zapret_general=selected)
+            picked = preferred
+        return picked
+
+    def _prepare_active_zapret_runtime(self, selected_bundle_root: Path, selected_bundle_id: str) -> Path:
+        active_root = self.storage.paths.merged_runtime_dir / "active_zapret"
+        if active_root.exists():
+            self.storage.create_backup(active_root, "pre-active-zapret-rebuild")
+            shutil.rmtree(active_root, ignore_errors=True)
+
+        shutil.copytree(selected_bundle_root, active_root, dirs_exist_ok=True)
+
+        lists_target = active_root / "lists"
+        lists_target.mkdir(parents=True, exist_ok=True)
+        layered_bundles = self._get_zapret_bundles(enabled_only=True)
+        for bundle in layered_bundles:
+            bundle_id = bundle["id"]
+            if bundle_id == selected_bundle_id:
+                continue
+            lists_source = Path(bundle["path"]) / "lists"
+            if not lists_source.exists():
+                continue
+            self._merge_lists_into_target(lists_target, lists_source)
+        return active_root
+
+    def _merge_lists_into_target(self, target_lists: Path, source_lists: Path) -> None:
+        for source in source_lists.glob("*.txt"):
+            target = target_lists / source.name
+            existing = self._read_list_lines(target)
+            incoming = self._read_list_lines(source)
+            merged: list[str] = []
+            seen: set[str] = set()
+            for line in [*existing, *incoming]:
+                if not line:
+                    continue
+                if line in seen:
+                    continue
+                seen.add(line)
+                merged.append(line)
+            target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+
+    def _read_list_lines(self, path: Path) -> list[str]:
+        if not path.exists():
+            return []
+        lines: list[str] = []
+        for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            lines.append(line)
+        return lines
+
+    def auto_select_working_general(self) -> dict[str, object] | None:
+        options = self.list_zapret_generals()
+        if not options:
+            return None
+        original = self.settings.get().selected_zapret_general
+        best_result: dict[str, object] | None = None
+        for option in options:
+            outcome = self._run_general_connectivity_check(option["id"])
+            if best_result is None or int(outcome.get("passed_targets", 0)) > int(best_result.get("passed_targets", 0)):
+                best_result = {
+                    "id": option["id"],
+                    "status": outcome["status"],
+                    "passed_targets": outcome.get("passed_targets", 0),
+                    "total_targets": outcome.get("total_targets", 0),
+                }
+            if outcome["status"] == "ok":
+                self.stop_component("zapret")
+                self.logging.log("info", "Auto-selected zapret general", general=option["id"])
+                return {
+                    "id": option["id"],
+                    "status": "ok",
+                    "passed_targets": outcome.get("passed_targets", 0),
+                    "total_targets": outcome.get("total_targets", 0),
+                }
+            self.stop_component("zapret")
+        if best_result is not None and best_result.get("id"):
+            self.settings.update(selected_zapret_general=str(best_result["id"]))
+            return best_result
+        self.settings.update(selected_zapret_general=original)
+        return None
+
+    def run_general_diagnostics(
+        self,
+        progress_callback: callable | None = None,
+        stop_callback: callable | None = None,
+    ) -> list[dict[str, str]]:
+        options = self.list_zapret_generals()
+        if not options:
+            return []
+
+        original_selected = self.settings.get().selected_zapret_general
+        original_running = self._is_image_running("winws.exe")
+        results: list[dict[str, str]] = []
+
+        try:
+            self.stop_all()
+            for index, option in enumerate(options, start=1):
+                if stop_callback is not None and stop_callback():
+                    break
+                self.settings.update(selected_zapret_general=option["id"])
+                if progress_callback is not None:
+                    progress_callback(index, len(options), option["name"])
+                outcome = self._run_general_connectivity_check(option["id"], stop_callback=stop_callback)
+                results.append(
+                    {
+                        "id": option["id"],
+                        "name": option["name"],
+                        "bundle": option["bundle"],
+                        "status": str(outcome["status"]),
+                        "error": str(outcome.get("error", "")),
+                        "passed_targets": str(outcome.get("passed_targets", 0)),
+                        "total_targets": str(outcome.get("total_targets", 0)),
+                    }
+                )
+                self.stop_component("zapret")
+        finally:
+            self.settings.update(selected_zapret_general=original_selected)
+            if original_running and original_selected:
+                self.start_component("zapret")
+
+        return results
+
+    def _run_general_connectivity_check(self, general_id: str, stop_callback: callable | None = None) -> dict[str, object]:
+        self.settings.update(selected_zapret_general=general_id)
+        state = self._start_zapret("zapret")
+        if state.status != "running":
+            return {
+                "status": "error",
+                "error": state.last_error or "failed to start",
+                "passed_targets": 0,
+                "total_targets": 0,
+            }
+
+        targets = self._load_standard_test_targets()
+        if not targets:
+            return {
+                "status": "ok",
+                "error": "",
+                "passed_targets": 0,
+                "total_targets": 0,
+            }
+
+        if stop_callback is not None and stop_callback():
+            return {
+                "status": "cancelled",
+                "error": "cancelled",
+                "passed_targets": 0,
+                "total_targets": len(targets),
+            }
+
+        passed_targets = 0
+        failed_names: list[str] = []
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(targets)))) as executor:
+            future_map = {executor.submit(self._target_is_reachable, target): target for target in targets}
+            for future in as_completed(future_map):
+                if stop_callback is not None and stop_callback():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    return {
+                        "status": "cancelled",
+                        "error": "cancelled",
+                        "passed_targets": passed_targets,
+                        "total_targets": len(targets),
+                    }
+                target = future_map[future]
+                try:
+                    ok = future.result()
+                except Exception:
+                    ok = False
+                if ok:
+                    passed_targets += 1
+                else:
+                    failed_names.append(str(target["name"]))
+
+        if failed_names:
+            return {
+                "status": "error",
+                "error": f"failed targets: {', '.join(failed_names[:6])}",
+                "passed_targets": passed_targets,
+                "total_targets": len(targets),
+            }
+        return {
+            "status": "ok",
+            "error": "",
+            "passed_targets": passed_targets,
+            "total_targets": len(targets),
+        }
+
+    def _load_standard_test_targets(self) -> list[dict[str, str]]:
+        targets_file = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "utils" / "targets.txt"
+        targets: list[dict[str, str]] = []
+        if targets_file.exists():
+            pattern = re.compile(r'^\s*(.+?)\s*=\s*"(.+)"\s*$')
+            for raw in targets_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                match = pattern.match(raw.strip())
+                if not match:
+                    continue
+                name = match.group(1).strip()
+                value = match.group(2).strip()
+                targets.append(self._convert_test_target(name, value))
+        if targets:
+            return targets
+
+        defaults = [
+            ("Discord Main", "https://discord.com"),
+            ("Discord Gateway", "https://gateway.discord.gg"),
+            ("Discord CDN", "https://cdn.discordapp.com"),
+            ("Discord Updates", "https://updates.discord.com"),
+            ("YouTube Web", "https://www.youtube.com"),
+            ("YouTube Short", "https://youtu.be"),
+            ("YouTube Image", "https://i.ytimg.com"),
+            ("YouTube Video Redirect", "https://redirector.googlevideo.com"),
+            ("Google Main", "https://www.google.com"),
+            ("Google Gstatic", "https://www.gstatic.com"),
+            ("Cloudflare Web", "https://www.cloudflare.com"),
+            ("Cloudflare CDN", "https://cdnjs.cloudflare.com"),
+            ("Cloudflare DNS 1.1.1.1", "PING:1.1.1.1"),
+            ("Cloudflare DNS 1.0.0.1", "PING:1.0.0.1"),
+            ("Google DNS 8.8.8.8", "PING:8.8.8.8"),
+            ("Google DNS 8.8.4.4", "PING:8.8.4.4"),
+            ("Quad9 DNS 9.9.9.9", "PING:9.9.9.9"),
+        ]
+        return [self._convert_test_target(name, value) for name, value in defaults]
+
+    def _convert_test_target(self, name: str, value: str) -> dict[str, str]:
+        if value.upper().startswith("PING:"):
+            host = value.split(":", 1)[1].strip()
+            return {"name": name, "type": "ping", "host": host}
+        host = value.replace("https://", "").replace("http://", "").split("/", 1)[0].strip()
+        return {"name": name, "type": "url", "url": value, "host": host}
+
+    def _target_is_reachable(self, target: dict[str, str]) -> bool:
+        target_type = target.get("type", "url")
+        if target_type == "ping":
+            return self._ping_target(target.get("host", ""))
+
+        url = target.get("url", "").strip()
+        if not url:
+            return False
+        tests = [
+            ["--http1.1"],
+            ["--tlsv1.2", "--tls-max", "1.2"],
+            ["--tlsv1.3", "--tls-max", "1.3"],
+        ]
+        for extra in tests:
+            if self._curl_target(url, extra):
+                return True
+        return False
+
+    def _curl_target(self, url: str, extra_args: list[str]) -> bool:
+        curl_path = shutil.which("curl.exe") or shutil.which("curl")
+        if not curl_path:
+            return False
+        proc = self._run_quiet(
+            [
+                curl_path,
+                "-I",
+                "-s",
+                "-m",
+                "5",
+                "-o",
+                "NUL",
+                "-w",
+                "%{http_code}",
+                "--show-error",
+                *extra_args,
+                url,
+            ]
+        )
+        code = (proc.stdout or "").strip()
+        return proc.returncode == 0 and bool(code)
+
+    def _ping_target(self, host: str) -> bool:
+        if not host:
+            return False
+        proc = self._run_quiet(["ping", "-n", "2", "-w", "2000", host])
+        return proc.returncode == 0
+
+    def _build_zapret_args(self, bin_dir: Path, lists_dir: Path) -> list[str]:
+        tls_google = str(bin_dir / "tls_clienthello_www_google_com.bin")
+        tls_4pda = str(bin_dir / "tls_clienthello_4pda_to.bin")
+        quic_google = str(bin_dir / "quic_initial_www_google_com.bin")
+        list_general = str(lists_dir / "list-general.txt")
+        list_general_user = str(lists_dir / "list-general-user.txt")
+        list_exclude = str(lists_dir / "list-exclude.txt")
+        list_exclude_user = str(lists_dir / "list-exclude-user.txt")
+        ipset_all = str(lists_dir / "ipset-all.txt")
+        ipset_exclude = str(lists_dir / "ipset-exclude.txt")
+        ipset_exclude_user = str(lists_dir / "ipset-exclude-user.txt")
+
+        return [
+            "--wf-tcp=80,443,2053,2083,2087,2096,8443",
+            "--wf-udp=443,19294-19344,50000-50100",
+            "--filter-udp=443",
+            f"--hostlist={list_general}",
+            f"--hostlist={list_general_user}",
+            f"--hostlist-exclude={list_exclude}",
+            f"--hostlist-exclude={list_exclude_user}",
+            f"--ipset-exclude={ipset_exclude}",
+            f"--ipset-exclude={ipset_exclude_user}",
+            "--dpi-desync=fake",
+            "--dpi-desync-repeats=6",
+            f"--dpi-desync-fake-quic={quic_google}",
+            "--new",
+            "--filter-udp=19294-19344,50000-50100",
+            "--filter-l7=discord,stun",
+            "--dpi-desync=fake",
+            "--dpi-desync-repeats=6",
+            "--new",
+            "--filter-tcp=2053,2083,2087,2096,8443",
+            "--hostlist-domains=discord.media",
+            "--dpi-desync=multisplit",
+            "--dpi-desync-split-seqovl=681",
+            "--dpi-desync-split-pos=1",
+            f"--dpi-desync-split-seqovl-pattern={tls_google}",
+            "--new",
+            "--filter-tcp=443",
+            f"--hostlist={str(lists_dir / 'list-google.txt')}",
+            "--ip-id=zero",
+            "--dpi-desync=multisplit",
+            "--dpi-desync-split-seqovl=681",
+            "--dpi-desync-split-pos=1",
+            f"--dpi-desync-split-seqovl-pattern={tls_google}",
+            "--new",
+            "--filter-tcp=80,443",
+            f"--hostlist={list_general}",
+            f"--hostlist={list_general_user}",
+            f"--hostlist-exclude={list_exclude}",
+            f"--hostlist-exclude={list_exclude_user}",
+            f"--ipset-exclude={ipset_exclude}",
+            f"--ipset-exclude={ipset_exclude_user}",
+            "--dpi-desync=multisplit",
+            "--dpi-desync-split-seqovl=568",
+            "--dpi-desync-split-pos=1",
+            f"--dpi-desync-split-seqovl-pattern={tls_4pda}",
+            "--new",
+            "--filter-udp=443",
+            f"--ipset={ipset_all}",
+            f"--hostlist-exclude={list_exclude}",
+            f"--hostlist-exclude={list_exclude_user}",
+            f"--ipset-exclude={ipset_exclude}",
+            f"--ipset-exclude={ipset_exclude_user}",
+            "--dpi-desync=fake",
+            "--dpi-desync-repeats=6",
+            f"--dpi-desync-fake-quic={quic_google}",
+            "--new",
+            "--filter-tcp=80,443,8443",
+            f"--ipset={ipset_all}",
+            f"--hostlist-exclude={list_exclude}",
+            f"--hostlist-exclude={list_exclude_user}",
+            f"--ipset-exclude={ipset_exclude}",
+            f"--ipset-exclude={ipset_exclude_user}",
+            "--dpi-desync=multisplit",
+            "--dpi-desync-split-seqovl=568",
+            "--dpi-desync-split-pos=1",
+            f"--dpi-desync-split-seqovl-pattern={tls_4pda}",
+            "--new",
+            "--filter-tcp=1024-65535",
+            f"--ipset={ipset_all}",
+            f"--ipset-exclude={ipset_exclude}",
+            f"--ipset-exclude={ipset_exclude_user}",
+            "--dpi-desync=multisplit",
+            "--dpi-desync-any-protocol=1",
+            "--dpi-desync-cutoff=n3",
+            "--dpi-desync-split-seqovl=568",
+            "--dpi-desync-split-pos=1",
+            f"--dpi-desync-split-seqovl-pattern={tls_4pda}",
+            "--new",
+            "--filter-udp=1024-65535",
+            f"--ipset={ipset_all}",
+            f"--ipset-exclude={ipset_exclude}",
+            f"--ipset-exclude={ipset_exclude_user}",
+            "--dpi-desync=fake",
+            "--dpi-desync-repeats=12",
+            "--dpi-desync-any-protocol=1",
+            f"--dpi-desync-fake-unknown-udp={quic_google}",
+            "--dpi-desync-cutoff=n2",
+        ]
+
+    def _ensure_zapret_user_lists(self, lists_dir: Path) -> None:
+        defaults = {
+            "ipset-exclude-user.txt": "203.0.113.113/32\n",
+            "list-general-user.txt": "domain.example.abc\n",
+            "list-exclude-user.txt": "domain.example.abc\n",
+        }
+        for filename, content in defaults.items():
+            path = lists_dir / filename
+            if not path.exists():
+                path.write_text(content, encoding="utf-8")
+
+    def _is_image_running(self, image_name: str) -> bool:
+        proc = self._run_quiet(["tasklist", "/FI", f"IMAGENAME eq {image_name}"])
+        output = (proc.stdout or "").lower()
+        return image_name.lower() in output
+
+    def _kill_image(self, image_name: str) -> None:
+        self._run_quiet(["taskkill", "/IM", image_name, "/F"])
+
+    def _zapret_service_exists(self) -> bool:
+        proc = self._run_quiet(["sc", "query", "zapret"])
+        return proc.returncode == 0
+
+    def _run_quiet(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=self._creationflags,
+            startupinfo=self._startupinfo,
+        )
+
+    def _is_port_listening(self, host: str, port: int) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=0.8):
+                return True
+        except OSError:
+            return False
+
+    def _open_telegram_proxy_link(self, host: str, port: int, secret: str) -> None:
+        link = f"tg://proxy?server={host}&port={port}&secret=dd{secret}"
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(link)  # type: ignore[attr-defined]
+            else:
+                webbrowser.open(link)
+            self.logging.log("info", "Telegram proxy link opened", link=link)
+        except Exception as error:
+            self.logging.log("warning", "Failed to open Telegram proxy link", link=link, error=str(error))
