@@ -35,7 +35,28 @@
 | 🎨 **UI** | Светлая/тёмная тема, RU/EN |
 | 📱 **Форматы** | Portable + установщик (x64/ARM64) |
 
+## 🛠 Модификации
+
+🔹 Хранит моды **отдельно**  
+🔹 **Не трогает** базовые файлы  
+🔹 Собирает runtime в `merged_runtime/`  
+🔹 Импорт general/списков из GitHub/ZIP  
+
 <img width="1743" height="661" alt="Расширенные настройки" src="https://github.com/user-attachments/assets/a1a2e222-5ca4-4de9-9d02-30acd866c141" />
+
+## 💻 Требования
+
+- 🪟 Windows 10/11
+- 🐍 Python 3.11+
+- ⚡ PowerShell 5+ / 7+
+
+## 📦 Portable и Installer
+
+В проекте используются три основных формата поставки:
+
+- `portable\win_x64` — portable для Windows x64;
+- `portable\win_arm64` — portable для Windows ARM64;
+- `install_zaprethub.exe` — установщик.
 
 ## 🔗 Используемые проекты
 
@@ -67,30 +88,6 @@
 - `📂 merged_runtime`
 - `📂 backups`
 
-
-## 💻 Требования
-
-- 🪟 Windows 10/11
-- 🐍 Python 3.11+
-- ⚡ PowerShell 5+ / 7+
-
-## 📦 Portable и Installer
-
-В проекте используются два основных формата поставки:
-
-- `portable\zapret_hub` — основная portable-сборка;
-- `portable\win_x64` — portable для Windows x64;
-- `portable\win_arm64` — portable для Windows ARM64;
-- `install_zaprethub.exe` — установщик.
-
-
-## 🛠 Модификации
-
-🔹 Хранит моды **отдельно**  
-🔹 **Не трогает** базовые файлы  
-🔹 Собирает runtime в `merged_runtime/`  
-🔹 Импорт general/списков из GitHub/ZIP  
-🔹 **Блокирует** импорт оригинала Flowseal как мод  
 
 ## 🧪 Запуск в разработке
 
