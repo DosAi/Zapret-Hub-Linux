@@ -11,6 +11,7 @@ import sys
 import time
 import webbrowser
 import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,7 @@ class ProcessManager:
         self.settings = settings
         self._processes: dict[str, subprocess.Popen[Any]] = {}
         self._states: dict[str, ComponentState] = {}
+        self._current_zapret_runtime: Path | None = None
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
         self._creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0
         self._startupinfo: subprocess.STARTUPINFO | None = None
@@ -209,9 +211,8 @@ class ProcessManager:
         state = self._states.get(component_id, ComponentState(component_id=component_id))
 
         if component_id == "zapret":
-            if self._zapret_service_exists():
-                self._run_quiet(["sc", "stop", "zapret"])
-            self._kill_image("winws.exe")
+            self._force_stop_zapret_runtime()
+            self._processes.pop(component_id, None)
             state.status = "stopped" if not self._is_image_running("winws.exe") else "running"
             state.pid = None
             if state.status != "stopped":
@@ -253,12 +254,24 @@ class ProcessManager:
     def start_enabled_components(self) -> list[ComponentState]:
         started = []
         for component in self.list_components():
-            if component.enabled and component.autostart:
-                started.append(self.start_component(component.id))
+            if component.enabled:
+                try:
+                    started.append(self.start_component(component.id))
+                except Exception as error:
+                    state = ComponentState(
+                        component_id=component.id,
+                        status="error",
+                        last_error=str(error),
+                    )
+                    self._states[component.id] = state
+                    self.logging.log("error", "Enabled component failed to start", component_id=component.id, error=str(error))
+                    started.append(state)
         return started
 
     def stop_all(self) -> list[ComponentState]:
-        return [self.stop_component(component.id) for component in self.list_components()]
+        stopped = [self.stop_component(component.id) for component in self.list_components()]
+        self._cleanup_merged_runtime()
+        return stopped
 
     def toggle_component_enabled(self, component_id: str) -> ComponentDefinition:
         components = self.list_components()
@@ -291,17 +304,19 @@ class ProcessManager:
 
         selected_script = Path(selected_option["path"])
         selected_bundle_root = Path(selected_script).parent
-        active_root = self._prepare_active_zapret_runtime(
-            selected_bundle_root=selected_bundle_root,
-            selected_bundle_id=selected_option["bundle_id"],
-        )
-        self._apply_zapret_runtime_switches(active_root)
-        active_script = active_root / selected_script.name
-        self._ensure_zapret_user_lists(active_root / "lists")
-        bin_dir = active_root / "bin"
-        lists_dir = active_root / "lists"
+        active_root: Path | None = None
         process: subprocess.Popen[Any] | None = None
         try:
+            active_root = self._prepare_active_zapret_runtime(
+                selected_bundle_root=selected_bundle_root,
+                selected_bundle_id=selected_option["bundle_id"],
+            )
+            self._current_zapret_runtime = active_root
+            self._apply_zapret_runtime_switches(active_root)
+            active_script = active_root / selected_script.name
+            self._ensure_zapret_user_lists(active_root / "lists")
+            bin_dir = active_root / "bin"
+            lists_dir = active_root / "lists"
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
             if not winws_command:
                 state = ComponentState(
@@ -348,6 +363,26 @@ class ProcessManager:
             else:
                 state = ComponentState(component_id=component_id, status="error", last_error=str(error))
                 self.logging.log("error", "Zapret start failed", error=str(error))
+        except shutil.Error as error:
+            state = ComponentState(component_id=component_id, status="error", last_error=str(error))
+            self.logging.log("error", "Zapret runtime build failed", error=str(error))
+        except Exception as error:
+            state = ComponentState(component_id=component_id, status="error", last_error=str(error))
+            self.logging.log("error", "Zapret start crashed", error=str(error))
+        if state.status != "running":
+            if process and process.poll() is None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=2)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+            self._force_stop_zapret_runtime()
+            if active_root is not None:
+                self._reset_active_runtime_dir(active_root)
+            self._current_zapret_runtime = None
         self._states[component_id] = state
         return state
 
@@ -607,11 +642,8 @@ class ProcessManager:
         return picked
 
     def _prepare_active_zapret_runtime(self, selected_bundle_root: Path, selected_bundle_id: str) -> Path:
-        active_root = self.storage.paths.merged_runtime_dir / "active_zapret"
-        if active_root.exists():
-            self.storage.create_backup(active_root, "pre-active-zapret-rebuild")
-            shutil.rmtree(active_root, ignore_errors=True)
-
+        self._cleanup_inactive_zapret_runtimes()
+        active_root = self._next_active_runtime_dir()
         shutil.copytree(selected_bundle_root, active_root, dirs_exist_ok=True)
 
         lists_target = active_root / "lists"
@@ -725,6 +757,13 @@ class ProcessManager:
                 self.start_component("zapret")
 
         return results
+
+    def _cleanup_merged_runtime(self) -> None:
+        self._cleanup_inactive_zapret_runtimes()
+        current_root = self._current_zapret_runtime
+        if current_root and current_root.exists():
+            self._reset_active_runtime_dir(current_root)
+        self._current_zapret_runtime = None
 
     def _run_general_connectivity_check(self, general_id: str, stop_callback: callable | None = None) -> dict[str, object]:
         self.settings.update(selected_zapret_general=general_id)
@@ -999,7 +1038,69 @@ class ProcessManager:
         return image_name.lower() in output
 
     def _kill_image(self, image_name: str) -> None:
-        self._run_quiet(["taskkill", "/IM", image_name, "/F"])
+        self._run_quiet(["taskkill", "/IM", image_name, "/F", "/T"])
+
+    def _force_stop_zapret_runtime(self) -> None:
+        process = self._processes.get("zapret")
+        if process and process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        if process and process.pid:
+            self._run_quiet(["taskkill", "/PID", str(process.pid), "/F", "/T"])
+        if self._zapret_service_exists():
+            self._run_quiet(["sc", "stop", "zapret"])
+            self._run_quiet(["sc", "delete", "zapret"])
+        for _ in range(8):
+            self._kill_image("winws.exe")
+            if not self._is_image_running("winws.exe"):
+                break
+            time.sleep(0.35)
+        self._processes.pop("zapret", None)
+        self._current_zapret_runtime = None
+
+    def _reset_active_runtime_dir(self, active_root: Path) -> None:
+        for _ in range(6):
+            try:
+                shutil.rmtree(active_root, ignore_errors=False)
+                return
+            except PermissionError:
+                self._force_stop_zapret_runtime()
+                time.sleep(0.35)
+            except Exception:
+                shutil.rmtree(active_root, ignore_errors=True)
+                if not active_root.exists():
+                    return
+        quarantine_root = Path(tempfile.gettempdir()) / "zapret_hub_runtime_cleanup"
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+        quarantine_target = quarantine_root / f"active_zapret_{int(time.time() * 1000)}"
+        try:
+            shutil.move(str(active_root), str(quarantine_target))
+            shutil.rmtree(quarantine_target, ignore_errors=True)
+        except Exception:
+            shutil.rmtree(active_root, ignore_errors=True)
+
+    def _next_active_runtime_dir(self) -> Path:
+        self.storage.paths.merged_runtime_dir.mkdir(parents=True, exist_ok=True)
+        return self.storage.paths.merged_runtime_dir / f"active_zapret_{int(time.time() * 1000)}"
+
+    def _cleanup_inactive_zapret_runtimes(self) -> None:
+        merged_root = self.storage.paths.merged_runtime_dir
+        if not merged_root.exists():
+            return
+        current_root = self._current_zapret_runtime.resolve() if self._current_zapret_runtime and self._current_zapret_runtime.exists() else None
+        for candidate in merged_root.glob("active_zapret*"):
+            try:
+                if current_root and candidate.resolve() == current_root:
+                    continue
+            except Exception:
+                pass
+            self._reset_active_runtime_dir(candidate)
 
     def _zapret_service_exists(self) -> bool:
         proc = self._run_quiet(["sc", "query", "zapret"])

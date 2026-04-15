@@ -11,6 +11,7 @@ import zipfile
 from urllib.request import urlopen
 import json
 
+from zapret_hub import __version__
 from zapret_hub.domain import InstalledMod, ModIndexItem
 from zapret_hub.services.logging_service import LoggingManager
 from zapret_hub.services.merge import MergeEngine
@@ -127,7 +128,7 @@ class ModsManager:
         if owner.lower() == "flowseal" and repo.lower() == "zapret-discord-youtube":
             raise ValueError("Оригинальный репозиторий Flowseal уже встроен в приложение и не может быть добавлен как модификация.")
 
-        headers = {"User-Agent": "ZapretHub/1.0.0"}
+        headers = {"User-Agent": f"ZapretHub/{__version__}"}
         self.logging.log("info", "GitHub mod import started", repo=repo, owner=owner)
         with urlopen(
             self._build_request(api_url, headers),

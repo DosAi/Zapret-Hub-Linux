@@ -43,7 +43,14 @@ def bootstrap_application() -> ApplicationContext:
 
     runtime_dir = install_root / "runtime"
     ui_assets_dir = install_root / "ui_assets"
-    _hydrate_bundled_assets(resource_root=resource_root, install_root=install_root, runtime_dir=runtime_dir, ui_assets_dir=ui_assets_dir)
+    sample_data_dir = install_root / "sample_data"
+    _hydrate_bundled_assets(
+        resource_root=resource_root,
+        install_root=install_root,
+        runtime_dir=runtime_dir,
+        ui_assets_dir=ui_assets_dir,
+        sample_data_dir=sample_data_dir,
+    )
 
     paths = AppPaths(
         install_root=install_root,
@@ -89,12 +96,22 @@ def bootstrap_application() -> ApplicationContext:
     )
 
 
-def _hydrate_bundled_assets(resource_root: Path, install_root: Path, runtime_dir: Path, ui_assets_dir: Path) -> None:
+def _hydrate_bundled_assets(
+    resource_root: Path,
+    install_root: Path,
+    runtime_dir: Path,
+    ui_assets_dir: Path,
+    sample_data_dir: Path,
+) -> None:
     bundled_runtime = resource_root / "runtime"
     bundled_ui_assets = resource_root / "ui_assets"
+    bundled_sample_data = resource_root / "sample_data"
 
     if bundled_runtime.exists() and not runtime_dir.exists():
         shutil.copytree(bundled_runtime, runtime_dir, dirs_exist_ok=True)
 
     if bundled_ui_assets.exists() and not ui_assets_dir.exists():
         shutil.copytree(bundled_ui_assets, ui_assets_dir, dirs_exist_ok=True)
+
+    if bundled_sample_data.exists() and not sample_data_dir.exists():
+        shutil.copytree(bundled_sample_data, sample_data_dir, dirs_exist_ok=True)

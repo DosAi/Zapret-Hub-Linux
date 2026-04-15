@@ -121,7 +121,9 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     context = bootstrap_application()
-    window = MainWindow(context)
+    settings = context.settings.get()
+    launch_hidden = bool(known.autostart_launch and settings.start_in_tray)
+    window = MainWindow(context, launch_hidden=launch_hidden)
     server = _create_single_instance_server(instance_key)
     if server is not None:
         def _on_new_connection() -> None:
@@ -131,9 +133,11 @@ def run(argv: list[str] | None = None) -> int:
                     client.readAll()
                     client.disconnectFromServer()
             window.restore_from_external_launch()
+
         server.newConnection.connect(_on_new_connection)
         app._single_instance_server = server  # type: ignore[attr-defined]
         app._single_instance_window = window  # type: ignore[attr-defined]
+
     def _cleanup_before_quit() -> None:
         try:
             context.processes.stop_all()
@@ -144,17 +148,20 @@ def run(argv: list[str] | None = None) -> int:
                 server.close()
             except Exception:
                 pass
+
     app.aboutToQuit.connect(_cleanup_before_quit)
-    settings = context.settings.get()
-    # держим автозапуск в реестре в актуальном состоянии
     context.autostart.set_enabled(bool(settings.autostart_windows))
     if known.autostart_launch:
-        context.settings.update(start_in_tray=True)
         if settings.auto_run_components:
             context.processes.start_enabled_components()
-        window.hide()
+            window.refresh_all()
+        if launch_hidden:
+            window.hide()
+        else:
+            window.show()
     else:
         window.show()
         if settings.auto_run_components:
             context.processes.start_enabled_components()
+            window.refresh_all()
     return app.exec()

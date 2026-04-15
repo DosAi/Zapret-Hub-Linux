@@ -77,7 +77,7 @@ class StorageManager:
         if not settings_file.exists():
             self.write_json(settings_file, {})
 
-        self._ensure_default_gaming_mod_and_index(settings_file)
+        self._ensure_default_bundled_mod_and_index(settings_file)
 
         base_config = self.paths.default_packs_dir / "base_config.json"
         if not base_config.exists():
@@ -132,24 +132,24 @@ class StorageManager:
             return "unknown"
         return "unknown"
 
-    def _ensure_default_gaming_mod_and_index(self, settings_file: Path) -> None:
-        default_mod_id = "gaming-by-goshkow"
-        default_mod_name = "Gaming"
+    def _ensure_default_bundled_mod_and_index(self, settings_file: Path) -> None:
+        legacy_mod_id = "gaming-by-goshkow"
+        default_mod_id = "unified-by-goshkow"
         default_mod_meta = {
             "id": default_mod_id,
-            "name": default_mod_name,
-            "description": "Эта модификация направлена на разблокировку самых распространненных проблем в гейминге и других платформах.",
+            "name": "Unified",
+            "description": "Позволяет обойти блокировки самых популярных сервисов, включая игровые сервисы, социальные сети и другие платформы.",
             "author": "goshkow",
-            "version": "1.9.7",
-            "source_url": "local://gaming-by-goshkow",
+            "version": "1.0.1",
+            "source_url": "bundled://unified-by-goshkow",
             "category": "gaming",
-            "tags": ["gaming", "cloudflare", "ubisoft", "arc-raiders"],
+            "tags": ["gaming", "social", "cloudflare", "ubisoft", "arc-raiders"],
             "dependencies": [],
             "conflicts": [],
-            "changelog": "Default gaming bundle included.",
+            "changelog": "Default unified bundle included.",
         }
 
-        gaming_bundle = self._ensure_default_gaming_bundle(default_mod_id)
+        default_bundle = self._ensure_default_bundled_mod(default_mod_id, default_mod_meta)
 
         mods_index_path = self.paths.cache_dir / "mods_index.json"
         mods_index = self.read_json(mods_index_path, default=[]) or []
@@ -159,7 +159,7 @@ class StorageManager:
         for item in mods_index:
             if not isinstance(item, dict):
                 continue
-            if item.get("id") == "sample-hosts-pack":
+            if item.get("id") in {"sample-hosts-pack", legacy_mod_id}:
                 continue
             filtered_index.append(item)
         if not any(isinstance(item, dict) and item.get("id") == default_mod_id for item in filtered_index):
@@ -171,35 +171,63 @@ class StorageManager:
         if not isinstance(installed, list):
             installed = []
         cleaned_installed: list[dict[str, Any]] = []
+        legacy_enabled = False
         for item in installed:
             if not isinstance(item, dict):
                 continue
             if item.get("id") == "sample-hosts-pack":
                 continue
+            if item.get("id") == legacy_mod_id:
+                legacy_enabled = bool(item.get("enabled"))
+                continue
             cleaned_installed.append(item)
-        if gaming_bundle is not None and not any(item.get("id") == default_mod_id for item in cleaned_installed):
-            cleaned_installed.append(gaming_bundle)
+        if default_bundle is not None:
+            existing_default = next((item for item in cleaned_installed if item.get("id") == default_mod_id), None)
+            if existing_default is None:
+                default_bundle["enabled"] = legacy_enabled
+                cleaned_installed.append(default_bundle)
+            else:
+                existing_default.update(
+                    {
+                        "path": default_bundle["path"],
+                        "version": default_bundle["version"],
+                        "name": default_bundle.get("name", ""),
+                        "author": default_bundle.get("author", ""),
+                        "description": default_bundle.get("description", ""),
+                        "source_url": default_bundle.get("source_url", ""),
+                        "source_type": default_bundle.get("source_type", "zapret_bundle"),
+                        "general_scripts": default_bundle.get("general_scripts", []),
+                    }
+                )
         self.write_json(installed_path, cleaned_installed)
 
         settings_data = self.read_json(settings_file, default={}) or {}
         if isinstance(settings_data, dict):
             enabled_mods = settings_data.get("enabled_mod_ids", [])
             if isinstance(enabled_mods, list):
-                settings_data["enabled_mod_ids"] = [m for m in enabled_mods if m != "sample-hosts-pack"]
+                normalized_enabled = [m for m in enabled_mods if m not in {"sample-hosts-pack", legacy_mod_id}]
+                if legacy_mod_id in enabled_mods and default_mod_id not in normalized_enabled:
+                    normalized_enabled.append(default_mod_id)
+                settings_data["enabled_mod_ids"] = normalized_enabled
                 self.write_json(settings_file, settings_data)
 
-    def _ensure_default_gaming_bundle(self, mod_id: str) -> dict[str, Any] | None:
+        legacy_dir = self.paths.mods_dir / legacy_mod_id
+        if legacy_dir.exists():
+            shutil.rmtree(legacy_dir, ignore_errors=True)
+
+    def _ensure_default_bundled_mod(self, mod_id: str, meta: dict[str, Any]) -> dict[str, Any] | None:
+        sample_root = self.paths.install_root / "sample_data" / "default_mods" / mod_id
         source_candidates = [
-            Path(r"C:\zapret-discord-youtube-1.9.7"),
+            sample_root,
             self.paths.runtime_dir / "zapret-discord-youtube",
+            Path(r"C:\zapret-discord-youtube-1.9.7"),
         ]
         source_root = next((path for path in source_candidates if self._looks_like_zapret_bundle(path)), None)
         if source_root is None:
             return None
 
         target_dir = self.paths.mods_dir / mod_id
-        target_dir.mkdir(parents=True, exist_ok=True)
-        self._copy_filtered_zapret_bundle(source_root, target_dir)
+        self._copy_filtered_zapret_bundle(source_root, target_dir, skip_base_duplicates=source_root != sample_root)
 
         general_scripts = sorted(
             script.name
@@ -208,9 +236,13 @@ class StorageManager:
         )
         return {
             "id": mod_id,
-            "version": "1.9.7",
+            "version": str(meta.get("version", "1.0.1")),
             "path": str(target_dir),
             "enabled": False,
+            "name": str(meta.get("name", "")),
+            "author": str(meta.get("author", "")),
+            "description": str(meta.get("description", "")),
+            "source_url": str(meta.get("source_url", "")),
             "source_type": "zapret_bundle",
             "general_scripts": general_scripts,
         }
@@ -218,12 +250,14 @@ class StorageManager:
     def _looks_like_zapret_bundle(self, path: Path) -> bool:
         return (path / "bin").is_dir() and (path / "lists").is_dir()
 
-    def _copy_filtered_zapret_bundle(self, source_root: Path, target_dir: Path) -> None:
-        base_general_names = {
-            item.name.lower()
-            for item in (self.paths.runtime_dir / "zapret-discord-youtube").glob("*.bat")
-            if not item.name.lower().startswith("service")
-        }
+    def _copy_filtered_zapret_bundle(self, source_root: Path, target_dir: Path, *, skip_base_duplicates: bool = True) -> None:
+        base_general_names = set()
+        if skip_base_duplicates:
+            base_general_names = {
+                item.name.lower()
+                for item in (self.paths.runtime_dir / "zapret-discord-youtube").glob("*.bat")
+                if not item.name.lower().startswith("service")
+            }
         if target_dir.exists():
             shutil.rmtree(target_dir, ignore_errors=True)
         target_dir.mkdir(parents=True, exist_ok=True)
