@@ -2,7 +2,7 @@
 
 **Zapret Hub** - Windows-приложение для **удобного управления** `zapret` и `tg-ws-proxy` из **одного интерфейса**.
 
-<img width="1082" height="669" alt="Главный интерфейс Zapret-Hub" src="https://github.com/user-attachments/assets/f369d833-3dae-4a3b-ae2e-40502af5713c" />
+<img width="1082" height="669" alt="Главный интерфейс Zapret-Hub" src="https://github.com/user-attachments/assets/7acbcb67-d79f-4cde-b66b-ed6dcbaf901d" />
 
 **Автор**: goshkow • [GitHub](https://github.com/goshkow/Zapret-Hub)
 
@@ -19,7 +19,7 @@
 
 **Для обычных пользователей** - без bat-файлов, поиска папок и правки конфигов в блокноте!
 
-<img width="1630" height="776" alt="Настройки и модификации" src="https://github.com/user-attachments/assets/770ef70d-dbe6-4ae8-b78d-f901319d64f8" />
+<img width="1630" height="776" alt="Настройки и модификации" src="https://github.com/user-attachments/assets/770ef70d-dbe6-4ae8-b78d-f901319d64f8" /> 
 
 ## ✨ Возможности
 
@@ -42,7 +42,8 @@
 🔹 Собирает runtime в `merged_runtime/`  
 🔹 Импорт general/списков из GitHub/ZIP  
 
-<img width="1743" height="661" alt="Расширенные настройки" src="https://github.com/user-attachments/assets/a1a2e222-5ca4-4de9-9d02-30acd866c141" />
+<img width="1743" height="661" alt="Модификации" src="https://github.com/user-attachments/assets/eecec5b1-37e8-4c6c-8121-3d74a455aaf6" />
+
 
 ## 💻 Требования
 
