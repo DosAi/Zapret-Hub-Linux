@@ -2,9 +2,10 @@
 
 **Zapret Hub** - Windows-приложение для **удобного управления** `zapret` и `tg-ws-proxy` из **одного интерфейса**. 
 
+**Для обычных пользователей** - без bat-файлов, поиска папок и правки конфигов в блокноте!
+
 <img width="1082" height="669" alt="Главный интерфейс Zapret-Hub" src="https://github.com/user-attachments/assets/7acbcb67-d79f-4cde-b66b-ed6dcbaf901d" />
 
-**Для обычных пользователей** - без bat-файлов, поиска папок и правки конфигов в блокноте!
 **Автор**: goshkow • [GitHub](https://github.com/goshkow/Zapret-Hub)
 
 ## 💡 Что это такое
