@@ -1,16 +1,29 @@
 import argparse
 import ctypes
 import hashlib
+import multiprocessing
 import sys
 from pathlib import Path
 
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
-from zapret_hub.bootstrap import bootstrap_application
-from zapret_hub.ui.main_window import MainWindow
 from zapret_hub.workers import run_tg_ws_proxy_worker
+
+
+class _BootstrapThread(QThread):
+    ready = Signal(object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            from zapret_hub.bootstrap import bootstrap_application
+
+            self.ready.emit(bootstrap_application())
+        except Exception as error:
+            self.failed.emit(str(error))
 
 
 def _set_windows_app_id() -> None:
@@ -109,59 +122,72 @@ def run(argv: list[str] | None = None) -> int:
         return elevate_result
 
     _set_windows_app_id()
+    multiprocessing.freeze_support()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Zapret Hub")
     app.setOrganizationName("ZapretHub")
     icon_path = _resolve_app_icon_path()
+    app_icon = QIcon(str(icon_path)) if icon_path is not None else None
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))
     instance_key = _single_instance_key()
     if _notify_existing_instance(instance_key):
         return 0
 
-    context = bootstrap_application()
-    settings = context.settings.get()
-    launch_hidden = bool(known.autostart_launch and settings.start_in_tray)
-    window = MainWindow(context, launch_hidden=launch_hidden)
-    server = _create_single_instance_server(instance_key)
-    if server is not None:
-        def _on_new_connection() -> None:
-            while server.hasPendingConnections():
-                client = server.nextPendingConnection()
-                if client is not None:
-                    client.readAll()
-                    client.disconnectFromServer()
-            window.restore_from_external_launch()
+    bootstrap_thread = _BootstrapThread()
+    app._bootstrap_thread = bootstrap_thread  # type: ignore[attr-defined]
 
-        server.newConnection.connect(_on_new_connection)
-        app._single_instance_server = server  # type: ignore[attr-defined]
-        app._single_instance_window = window  # type: ignore[attr-defined]
+    def _finish_bootstrap(context: object) -> None:
+        from zapret_hub.ui.main_window import MainWindow
+        from zapret_hub.services.backend_worker import BackendWorkerClient
 
-    def _cleanup_before_quit() -> None:
-        try:
-            context.processes.stop_all()
-        except Exception:
-            pass
+        settings = context.settings.get()
+        launch_hidden = bool(known.autostart_launch and settings.start_in_tray)
+        context.backend = BackendWorkerClient(app)
+        window = MainWindow(context, launch_hidden=launch_hidden)
+        server = _create_single_instance_server(instance_key)
         if server is not None:
+            def _on_new_connection() -> None:
+                while server.hasPendingConnections():
+                    client = server.nextPendingConnection()
+                    if client is not None:
+                        client.readAll()
+                        client.disconnectFromServer()
+                window.restore_from_external_launch()
+
+            server.newConnection.connect(_on_new_connection)
+            app._single_instance_server = server  # type: ignore[attr-defined]
+            app._single_instance_window = window  # type: ignore[attr-defined]
+
+        def _cleanup_before_quit() -> None:
             try:
-                server.close()
+                if context.backend is not None:
+                    context.backend.stop()
+                else:
+                    context.processes.stop_all()
             except Exception:
                 pass
+            if server is not None:
+                try:
+                    server.close()
+                except Exception:
+                    pass
 
-    app.aboutToQuit.connect(_cleanup_before_quit)
-    context.autostart.set_enabled(bool(settings.autostart_windows))
-    if known.autostart_launch:
-        if settings.auto_run_components:
-            context.processes.start_enabled_components()
-            window.refresh_all()
+        app.aboutToQuit.connect(_cleanup_before_quit)
+        context.autostart.set_enabled(bool(settings.autostart_windows))
+        if known.autostart_launch and settings.auto_run_components:
+            QTimer.singleShot(0, window.start_enabled_components_async)
         if launch_hidden:
             window.hide()
         else:
             window.show()
-    else:
-        window.show()
-        if settings.auto_run_components:
-            context.processes.start_enabled_components()
-            window.refresh_all()
+
+    def _fail_bootstrap(message: str) -> None:
+        QMessageBox.critical(None, "Zapret Hub", message or "Failed to prepare the application")
+        app.quit()
+
+    bootstrap_thread.ready.connect(_finish_bootstrap)
+    bootstrap_thread.failed.connect(_fail_bootstrap)
+    bootstrap_thread.start()
     return app.exec()

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import sys
+from typing import Any
 
 from zapret_hub.domain import AppPaths
 from zapret_hub.services.autostart import AutostartManager
@@ -31,6 +32,7 @@ class ApplicationContext:
     updates: UpdatesManager
     profiles: ProfilesManager
     files: FilesManager
+    backend: Any | None = None
 
 
 def bootstrap_application() -> ApplicationContext:
@@ -93,6 +95,7 @@ def bootstrap_application() -> ApplicationContext:
         updates=updates,
         profiles=profiles,
         files=files,
+        backend=None,
     )
 
 

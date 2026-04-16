@@ -30,11 +30,19 @@ class SettingsManager:
             settings.theme = self._detect_system_theme()
             changed = True
 
+        if "zapret_game_filter_mode" not in raw or raw.get("zapret_game_filter_mode") == "disabled":
+            settings.zapret_game_filter_mode = "auto"
+            changed = True
+
         if changed:
             self.storage.write_json(self._settings_path, asdict(settings))
         return settings
 
     def get(self) -> AppSettings:
+        return self._settings
+
+    def reload(self) -> AppSettings:
+        self._settings = self.load()
         return self._settings
 
     def update(self, **changes: object) -> AppSettings:

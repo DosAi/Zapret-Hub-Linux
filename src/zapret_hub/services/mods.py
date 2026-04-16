@@ -36,9 +36,9 @@ class ModsManager:
             self.storage.write_json(self._installed_path, [])
         self._cleanup_installed_duplicate_generals()
 
-    def fetch_index(self) -> list[ModIndexItem]:
+    def fetch_index(self, *, refresh_remote: bool = False) -> list[ModIndexItem]:
         settings = self.settings.get()
-        if settings.mods_index_url:
+        if refresh_remote and settings.mods_index_url:
             try:
                 with urlopen(settings.mods_index_url, timeout=10) as response:
                     payload = json.loads(response.read().decode("utf-8"))
@@ -181,7 +181,7 @@ class ModsManager:
         description: str = "",
         source_url: str = "",
     ) -> InstalledMod:
-        general_sources, list_sources, bin_sources = self._collect_import_candidates(staged_root)
+        general_sources, list_sources, bin_sources, utils_sources = self._collect_import_candidates(staged_root)
         general_scripts = self._dedupe_general_names(sorted(general_sources))
         if not general_scripts:
             raise ValueError("Не найдено ни одного general-файла. Нужны .bat/.cmd конфиги для Zapret.")
@@ -193,6 +193,7 @@ class ModsManager:
             general_sources={name: general_sources[name] for name in general_scripts if name in general_sources},
             list_sources=list_sources,
             bin_sources=bin_sources,
+            utils_sources=utils_sources,
         )
 
         installed = self.list_installed()
@@ -224,6 +225,7 @@ class ModsManager:
         general_sources: dict[str, Path],
         list_sources: dict[str, list[Path]],
         bin_sources: dict[str, Path],
+        utils_sources: dict[str, Path],
     ) -> None:
         if target_dir.exists():
             shutil.rmtree(target_dir, ignore_errors=True)
@@ -231,8 +233,10 @@ class ModsManager:
 
         bin_target = target_dir / "bin"
         lists_target = target_dir / "lists"
+        utils_target = target_dir / "utils"
         bin_target.mkdir(parents=True, exist_ok=True)
         lists_target.mkdir(parents=True, exist_ok=True)
+        utils_target.mkdir(parents=True, exist_ok=True)
 
         base_bin = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "bin"
         if base_bin.exists():
@@ -245,6 +249,15 @@ class ModsManager:
 
         for name, source in bin_sources.items():
             shutil.copy2(source, bin_target / name)
+
+        base_utils = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "utils"
+        if base_utils.exists():
+            for file_path in base_utils.glob("*"):
+                if file_path.is_file():
+                    shutil.copy2(file_path, utils_target / file_path.name)
+
+        for name, source in utils_sources.items():
+            shutil.copy2(source, utils_target / name)
 
         for name, sources in list_sources.items():
             merged: list[str] = []
@@ -275,12 +288,14 @@ class ModsManager:
 
         shutil.copy2(source, staged_root / source.name)
 
-    def _collect_import_candidates(self, root: Path) -> tuple[dict[str, Path], dict[str, list[Path]], dict[str, Path]]:
+    def _collect_import_candidates(self, root: Path) -> tuple[dict[str, Path], dict[str, list[Path]], dict[str, Path], dict[str, Path]]:
         general_sources: dict[str, Path] = {}
         list_sources: dict[str, list[Path]] = {}
         bin_sources: dict[str, Path] = {}
+        utils_sources: dict[str, Path] = {}
         base_names = self._base_general_names()
         allowed_bin_suffixes = {".exe", ".dll", ".bin", ".sys", ".dat"}
+        allowed_utils_suffixes = {".txt", ".ps1", ".enabled", ".json", ".cmd", ".bat"}
 
         for file_path in root.rglob("*"):
             if not file_path.is_file():
@@ -309,8 +324,13 @@ class ModsManager:
             if suffix in allowed_bin_suffixes or (suffix == ".cmd" and "bin" in {part.lower() for part in file_path.parts}):
                 if file_path.name not in bin_sources:
                     bin_sources[file_path.name] = file_path
+                continue
 
-        return general_sources, list_sources, bin_sources
+            if parent_lower == "utils" or lowered in {"targets.txt", "game_filter.enabled", "check_updates.enabled"}:
+                if suffix in allowed_utils_suffixes or "." not in file_path.name:
+                    utils_sources.setdefault(file_path.name, file_path)
+
+        return general_sources, list_sources, bin_sources, utils_sources
 
     def _looks_like_runtime_list(self, file_path: Path) -> bool:
         try:

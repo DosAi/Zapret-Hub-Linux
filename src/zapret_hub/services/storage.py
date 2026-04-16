@@ -57,7 +57,8 @@ class StorageManager:
                 merged["enabled"] = bool(current.get("enabled", merged["enabled"]))
                 merged["autostart"] = bool(current.get("autostart", merged["autostart"]))
             normalized_components.append(merged)
-        self.write_json(components_file, normalized_components)
+        if existing != normalized_components:
+            self.write_json(components_file, normalized_components)
 
         profiles_file = self.paths.data_dir / "profiles.json"
         if not profiles_file.exists():
@@ -95,6 +96,11 @@ class StorageManager:
                 "This folder contains editable user configuration files for Zapret Hub.\n",
                 encoding="utf-8",
             )
+
+        for filename in ("list-general-user.txt", "list-exclude-user.txt", "ipset-exclude-user.txt"):
+            path = self.paths.configs_dir / filename
+            if not path.exists():
+                path.write_text("", encoding="utf-8")
 
         self._ensure_icon_assets()
 
@@ -140,7 +146,7 @@ class StorageManager:
             "name": "Unified",
             "description": "Позволяет обойти блокировки самых популярных сервисов, включая игровые сервисы, социальные сети и другие платформы.",
             "author": "goshkow",
-            "version": "1.0.1",
+            "version": "1.2.0",
             "source_url": "bundled://unified-by-goshkow",
             "category": "gaming",
             "tags": ["gaming", "social", "cloudflare", "ubisoft", "arc-raiders"],
@@ -149,7 +155,24 @@ class StorageManager:
             "changelog": "Default unified bundle included.",
         }
 
-        default_bundle = self._ensure_default_bundled_mod(default_mod_id, default_mod_meta)
+        installed_path = self.paths.data_dir / "installed_mods.json"
+        installed = self.read_json(installed_path, default=[]) or []
+        if not isinstance(installed, list):
+            installed = []
+        existing_default = next(
+            (
+                item
+                for item in installed
+                if isinstance(item, dict) and item.get("id") == default_mod_id
+            ),
+            None,
+        )
+        desired_version = str(default_mod_meta.get("version", "1.2.0"))
+        default_bundle = self._ensure_default_bundled_mod(
+            default_mod_id,
+            default_mod_meta,
+            force_refresh=not isinstance(existing_default, dict) or str(existing_default.get("version", "")) != desired_version,
+        )
 
         mods_index_path = self.paths.cache_dir / "mods_index.json"
         mods_index = self.read_json(mods_index_path, default=[]) or []
@@ -164,12 +187,9 @@ class StorageManager:
             filtered_index.append(item)
         if not any(isinstance(item, dict) and item.get("id") == default_mod_id for item in filtered_index):
             filtered_index.append(default_mod_meta)
-        self.write_json(mods_index_path, filtered_index)
+        if mods_index != filtered_index:
+            self.write_json(mods_index_path, filtered_index)
 
-        installed_path = self.paths.data_dir / "installed_mods.json"
-        installed = self.read_json(installed_path, default=[]) or []
-        if not isinstance(installed, list):
-            installed = []
         cleaned_installed: list[dict[str, Any]] = []
         legacy_enabled = False
         for item in installed:
@@ -199,7 +219,8 @@ class StorageManager:
                         "general_scripts": default_bundle.get("general_scripts", []),
                     }
                 )
-        self.write_json(installed_path, cleaned_installed)
+        if installed != cleaned_installed:
+            self.write_json(installed_path, cleaned_installed)
 
         settings_data = self.read_json(settings_file, default={}) or {}
         if isinstance(settings_data, dict):
@@ -208,14 +229,21 @@ class StorageManager:
                 normalized_enabled = [m for m in enabled_mods if m not in {"sample-hosts-pack", legacy_mod_id}]
                 if legacy_mod_id in enabled_mods and default_mod_id not in normalized_enabled:
                     normalized_enabled.append(default_mod_id)
-                settings_data["enabled_mod_ids"] = normalized_enabled
-                self.write_json(settings_file, settings_data)
+                if normalized_enabled != enabled_mods:
+                    settings_data["enabled_mod_ids"] = normalized_enabled
+                    self.write_json(settings_file, settings_data)
 
         legacy_dir = self.paths.mods_dir / legacy_mod_id
         if legacy_dir.exists():
             shutil.rmtree(legacy_dir, ignore_errors=True)
 
-    def _ensure_default_bundled_mod(self, mod_id: str, meta: dict[str, Any]) -> dict[str, Any] | None:
+    def _ensure_default_bundled_mod(
+        self,
+        mod_id: str,
+        meta: dict[str, Any],
+        *,
+        force_refresh: bool = False,
+    ) -> dict[str, Any] | None:
         sample_root = self.paths.install_root / "sample_data" / "default_mods" / mod_id
         source_candidates = [
             sample_root,
@@ -227,7 +255,8 @@ class StorageManager:
             return None
 
         target_dir = self.paths.mods_dir / mod_id
-        self._copy_filtered_zapret_bundle(source_root, target_dir, skip_base_duplicates=source_root != sample_root)
+        if force_refresh or not self._looks_like_materialized_mod_bundle(target_dir):
+            self._copy_filtered_zapret_bundle(source_root, target_dir, skip_base_duplicates=source_root != sample_root)
 
         general_scripts = sorted(
             script.name
@@ -236,7 +265,7 @@ class StorageManager:
         )
         return {
             "id": mod_id,
-            "version": str(meta.get("version", "1.0.1")),
+            "version": str(meta.get("version", "1.2.0")),
             "path": str(target_dir),
             "enabled": False,
             "name": str(meta.get("name", "")),
@@ -246,6 +275,15 @@ class StorageManager:
             "source_type": "zapret_bundle",
             "general_scripts": general_scripts,
         }
+
+    def _looks_like_materialized_mod_bundle(self, path: Path) -> bool:
+        if not path.exists():
+            return False
+        has_general = any(
+            script.is_file() and not script.name.lower().startswith("service")
+            for script in path.glob("*.bat")
+        )
+        return has_general and (path / "bin").is_dir() and (path / "lists").is_dir()
 
     def _looks_like_zapret_bundle(self, path: Path) -> bool:
         return (path / "bin").is_dir() and (path / "lists").is_dir()
@@ -269,7 +307,7 @@ class StorageManager:
                 continue
             shutil.copy2(script, target_dir / script.name)
 
-        for folder in ("bin", "lists"):
+        for folder in ("bin", "lists", "utils"):
             (target_dir / folder).mkdir(parents=True, exist_ok=True)
 
         bin_suffixes = {".exe", ".dll", ".bin", ".sys", ".cmd"}
@@ -281,6 +319,18 @@ class StorageManager:
 
         for item in (source_root / "lists").glob("*.txt"):
             shutil.copy2(item, target_dir / "lists" / item.name)
+
+        base_utils = self.paths.runtime_dir / "zapret-discord-youtube" / "utils"
+        if base_utils.exists():
+            for item in base_utils.glob("*"):
+                if item.is_file():
+                    shutil.copy2(item, target_dir / "utils" / item.name)
+
+        source_utils = source_root / "utils"
+        if source_utils.exists():
+            for item in source_utils.glob("*"):
+                if item.is_file():
+                    shutil.copy2(item, target_dir / "utils" / item.name)
 
     def _ensure_icon_assets(self) -> None:
         icons_dir = self.paths.ui_assets_dir / "icons"
@@ -317,6 +367,8 @@ class StorageManager:
         }
         for filename, content in icon_map.items():
             icon_path = icons_dir / filename
+            if icon_path.exists():
+                continue
             icon_path.write_text(content, encoding="utf-8")
 
     def read_json(self, path: Path, default: Any | None = None) -> Any:

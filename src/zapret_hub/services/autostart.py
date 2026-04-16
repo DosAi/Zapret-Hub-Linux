@@ -38,8 +38,8 @@ class AutostartManager:
         self._remove_legacy_run_entries()
         self._delete_task()
         if enabled:
-            if not self._create_task(command):
-                self._set_run_key(command)
+            self._create_task(command)
+            self._set_run_key(command)
         else:
             self._remove_run_key()
         self.logging.log("info", "Windows autostart changed", enabled=enabled, command=command if enabled else "")
@@ -48,7 +48,7 @@ class AutostartManager:
         executable = Path(sys.executable)
         if executable.suffix.lower() == ".exe" and executable.name.lower() != "python.exe":
             return f'"{executable}" --autostart-launch'
-        main_module = Path.cwd() / "src" / "zapret_hub" / "main.py"
+        main_module = Path(__file__).resolve().parents[1] / "main.py"
         return f'"{executable}" "{main_module}" --autostart-launch'
 
     def _task_exists(self) -> bool:

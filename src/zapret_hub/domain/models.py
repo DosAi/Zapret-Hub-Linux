@@ -27,9 +27,10 @@ class AppSettings:
     tg_proxy_secret: str = ""
     tg_proxy_link_prompt_signature: str = ""
     selected_zapret_general: str = ""
+    favorite_zapret_generals: list[str] = field(default_factory=list)
     general_autotest_done: bool = False
     zapret_ipset_mode: str = "loaded"
-    zapret_game_filter_mode: str = "disabled"
+    zapret_game_filter_mode: str = "auto"
 
 
 @dataclass(slots=True)

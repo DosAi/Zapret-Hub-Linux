@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import re
 import secrets
@@ -20,6 +21,41 @@ from zapret_hub.domain import ComponentDefinition, ComponentState
 from zapret_hub.services.logging_service import LoggingManager
 from zapret_hub.services.settings import SettingsManager
 from zapret_hub.services.storage import StorageManager
+
+_VPN_PROCESS_PATTERNS = (
+    "nekobox",
+    "nekoray",
+    "v2rayn",
+    "xray",
+    "xrayw",
+    "sing-box",
+    "singbox",
+    "clash",
+    "mihomo",
+    "hiddify",
+    "outline",
+    "wireguard",
+    "openvpn",
+    "amnezia",
+    "warp",
+)
+
+_VPN_ADAPTER_PATTERNS = (
+    "wintun",
+    "wireguard",
+    "openvpn",
+    "tap-",
+    "tap_windows",
+    "vpn",
+    "v2ray",
+    "xray",
+    "nekobox",
+    "nekoray",
+    "sing-box",
+    "clash",
+    "mihomo",
+    "tun",
+)
 
 
 class _WindowsJob:
@@ -97,6 +133,8 @@ class ProcessManager:
         self._processes: dict[str, subprocess.Popen[Any]] = {}
         self._states: dict[str, ComponentState] = {}
         self._current_zapret_runtime: Path | None = None
+        self._state_cache: list[ComponentState] = []
+        self._state_cache_at = 0.0
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
         self._creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0
         self._startupinfo: subprocess.STARTUPINFO | None = None
@@ -155,6 +193,30 @@ class ProcessManager:
         )
 
     def list_states(self) -> list[ComponentState]:
+        if self._state_cache and (time.time() - self._state_cache_at) < 0.7:
+            return [
+                ComponentState(
+                    component_id=state.component_id,
+                    status=state.status,
+                    pid=state.pid,
+                    last_error=state.last_error,
+                )
+                for state in self._state_cache
+            ]
+        states = self._compute_states()
+        self._state_cache = [
+            ComponentState(
+                component_id=state.component_id,
+                status=state.status,
+                pid=state.pid,
+                last_error=state.last_error,
+            )
+            for state in states
+        ]
+        self._state_cache_at = time.time()
+        return states
+
+    def _compute_states(self) -> list[ComponentState]:
         states: list[ComponentState] = []
         settings = self.settings.get()
         for component in self.list_components():
@@ -182,12 +244,20 @@ class ProcessManager:
             states.append(state)
         return states
 
+    def _invalidate_state_cache(self) -> None:
+        self._state_cache = []
+        self._state_cache_at = 0.0
+
     def start_component(self, component_id: str) -> ComponentState:
         component = next(item for item in self.list_components() if item.id == component_id)
         if component.id == "zapret":
-            return self._start_zapret(component_id)
+            state = self._start_zapret(component_id)
+            self._invalidate_state_cache()
+            return state
         if component.id == "tg-ws-proxy":
-            return self._start_tg_ws_proxy(component_id)
+            state = self._start_tg_ws_proxy(component_id)
+            self._invalidate_state_cache()
+            return state
 
         current = self._processes.get(component_id)
         if current and current.poll() is None:
@@ -205,6 +275,7 @@ class ProcessManager:
         self._processes[component_id] = process
         self._states[component_id] = state
         self.logging.log("info", "Component started", component_id=component_id, pid=process.pid)
+        self._invalidate_state_cache()
         return state
 
     def stop_component(self, component_id: str) -> ComponentState:
@@ -219,6 +290,7 @@ class ProcessManager:
                 state.last_error = "Failed to stop winws.exe"
             self._states[component_id] = state
             self.logging.log("info", "Zapret stopped")
+            self._invalidate_state_cache()
             return state
 
         if component_id == "tg-ws-proxy":
@@ -236,6 +308,7 @@ class ProcessManager:
             state.pid = None
             self._states[component_id] = state
             self.logging.log("info", "TG WS Proxy stopped")
+            self._invalidate_state_cache()
             return state
 
         process = self._processes.get(component_id)
@@ -249,6 +322,7 @@ class ProcessManager:
         state.pid = None
         self._states[component_id] = state
         self.logging.log("info", "Component stopped", component_id=component_id)
+        self._invalidate_state_cache()
         return state
 
     def start_enabled_components(self) -> list[ComponentState]:
@@ -282,6 +356,7 @@ class ProcessManager:
         if not target.enabled:
             self.stop_component(component_id)
         self.logging.log("info", "Component enabled state changed", component_id=component_id, enabled=target.enabled)
+        self._invalidate_state_cache()
         return target
 
     def toggle_component_autostart(self, component_id: str) -> ComponentDefinition:
@@ -318,6 +393,7 @@ class ProcessManager:
             bin_dir = active_root / "bin"
             lists_dir = active_root / "lists"
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
+            winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
             if not winws_command:
                 state = ComponentState(
                     component_id=component_id,
@@ -437,6 +513,130 @@ class ProcessManager:
             return [str(exe_path), *args]
         return []
 
+    def _apply_vpn_priority_to_command(self, command: list[str], *, lists_dir: Path) -> list[str]:
+        if not command or not sys.platform.startswith("win"):
+            return command
+        try:
+            vpn_data = self._detect_vpn_priority_context()
+        except Exception as error:
+            self.logging.log("warning", "Failed to detect VPN priority context", error=str(error))
+            return command
+
+        adapter_indexes = [int(item) for item in vpn_data.get("adapter_indexes", []) if str(item).isdigit()]
+        remote_ips = [str(item).strip() for item in vpn_data.get("remote_ips", []) if str(item).strip()]
+        if not adapter_indexes and not remote_ips:
+            return command
+
+        updated = list(command)
+        if adapter_indexes:
+            raw_filter = " and ".join(f"(ifIdx != {index} and subIfIdx != {index})" for index in sorted(set(adapter_indexes)))
+            updated.append(f"--wf-raw-part={raw_filter}")
+
+        if remote_ips:
+            vpn_exclude_path = lists_dir / "ipset-vpn-exclude.txt"
+            vpn_exclude_path.write_text("\n".join(sorted(set(remote_ips))) + "\n", encoding="utf-8")
+            updated.append(f"--ipset-exclude={vpn_exclude_path}")
+
+        self.logging.log(
+            "info",
+            "Applied VPN priority safeguards to zapret",
+            adapter_indexes=sorted(set(adapter_indexes)),
+            remote_ips=sorted(set(remote_ips)),
+        )
+        return updated
+
+    def _detect_vpn_priority_context(self) -> dict[str, list[str]]:
+        script = r"""
+$patterns = @('nekobox','nekoray','v2rayn','xray','xrayw','sing-box','singbox','clash','mihomo','hiddify','outline','wireguard','openvpn','amnezia','warp')
+$adapterPatterns = @('wintun','wireguard','openvpn','tap-','tap_windows','vpn','v2ray','xray','nekobox','nekoray','sing-box','clash','mihomo','tun')
+
+$procById = @{}
+Get-CimInstance Win32_Process | ForEach-Object {
+  $name = ([string]$_.Name).ToLowerInvariant()
+  $path = ([string]$_.ExecutablePath).ToLowerInvariant()
+  $cmd = ([string]$_.CommandLine).ToLowerInvariant()
+  foreach ($pattern in $patterns) {
+    if ($name.Contains($pattern) -or $path.Contains($pattern) -or $cmd.Contains($pattern)) {
+      $procById[[int]$_.ProcessId] = $true
+      break
+    }
+  }
+}
+
+$remoteIps = New-Object System.Collections.Generic.HashSet[string]
+Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | ForEach-Object {
+  $pid = [int]$_.OwningProcess
+  if (-not $procById.ContainsKey($pid)) { return }
+  $ip = ([string]$_.RemoteAddress).Trim()
+  if (-not $ip) { return }
+  if ($ip -in @('127.0.0.1','0.0.0.0','::','::1')) { return }
+  [void]$remoteIps.Add($ip)
+}
+
+$adapterIndexes = New-Object System.Collections.Generic.HashSet[int]
+Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
+  $joined = (([string]$_.Name) + ' ' + ([string]$_.InterfaceDescription)).ToLowerInvariant()
+  foreach ($pattern in $adapterPatterns) {
+    if ($joined.Contains($pattern)) {
+      [void]$adapterIndexes.Add([int]$_.ifIndex)
+      break
+    }
+  }
+}
+
+[pscustomobject]@{
+  adapter_indexes = @($adapterIndexes | Sort-Object)
+  remote_ips = @($remoteIps | Sort-Object)
+} | ConvertTo-Json -Compress
+"""
+        proc = self._run_powershell_json(script)
+        if not proc:
+            return {"adapter_indexes": [], "remote_ips": []}
+        try:
+            payload = json.loads(proc)
+        except json.JSONDecodeError:
+            return {"adapter_indexes": [], "remote_ips": []}
+        adapter_indexes = payload.get("adapter_indexes", []) if isinstance(payload, dict) else []
+        remote_ips = payload.get("remote_ips", []) if isinstance(payload, dict) else []
+        if not isinstance(adapter_indexes, list):
+            adapter_indexes = [adapter_indexes] if adapter_indexes not in (None, "") else []
+        if not isinstance(remote_ips, list):
+            remote_ips = [remote_ips] if remote_ips not in (None, "") else []
+        return {
+            "adapter_indexes": [str(item) for item in adapter_indexes if str(item).strip()],
+            "remote_ips": [str(item) for item in remote_ips if self._looks_like_ip_address(str(item))],
+        }
+
+    def _run_powershell_json(self, script: str) -> str:
+        startup = self._startupinfo
+        proc = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=self._creationflags,
+            startupinfo=startup,
+        )
+        if proc.returncode != 0:
+            self.logging.log("warning", "PowerShell helper failed", stderr=(proc.stderr or "").strip()[-1000:])
+            return ""
+        return (proc.stdout or "").strip()
+
+    def _looks_like_ip_address(self, value: str) -> bool:
+        candidate = value.strip()
+        if not candidate:
+            return False
+        if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", candidate):
+            return True
+        return ":" in candidate and re.fullmatch(r"[0-9a-fA-F:]+", candidate) is not None
+
     def _read_batch_logical_lines(self, script_path: Path) -> list[str]:
         raw_lines = script_path.read_text(encoding="utf-8", errors="ignore").splitlines()
         logical_lines: list[str] = []
@@ -482,6 +682,8 @@ class ProcessManager:
 
     def _get_game_filter_values(self, runtime_root: Path) -> tuple[str, str, str]:
         mode_from_settings = (self.settings.get().zapret_game_filter_mode or "").strip().lower()
+        if mode_from_settings == "auto":
+            mode_from_settings = ""
         if mode_from_settings == "all":
             return ("1024-65535", "1024-65535", "1024-65535")
         if mode_from_settings == "tcp":
@@ -647,7 +849,14 @@ class ProcessManager:
         shutil.copytree(selected_bundle_root, active_root, dirs_exist_ok=True)
 
         lists_target = active_root / "lists"
+        utils_target = active_root / "utils"
         lists_target.mkdir(parents=True, exist_ok=True)
+        utils_target.mkdir(parents=True, exist_ok=True)
+        base_utils = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "utils"
+        if base_utils.exists():
+            for item in base_utils.glob("*"):
+                if item.is_file() and not (utils_target / item.name).exists():
+                    shutil.copy2(item, utils_target / item.name)
         layered_bundles = self._get_zapret_bundles(enabled_only=True)
         for bundle in layered_bundles:
             bundle_id = bundle["id"]
@@ -729,6 +938,9 @@ class ProcessManager:
         original_selected = self.settings.get().selected_zapret_general
         original_running = self._is_image_running("winws.exe")
         results: list[dict[str, str]] = []
+        targets = self._load_standard_test_targets()
+        per_general_steps = max(2, len(targets) + 1)
+        total_steps = len(options) * per_general_steps
 
         try:
             self.stop_all()
@@ -736,9 +948,27 @@ class ProcessManager:
                 if stop_callback is not None and stop_callback():
                     break
                 self.settings.update(selected_zapret_general=option["id"])
+                base_step = (index - 1) * per_general_steps
                 if progress_callback is not None:
-                    progress_callback(index, len(options), option["name"])
-                outcome = self._run_general_connectivity_check(option["id"], stop_callback=stop_callback)
+                    progress_callback(base_step + 1, total_steps, option["name"])
+                outcome = self._run_general_connectivity_check(
+                    option["id"],
+                    stop_callback=stop_callback,
+                    targets=targets,
+                    progress_callback=(
+                        lambda completed, total, target_name, *, _base=base_step, _steps=per_general_steps, _option=option: (
+                            progress_callback(
+                                min(_base + 1 + completed, _base + _steps),
+                                total_steps,
+                                f"{_option['name']} - {target_name} ({completed}/{total})",
+                            )
+                            if progress_callback is not None
+                            else None
+                        )
+                    ),
+                )
+                if progress_callback is not None:
+                    progress_callback(base_step + per_general_steps, total_steps, option["name"])
                 results.append(
                     {
                         "id": option["id"],
@@ -765,7 +995,13 @@ class ProcessManager:
             self._reset_active_runtime_dir(current_root)
         self._current_zapret_runtime = None
 
-    def _run_general_connectivity_check(self, general_id: str, stop_callback: callable | None = None) -> dict[str, object]:
+    def _run_general_connectivity_check(
+        self,
+        general_id: str,
+        stop_callback: callable | None = None,
+        targets: list[dict[str, str]] | None = None,
+        progress_callback: callable | None = None,
+    ) -> dict[str, object]:
         self.settings.update(selected_zapret_general=general_id)
         state = self._start_zapret("zapret")
         if state.status != "running":
@@ -776,7 +1012,7 @@ class ProcessManager:
                 "total_targets": 0,
             }
 
-        targets = self._load_standard_test_targets()
+        targets = list(targets or self._load_standard_test_targets())
         if not targets:
             return {
                 "status": "ok",
@@ -795,6 +1031,7 @@ class ProcessManager:
 
         passed_targets = 0
         failed_names: list[str] = []
+        completed_targets = 0
         with ThreadPoolExecutor(max_workers=min(8, max(1, len(targets)))) as executor:
             future_map = {executor.submit(self._target_is_reachable, target): target for target in targets}
             for future in as_completed(future_map):
@@ -815,6 +1052,9 @@ class ProcessManager:
                     passed_targets += 1
                 else:
                     failed_names.append(str(target["name"]))
+                completed_targets += 1
+                if progress_callback is not None:
+                    progress_callback(completed_targets, len(targets), str(target.get("name", "")))
 
         if failed_names:
             return {
@@ -1023,14 +1263,21 @@ class ProcessManager:
 
     def _ensure_zapret_user_lists(self, lists_dir: Path) -> None:
         defaults = {
-            "ipset-exclude-user.txt": "203.0.113.113/32\n",
-            "list-general-user.txt": "domain.example.abc\n",
-            "list-exclude-user.txt": "domain.example.abc\n",
+            "ipset-exclude-user.txt": "",
+            "list-general-user.txt": "",
+            "list-exclude-user.txt": "",
         }
         for filename, content in defaults.items():
-            path = lists_dir / filename
-            if not path.exists():
-                path.write_text(content, encoding="utf-8")
+            source = self.storage.paths.configs_dir / filename
+            target = lists_dir / filename
+            if source.exists():
+                try:
+                    target.write_text(source.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+                    continue
+                except Exception:
+                    pass
+            if not target.exists():
+                target.write_text(content, encoding="utf-8")
 
     def _is_image_running(self, image_name: str) -> bool:
         proc = self._run_quiet(["tasklist", "/FI", f"IMAGENAME eq {image_name}"])
