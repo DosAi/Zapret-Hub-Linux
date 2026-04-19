@@ -7,7 +7,13 @@
 
 <div align="center">
 
-[Версия для Mac • GitHub](https://github.com/goshkow/Zapret-Hub-Mac)
+**Это - версия для Windows**
+
+<p align="center">
+  <a href="https://github.com/goshkow/Zapret-Hub-Mac/">
+    <img src="https://img.shields.io/badge/Версия%20для%20MacOS:-GitHub-6f42c1?style=for-the-badge&logo=apple&logoColor=white" alt="Скачать последнюю версию">
+  </a>
+</p>
 
 # 🚀 [Zapret Hub](https://github.com/goshkow/Zapret-Hub)
 
