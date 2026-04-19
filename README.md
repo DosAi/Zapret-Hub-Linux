@@ -1,4 +1,13 @@
+> [!WARNING]
+> # ТЕПЕРЬ И НА [MAC](https://github.com/goshkow/Zapret-Hub-Mac)
+>
+> Портировал приложение на macOS со встроенным ByeDPI / SpoofDPI и TG WS Proxy.
+>
+> Попробуйте первую бету уже тут - [GitHub](https://github.com/goshkow/Zapret-Hub-Mac)
+
 <div align="center">
+
+[Версия для Mac • GitHub](https://github.com/goshkow/Zapret-Hub-Mac)
 
 # 🚀 [Zapret Hub](https://github.com/goshkow/Zapret-Hub)
 
