@@ -21,6 +21,13 @@
   <img alt="Zapret Hub banner" src="assets/banner-dark.png">
 </picture>
 
+<p align="center">
+  <a href="https://github.com/goshkow/Zapret-Hub/releases/latest">
+    <img src="https://img.shields.io/badge/Скачать%20последнюю%20версию-Zapret%20Hub-6f42c1?style=for-the-badge&logo=windows&logoColor=white" alt="Скачать последнюю версию">
+  </a>
+</p>
+
+
 **Автор**: goshkow • [GitHub](https://github.com/goshkow/Zapret-Hub)
 
 Что-то не работает? • [Исправить](#не-работает) • [Создать issue](https://github.com/goshkow/Zapret-Hub/issues)
