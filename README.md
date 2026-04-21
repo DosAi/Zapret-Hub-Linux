@@ -1,10 +1,3 @@
-> [!WARNING]
-> # ТЕПЕРЬ И НА [MAC](https://github.com/goshkow/Zapret-Hub-Mac)
->
-> Портировал приложение на macOS со встроенным ByeDPI / SpoofDPI и TG WS Proxy.
->
-> Попробуйте первую бету уже тут - [GitHub](https://github.com/goshkow/Zapret-Hub-Mac)
-
 <div align="center">
 
 **Это - версия для Windows**
@@ -29,10 +22,15 @@
 
 <p align="center">
   <a href="https://github.com/goshkow/Zapret-Hub/releases/latest">
-    <img src="https://img.shields.io/badge/Скачать%20последнюю%20версию-Zapret%20Hub-6f42c1?style=for-the-badge&logo=windows&logoColor=white" alt="Скачать последнюю версию">
+    <img src="https://img.shields.io/badge/-Скачать%20Zapret%20Hub-6f42c1?style=for-the-badge&logo=windows&logoColor=white" alt="Скачать последнюю версию">
   </a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/goshkow/Zapret-Hub/blob/main/donations.md#-%D0%BF%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C-%D0%BF%D1%80%D0%BE%D0%B5%D0%BA%D1%82">
+    <img src="https://img.shields.io/badge/%20Отправить%20Пожертвование-💫-6f42c1?style=for-the-badge" alt="Отправить пожертвование">
+  </a>
+</p>
 
 **Автор**: goshkow • [GitHub](https://github.com/goshkow/Zapret-Hub)
 
