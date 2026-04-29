@@ -325,15 +325,29 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         return result
 
     if action == "reset_user_overrides":
+        collection_id = str(payload.get("collection_id", "")).strip()
         context.files.reset_user_overrides()
         _restart_zapret_if_running(context)
+        values = context.files.read_collection(collection_id) if collection_id else []
         result = _snapshot(context)
         result["files_payload"] = {
             "mode_index": 1,
-            "collection_id": str(payload.get("collection_id", "")).strip(),
-            "collection_values": [],
+            "collection_id": collection_id,
+            "collection_values": list(values),
         }
         return result
+
+    if action == "load_files_payload":
+        mode_index = int(payload.get("mode_index", 0) or 0)
+        collection_id = str(payload.get("collection_id", "")).strip()
+        return {
+            "files_payload": {
+                "mode_index": mode_index,
+                "collection_id": collection_id,
+                "records": context.files.list_files() if mode_index == 2 else None,
+                "collection_values": context.files.read_collection(collection_id) if mode_index == 1 else None,
+            }
+        }
 
     if action == "write_file_text":
         full_path = str(payload.get("path", "")).strip()

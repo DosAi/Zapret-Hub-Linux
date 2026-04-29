@@ -79,23 +79,52 @@ class FilesManager:
         self._materialize_user_collection(kind)
 
     def add_collection_values(self, kind: str, raw_text: str) -> list[str]:
-        current = self.read_collection(kind)
         incoming = self.normalize_collection_values(kind, self._split_raw_values(kind, raw_text))
-        seen = set(current)
+        if not incoming:
+            return self.read_collection(kind)
+        base_set = set(self._read_base_collection_values(kind))
+        overrides = self._read_overrides()
+        current_override = overrides.setdefault(kind, {"added": [], "removed": []})
+        added = self.normalize_collection_values(kind, list(current_override.get("added", []) or []))
+        removed = self.normalize_collection_values(kind, list(current_override.get("removed", []) or []))
+        added_seen = set(added)
+        removed_seen = set(removed)
         for value in incoming:
-            if value in seen:
-                continue
-            seen.add(value)
-            current.append(value)
-        self.write_collection(kind, current)
-        return current
+            if value in removed_seen:
+                removed_seen.remove(value)
+                removed = [item for item in removed if item != value]
+            if value not in base_set and value not in added_seen:
+                added_seen.add(value)
+                added.append(value)
+        current_override["added"] = added
+        current_override["removed"] = removed
+        self._write_overrides(overrides)
+        self._materialize_user_collection(kind)
+        self._invalidate_collection_cache(kind)
+        return self.read_collection(kind)
 
     def remove_collection_value(self, kind: str, value: str) -> list[str]:
         if self.is_managed_collection_value(kind, value):
             return self.read_collection(kind)
-        current = [item for item in self.read_collection(kind) if item != value]
-        self.write_collection(kind, current)
-        return current
+        normalized = self.normalize_collection_values(kind, [value])
+        if not normalized:
+            return self.read_collection(kind)
+        item = normalized[0]
+        base_set = set(self._read_base_collection_values(kind))
+        overrides = self._read_overrides()
+        current_override = overrides.setdefault(kind, {"added": [], "removed": []})
+        added = self.normalize_collection_values(kind, list(current_override.get("added", []) or []))
+        removed = self.normalize_collection_values(kind, list(current_override.get("removed", []) or []))
+        if item in added:
+            added = [entry for entry in added if entry != item]
+        elif item in base_set and item not in removed:
+            removed.append(item)
+        current_override["added"] = added
+        current_override["removed"] = removed
+        self._write_overrides(overrides)
+        self._materialize_user_collection(kind)
+        self._invalidate_collection_cache(kind)
+        return self.read_collection(kind)
 
     def reset_user_overrides(self) -> None:
         self._collection_cache.clear()
@@ -187,10 +216,9 @@ class FilesManager:
         return sources
 
     def _read_base_collection_values(self, kind: str) -> list[str]:
-        if self._latest_merged_lists_dir() is None:
-            layered = self._read_layered_base_without_merged_runtime(kind)
-            if layered is not None:
-                return layered
+        layered = self._read_layered_base_without_merged_runtime(kind)
+        if layered is not None:
+            return layered
         values: list[str] = []
         seen: set[str] = set()
         for path in self._collection_source_paths(kind):
@@ -223,7 +251,7 @@ class FilesManager:
         if runtime_lists.exists():
             layers.append(runtime_lists)
         mod_layers = list(self._enabled_mod_list_dirs())
-        layers.extend(reversed(mod_layers))
+        layers.extend(mod_layers)
         current_values: list[str] = []
         opposite_values: list[str] = []
         current_seen: set[str] = set()
@@ -299,7 +327,7 @@ class FilesManager:
 
     def _collection_signature(self, kind: str) -> tuple[tuple[str, int, int], ...]:
         signature: list[tuple[str, int, int]] = []
-        for path in self._collection_source_paths(kind):
+        for path in self._base_collection_source_paths(kind):
             try:
                 stat = path.stat()
                 signature.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
@@ -341,6 +369,9 @@ class FilesManager:
         merged_root = self.storage.paths.merged_runtime_dir
         if not merged_root.exists():
             return None
+        visible = merged_root / "zapret" / "lists"
+        if visible.exists():
+            return visible
         candidates = [
             path / "lists"
             for path in merged_root.glob("active_zapret*")
@@ -353,6 +384,36 @@ class FilesManager:
         if materialized.exists():
             return materialized
         return None
+
+    def _base_collection_source_paths(self, kind: str) -> list[Path]:
+        paths: list[Path] = [self.storage.paths.data_dir / "installed_mods.json"]
+        runtime_lists = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "lists"
+        runtime_path = self._merged_collection_path(kind, runtime_lists)
+        if runtime_path.exists():
+            paths.append(runtime_path)
+        opposite_kind = {
+            "domains": "exclude_domains",
+            "exclude_domains": "domains",
+            "all_ips": "ips",
+            "ips": "all_ips",
+        }.get(kind)
+        if opposite_kind is not None:
+            opposite_runtime_path = self._merged_collection_path(opposite_kind, runtime_lists)
+            if opposite_runtime_path.exists():
+                paths.append(opposite_runtime_path)
+        for mod_lists in self._enabled_mod_list_dirs():
+            mod_path = self._merged_collection_path(kind, mod_lists)
+            if mod_path.exists():
+                paths.append(mod_path)
+            if opposite_kind is not None:
+                opposite_mod_path = self._merged_collection_path(opposite_kind, mod_lists)
+                if opposite_mod_path.exists():
+                    paths.append(opposite_mod_path)
+        overrides_path = self._overrides_path
+        paths.append(overrides_path)
+        user_path = self._collection_path(kind)
+        paths.append(user_path)
+        return paths
 
     def rebuild_materialized_collections(self) -> None:
         materialized_root = self.storage.paths.merged_runtime_dir / "_materialized_lists"
