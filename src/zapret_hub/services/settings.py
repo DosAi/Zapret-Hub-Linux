@@ -19,6 +19,8 @@ class SettingsManager:
 
     def load(self) -> AppSettings:
         raw = self.storage.read_json(self._settings_path, default={}) or {}
+        allowed = {field.name for field in AppSettings.__dataclass_fields__.values()}
+        raw = {key: value for key, value in raw.items() if key in allowed}
         settings = AppSettings(**raw)
         changed = False
 

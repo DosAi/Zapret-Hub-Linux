@@ -146,7 +146,7 @@ class StorageManager:
             "name": "Unified",
             "description": "РџРѕР·РІРѕР»СЏРµС‚ РѕР±РѕР№С‚Рё Р±Р»РѕРєРёСЂРѕРІРєРё СЃР°РјС‹С… РїРѕРїСѓР»СЏСЂРЅС‹С… СЃРµСЂРІРёСЃРѕРІ, РІРєР»СЋС‡Р°СЏ РёРіСЂРѕРІС‹Рµ СЃРµСЂРІРёСЃС‹, СЃРѕС†РёР°Р»СЊРЅС‹Рµ СЃРµС‚Рё Рё РґСЂСѓРіРёРµ РїР»Р°С‚С„РѕСЂРјС‹.",
             "author": "goshkow",
-                    "version": "1.4.2",
+                    "version": "1.4.3",
             "source_url": "bundled://unified-by-goshkow",
             "category": "gaming",
             "tags": ["gaming", "social", "cloudflare", "ubisoft", "arc-raiders"],
@@ -167,7 +167,7 @@ class StorageManager:
             ),
             None,
         )
-        desired_version = str(default_mod_meta.get("version", "1.4.2"))
+        desired_version = str(default_mod_meta.get("version", "1.4.3"))
         default_bundle = self._ensure_default_bundled_mod(
             default_mod_id,
             default_mod_meta,
@@ -265,7 +265,7 @@ class StorageManager:
         )
         return {
             "id": mod_id,
-                "version": str(meta.get("version", "1.4.2")),
+                "version": str(meta.get("version", "1.4.3")),
             "path": str(target_dir),
             "enabled": False,
             "name": str(meta.get("name", "")),
@@ -316,21 +316,25 @@ class StorageManager:
             if not item.is_file():
                 continue
             if item.suffix.lower() in bin_suffixes:
+                (target_dir / "bin").mkdir(parents=True, exist_ok=True)
                 shutil.copy2(item, target_dir / "bin" / item.name)
 
         for item in (source_root / "lists").glob("*.txt"):
+            (target_dir / "lists").mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, target_dir / "lists" / item.name)
 
         base_utils = self.paths.runtime_dir / "zapret-discord-youtube" / "utils"
         if base_utils.exists():
             for item in base_utils.glob("*"):
                 if item.is_file():
+                    (target_dir / "utils").mkdir(parents=True, exist_ok=True)
                     shutil.copy2(item, target_dir / "utils" / item.name)
 
         source_utils = source_root / "utils"
         if source_utils.exists():
             for item in source_utils.glob("*"):
                 if item.is_file():
+                    (target_dir / "utils").mkdir(parents=True, exist_ok=True)
                     shutil.copy2(item, target_dir / "utils" / item.name)
 
     def _ensure_icon_assets(self) -> None:

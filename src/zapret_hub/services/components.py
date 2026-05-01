@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from zapret_hub import __version__
@@ -434,6 +435,10 @@ class ProcessManager:
                     break
                 time.sleep(0.25)
             if running:
+                try:
+                    (active_root / ".driver_path_in_use").write_text(datetime.utcnow().isoformat(), encoding="utf-8")
+                except Exception:
+                    pass
                 state = ComponentState(component_id=component_id, status="running", pid=process.pid)
                 self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0])
             else:
@@ -777,6 +782,13 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             tg_host=settings.tg_proxy_host,
             tg_port=int(settings.tg_proxy_port),
             tg_secret=secret,
+            tg_dc_ip=self._parse_tg_dc_ip_settings(settings.tg_proxy_dc_ip),
+            tg_cfproxy_enabled=bool(settings.tg_proxy_cfproxy_enabled),
+            tg_cfproxy_priority=bool(settings.tg_proxy_cfproxy_priority),
+            tg_cfproxy_domain=settings.tg_proxy_cfproxy_domain,
+            tg_fake_tls_domain=settings.tg_proxy_fake_tls_domain,
+            tg_buf_kb=int(settings.tg_proxy_buf_kb or 256),
+            tg_pool_size=int(settings.tg_proxy_pool_size or 4),
         )
         process = subprocess.Popen(
             command,
@@ -816,7 +828,12 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._processes[component_id] = process
         self._states[component_id] = state
         self.logging.log("info", "TG WS Proxy worker started", pid=process.pid)
-        signature = f"{settings.tg_proxy_host}:{int(settings.tg_proxy_port)}:{secret}"
+        signature = (
+            f"{settings.tg_proxy_host}:{int(settings.tg_proxy_port)}:{secret}:"
+            f"{settings.tg_proxy_dc_ip}:{settings.tg_proxy_cfproxy_enabled}:"
+            f"{settings.tg_proxy_cfproxy_priority}:{settings.tg_proxy_cfproxy_domain}:"
+            f"{settings.tg_proxy_fake_tls_domain}:{settings.tg_proxy_buf_kb}:{settings.tg_proxy_pool_size}"
+        )
         if settings.tg_proxy_link_prompt_signature != signature:
             self._ensure_telegram_and_open_proxy_link(
                 host=settings.tg_proxy_host,
@@ -835,8 +852,24 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
         for key, value in kwargs.items():
             option = "--" + key.replace("_", "-")
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    cmd.extend([option, str(item)])
+                continue
             cmd.extend([option, str(value)])
         return cmd
+
+    def _parse_tg_dc_ip_settings(self, value: str) -> list[str]:
+        result: list[str] = []
+        for raw in re.split(r"[\n,;]+", str(value or "")):
+            item = raw.strip()
+            if item:
+                result.append(item)
+        if not result:
+            # Upstream applies hard-coded defaults when --dc-ip is omitted.
+            # A worker-local sentinel asks it to keep the map truly empty.
+            return ["__empty__"]
+        return result
 
     def _build_worker_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -1287,6 +1320,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             "latest_version": latest_version,
             "asset_url": str((asset or {}).get("browser_download_url", "")),
             "asset_name": str((asset or {}).get("name", "")),
+            "zipball_url": str(payload.get("zipball_url") or ""),
         }
 
     def fetch_latest_tg_ws_proxy_release(self) -> dict[str, str]:
@@ -1317,29 +1351,50 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         current_version = self.storage._detect_zapret_version()
         if latest_version and current_version == latest_version:
             return {"status": "up-to-date", "version": current_version}
-        asset_url = str(release.get("asset_url", "")).strip()
-        if not asset_url:
-            return {"status": "error", "error": "No zip asset found"}
+        candidates = [
+            (
+                str(release.get("asset_url", "")).strip(),
+                str(release.get("asset_name", "") or "zapret-release.zip"),
+            ),
+            (
+                str(release.get("zipball_url", "")).strip(),
+                "zapret-source.zip",
+            ),
+        ]
+        candidates = [(url, name) for url, name in candidates if url]
+        if not candidates:
+            return {"status": "error", "error": "No zapret archive URL found"}
         runtime_root = self.storage.paths.runtime_dir / "zapret-discord-youtube"
         was_running = self._is_image_running("winws.exe")
         temp_root = Path(tempfile.mkdtemp(prefix="zapret_hub_zapret_update_"))
         try:
-            zip_path = temp_root / (release.get("asset_name") or "zapret.zip")
-            with urlopen(Request(asset_url, headers={"User-Agent": f"ZapretHub/{__version__}"}), timeout=60) as response:
-                zip_path.write_bytes(response.read())
-            extract_root = temp_root / "extract"
-            extract_root.mkdir(parents=True, exist_ok=True)
-            with zipfile.ZipFile(zip_path, "r") as archive:
-                archive.extractall(extract_root)
-            source_root = next((p for p in extract_root.iterdir() if p.is_dir() and (p / "bin").exists() and (p / "lists").exists()), None)
+            last_error = ""
+            source_root: Path | None = None
+            for index, (archive_url, archive_name) in enumerate(candidates):
+                try:
+                    zip_path = temp_root / f"{index}_{Path(archive_name).name or 'zapret.zip'}"
+                    self._download_to_file(archive_url, zip_path, timeout=75)
+                    extract_root = temp_root / f"extract_{index}"
+                    extract_root.mkdir(parents=True, exist_ok=True)
+                    with zipfile.ZipFile(zip_path, "r") as archive:
+                        archive.extractall(extract_root)
+                    source_root = self._find_extracted_zapret_root(extract_root)
+                    if source_root is not None:
+                        break
+                    last_error = f"Invalid zapret archive structure: {archive_name}"
+                except (HTTPError, URLError, TimeoutError, zipfile.BadZipFile, OSError) as error:
+                    last_error = str(error)
+                    self.logging.log("warning", "Zapret archive download failed", url=archive_url, error=last_error)
             if source_root is None:
-                return {"status": "error", "error": "Invalid zapret archive"}
+                return {"status": "error", "error": last_error or "Invalid zapret archive"}
             if was_running:
                 self.stop_component("zapret")
             backup = self.storage.create_backup(runtime_root, "pre-update-zapret")
             if runtime_root.exists():
                 shutil.rmtree(runtime_root, ignore_errors=True)
             shutil.copytree(source_root, runtime_root, dirs_exist_ok=True)
+            if latest_version:
+                self._patch_zapret_local_version(runtime_root, latest_version)
             self.storage._ensure_default_bundled_mod("unified-by-goshkow", {
                 "name": "Unified",
                 "author": "goshkow",
@@ -1347,12 +1402,79 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "version": latest_version or current_version,
                 "source_url": "bundled://unified-by-goshkow",
             }, force_refresh=True)
+            self.storage.ensure_layout()
+            self._rebuild_visible_zapret_runtime_snapshot()
             if was_running:
                 self.start_component("zapret")
-            self.logging.log("info", "Zapret updated", version=latest_version, backup=str(backup.path if backup else ""))
+            self.logging.log("info", "Zapret updated", version=latest_version, backup=str(backup or ""))
             return {"status": "updated", "version": latest_version or current_version}
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
+
+    def _download_to_file(self, url: str, destination: Path, timeout: int = 60) -> None:
+        request = Request(url, headers={"User-Agent": f"ZapretHub/{__version__}"})
+        last_error: Exception | None = None
+        for _ in range(2):
+            try:
+                with urlopen(request, timeout=timeout) as response:
+                    data = response.read()
+                break
+            except (HTTPError, URLError, TimeoutError, OSError) as error:
+                last_error = error
+                time.sleep(0.8)
+        else:
+            raise last_error or OSError("Download failed")
+        if len(data) < 1024:
+            raise OSError("Downloaded archive is unexpectedly small")
+        destination.write_bytes(data)
+
+    def _find_extracted_zapret_root(self, extract_root: Path) -> Path | None:
+        candidates = [extract_root]
+        candidates.extend(path for path in extract_root.iterdir() if path.is_dir())
+        for candidate in candidates:
+            if (candidate / "bin").exists() and (candidate / "lists").exists():
+                return candidate
+        for candidate in extract_root.rglob("*"):
+            if candidate.is_dir() and (candidate / "bin").exists() and (candidate / "lists").exists():
+                return candidate
+        return None
+
+    def _patch_zapret_local_version(self, runtime_root: Path, version: str) -> None:
+        service_bat = runtime_root / "service.bat"
+        if not service_bat.exists():
+            return
+        try:
+            content = service_bat.read_text(encoding="utf-8", errors="ignore")
+            updated = re.sub(
+                r'(?im)^(\s*set\s+"?LOCAL_VERSION\s*=\s*)[^"\r\n]+("?\s*)$',
+                rf"\g<1>{version}\2",
+                content,
+                count=1,
+            )
+            if updated != content:
+                service_bat.write_text(updated, encoding="utf-8")
+        except Exception:
+            pass
+
+    def _rebuild_visible_zapret_runtime_snapshot(self) -> None:
+        selected = self._resolve_selected_general_option()
+        if selected is not None:
+            active_root = self._prepare_active_zapret_runtime(
+                selected_bundle_root=Path(selected["path"]).parent,
+                selected_bundle_id=str(selected.get("bundle_id", "")),
+                selected_script_name=Path(selected["path"]).name,
+            )
+            self._apply_zapret_runtime_switches(active_root)
+            self._ensure_zapret_user_lists(active_root / "lists")
+            self._materialize_visible_merged_runtime(active_root)
+            self._reset_active_runtime_dir(active_root)
+            return
+        base_root = self.storage.paths.runtime_dir / "zapret-discord-youtube"
+        if base_root.exists():
+            target_root = self.storage.paths.merged_runtime_dir / "zapret"
+            if target_root.exists():
+                shutil.rmtree(target_root, ignore_errors=True)
+            shutil.copytree(base_root, target_root, dirs_exist_ok=True, ignore=self._runtime_copy_ignore)
 
     def update_tg_ws_proxy_runtime(self) -> dict[str, str]:
         release = self.fetch_latest_tg_ws_proxy_release()
@@ -1375,8 +1497,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         temp_root = Path(tempfile.mkdtemp(prefix="zapret_hub_tgws_update_"))
         try:
             source_zip = temp_root / "tg-ws-proxy.zip"
-            with urlopen(Request(source_url, headers={"User-Agent": f"ZapretHub/{__version__}"}), timeout=60) as response:
-                source_zip.write_bytes(response.read())
+            self._download_to_file(source_url, source_zip, timeout=75)
             extract_root = temp_root / "extract"
             extract_root.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(source_zip, "r") as archive:
@@ -1386,8 +1507,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 return {"status": "error", "error": "Invalid tg-ws-proxy source archive"}
 
             windows_exe_path = temp_root / str(release.get("exe_name", "TgWsProxy_windows.exe"))
-            with urlopen(Request(exe_url, headers={"User-Agent": f"ZapretHub/{__version__}"}), timeout=60) as response:
-                windows_exe_path.write_bytes(response.read())
+            self._download_to_file(exe_url, windows_exe_path, timeout=75)
 
             if was_running:
                 self.stop_component("tg-ws-proxy")
@@ -1416,7 +1536,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "info",
                 "TG WS Proxy updated",
                 version=latest_version,
-                backup=str(backup.path if backup else ""),
+                backup=str(backup or ""),
             )
             return {"status": "updated", "version": latest_version or current_version}
         finally:
@@ -1744,6 +1864,14 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._current_zapret_runtime = None
 
     def _reset_active_runtime_dir(self, active_root: Path) -> None:
+        driver_marker = active_root / ".driver_path_in_use"
+        if driver_marker.exists() and (active_root / "bin" / "WinDivert64.sys").exists():
+            self.logging.log(
+                "info",
+                "Keeping Zapret active runtime path for loaded WinDivert driver compatibility",
+                path=str(active_root),
+            )
+            return
         for _ in range(6):
             try:
                 shutil.rmtree(active_root, ignore_errors=False)

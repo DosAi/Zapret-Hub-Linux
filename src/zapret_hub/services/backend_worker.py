@@ -6,9 +6,12 @@ import queue
 import tempfile
 import uuid
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, QTimer, Signal
+
+from zapret_hub.domain import FileRecord
 
 
 def _snapshot(context) -> dict[str, Any]:
@@ -33,6 +36,27 @@ def _mods_payload(context) -> dict[str, Any]:
         "index": context.mods.fetch_index(),
         "installed": list(context.mods.list_installed()),
     }
+
+
+def _general_file_records(context) -> list[FileRecord]:
+    records: list[FileRecord] = []
+    seen: set[str] = set()
+    for option in context.processes.list_zapret_generals():
+        path = Path(str(option.get("path", "") or ""))
+        if not path.exists() or not path.is_file():
+            continue
+        resolved = str(path.resolve()).lower()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            relative = str(path.relative_to(context.paths.install_root))
+        except ValueError:
+            relative = str(path)
+        bundle = str(option.get("bundle", "") or "").strip()
+        label = f"{bundle}/{path.name}" if bundle else relative
+        records.append(FileRecord(path=str(path), relative_path=label, size=path.stat().st_size))
+    return sorted(records, key=lambda item: item.relative_path.lower())
 
 
 def _restart_zapret_if_running(context) -> None:
@@ -102,6 +126,15 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         result["general_options"] = list(context.processes.list_zapret_generals())
         return result
 
+    if action == "load_components_payload":
+        current = context.settings.get()
+        options = context.processes.list_zapret_generals()
+        if not str(current.selected_zapret_general or "").strip() and options:
+            context.settings.update(selected_zapret_general=str(options[0]["id"]))
+        result = _snapshot(context)
+        result["general_options"] = options
+        return result
+
     if action == "start_enabled_components":
         context.processes.start_enabled_components()
         return _snapshot(context)
@@ -120,7 +153,18 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
 
     if action == "apply_settings":
         before = context.settings.get()
-        tg_before = (before.tg_proxy_host, int(before.tg_proxy_port), before.tg_proxy_secret)
+        tg_before = (
+            before.tg_proxy_host,
+            int(before.tg_proxy_port),
+            before.tg_proxy_secret,
+            before.tg_proxy_dc_ip,
+            bool(before.tg_proxy_cfproxy_enabled),
+            bool(before.tg_proxy_cfproxy_priority),
+            before.tg_proxy_cfproxy_domain,
+            before.tg_proxy_fake_tls_domain,
+            int(before.tg_proxy_buf_kb),
+            int(before.tg_proxy_pool_size),
+        )
         zapret_before = (before.zapret_ipset_mode, before.zapret_game_filter_mode, before.selected_zapret_general)
         theme_before = before.theme
         language_before = before.language
@@ -130,6 +174,13 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             str(payload.get("tg_proxy_host", context.settings.get().tg_proxy_host)),
             int(payload.get("tg_proxy_port", context.settings.get().tg_proxy_port)),
             str(payload.get("tg_proxy_secret", context.settings.get().tg_proxy_secret)),
+            str(payload.get("tg_proxy_dc_ip", context.settings.get().tg_proxy_dc_ip)),
+            bool(payload.get("tg_proxy_cfproxy_enabled", context.settings.get().tg_proxy_cfproxy_enabled)),
+            bool(payload.get("tg_proxy_cfproxy_priority", context.settings.get().tg_proxy_cfproxy_priority)),
+            str(payload.get("tg_proxy_cfproxy_domain", context.settings.get().tg_proxy_cfproxy_domain)),
+            str(payload.get("tg_proxy_fake_tls_domain", context.settings.get().tg_proxy_fake_tls_domain)),
+            int(payload.get("tg_proxy_buf_kb", context.settings.get().tg_proxy_buf_kb)),
+            int(payload.get("tg_proxy_pool_size", context.settings.get().tg_proxy_pool_size)),
         )
         current = context.settings.get()
         zapret_after = (
@@ -340,11 +391,13 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
     if action == "load_files_payload":
         mode_index = int(payload.get("mode_index", 0) or 0)
         collection_id = str(payload.get("collection_id", "")).strip()
+        file_filter = str(payload.get("file_filter", "all") or "all")
         return {
             "files_payload": {
                 "mode_index": mode_index,
                 "collection_id": collection_id,
-                "records": context.files.list_files() if mode_index == 2 else None,
+                "file_filter": file_filter,
+                "records": _general_file_records(context) if (mode_index == 2 and file_filter == "generals") else (context.files.list_files() if mode_index == 2 else None),
                 "collection_values": context.files.read_collection(collection_id) if mode_index == 1 else None,
             }
         }

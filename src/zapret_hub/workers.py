@@ -21,7 +21,19 @@ from cryptography.hazmat.primitives.ciphers import modes as _modes
 from zapret_hub.runtime_env import development_install_root, is_packaged_runtime, packaged_install_root, packaged_resource_root
 
 
-def run_tg_ws_proxy_worker(host: str, port: int, secret: str, verbose: bool = False) -> int:
+def run_tg_ws_proxy_worker(
+    host: str,
+    port: int,
+    secret: str,
+    verbose: bool = False,
+    dc_ip: list[str] | None = None,
+    cfproxy_enabled: bool = True,
+    cfproxy_priority: bool = True,
+    cfproxy_domain: str = "",
+    fake_tls_domain: str = "",
+    buf_kb: int = 256,
+    pool_size: int = 4,
+) -> int:
     if is_packaged_runtime():
         install_root = packaged_install_root()
         resource_root = packaged_resource_root()
@@ -51,9 +63,33 @@ def run_tg_ws_proxy_worker(host: str, port: int, secret: str, verbose: bool = Fa
         )
         return 3
 
+    force_empty_dc_map = list(dc_ip or []) == ["__empty__"]
+    if force_empty_dc_map:
+        try:
+            tg_ws_proxy.parse_dc_ip_list = lambda _items: {}  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
     argv = ["tg-ws-proxy", "--host", host, "--port", str(port)]
     if secret:
         argv.extend(["--secret", secret])
+    for item in dc_ip or []:
+        item = str(item).strip()
+        if item and item != "__empty__":
+            argv.extend(["--dc-ip", item])
+    if force_empty_dc_map:
+        argv.extend(["--dc-ip", "__empty__"])
+    if not cfproxy_enabled:
+        argv.append("--no-cfproxy")
+    # Upstream currently parses this option with type=bool, so the only CLI
+    # value that becomes False is an empty string.
+    argv.extend(["--cfproxy-priority", "true" if cfproxy_priority else ""])
+    if cfproxy_domain.strip():
+        argv.extend(["--cfproxy-domain", cfproxy_domain.strip()])
+    if fake_tls_domain.strip():
+        argv.extend(["--fake-tls-domain", fake_tls_domain.strip()])
+    argv.extend(["--buf-kb", str(max(4, int(buf_kb or 256)))])
+    argv.extend(["--pool-size", str(max(0, int(pool_size or 4)))])
     if verbose:
         argv.append("--verbose")
 
