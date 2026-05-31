@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -118,20 +119,31 @@ class UpdatesManager:
         request = Request(url, headers={"User-Agent": f"ZapretHub/{__version__}"})
         errors: list[str] = []
         for label, context in self._ssl_context_chain():
-            try:
-                with urlopen(request, timeout=timeout, context=context) as response:
-                    self.logging.log("info", "Update request succeeded", url=url, ssl_path=label)
-                    return response.read()
-            except URLError as error:
-                errors.append(f"{label}: {error}")
-                if not self._is_certificate_error(error):
+            for attempt in range(2):
+                try:
+                    with urlopen(request, timeout=timeout, context=context) as response:
+                        self.logging.log("info", "Update request succeeded", url=url, ssl_path=label, attempt=attempt + 1)
+                        return response.read()
+                except URLError as error:
+                    errors.append(f"{label}: {error}")
+                    if self._is_certificate_error(error):
+                        self.logging.log("warning", "Update request certificate fallback", url=url, ssl_path=label, error=str(error))
+                        break
+                    if attempt == 0:
+                        time.sleep(0.8)
+                        continue
                     break
-                self.logging.log("warning", "Update request certificate fallback", url=url, ssl_path=label, error=str(error))
-            except Exception as error:
-                errors.append(f"{label}: {error}")
-                if not self._is_certificate_error(error):
+                except Exception as error:
+                    errors.append(f"{label}: {error}")
+                    if self._is_certificate_error(error):
+                        self.logging.log("warning", "Update request certificate fallback", url=url, ssl_path=label, error=str(error))
+                        break
+                    if attempt == 0:
+                        time.sleep(0.8)
+                        continue
                     break
-                self.logging.log("warning", "Update request certificate fallback", url=url, ssl_path=label, error=str(error))
+            if errors and not self._is_certificate_error(RuntimeError(errors[-1])):
+                break
         raise RuntimeError("; ".join(errors) or "Unknown update request failure")
 
     def _ssl_context_chain(self) -> list[tuple[str, ssl.SSLContext]]:

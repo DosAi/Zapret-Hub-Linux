@@ -2,28 +2,22 @@ import asyncio
 import logging
 import struct
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from typing import Dict, List, Optional
+from typing import List, Optional
+from urllib.parse import urlencode
 
 from .utils import *
 from .stats import stats
 from .balancer import balancer
 from .config import proxy_config
 from .raw_websocket import RawWebSocket
+from .pool import cf_worker_pool
+from ._aes import Cipher, algorithms, modes
 
 
 log = logging.getLogger('tg-mtproto-proxy')
 _st_I_le = struct.Struct('<I')
 
 ZERO_64 = b'\x00' * 64
-DC_DEFAULT_IPS: Dict[int, str] = {
-    1: '149.154.175.50',
-    2: '149.154.167.51',
-    3: '149.154.175.100',
-    4: '149.154.167.91',
-    5: '149.154.171.5',
-    203: '91.105.192.100'
-}
 
 
 class CryptoCtx:
@@ -63,19 +57,27 @@ class MsgSplitter:
         self._plain_buf.extend(self._dec.update(chunk))
 
         parts = []
-        while self._cipher_buf:
-            packet_len = self._next_packet_len()
+        offset = 0
+        buf_len = len(self._cipher_buf)
+        # Walk the buffer with an offset instead of deleting each packet from
+        # the front. Front-deletion on a bytearray shifts the remaining bytes,
+        # so a chunk holding many small packets degrades to O(N^2); a single
+        # trailing del keeps splitting O(N).
+        while offset < buf_len:
+            packet_len = self._next_packet_len(offset, buf_len - offset)
             if packet_len is None:
                 break
             if packet_len <= 0:
-                parts.append(bytes(self._cipher_buf))
-                self._cipher_buf.clear()
-                self._plain_buf.clear()
+                parts.append(bytes(self._cipher_buf[offset:]))
+                offset = buf_len
                 self._disabled = True
                 break
-            parts.append(bytes(self._cipher_buf[:packet_len]))
-            del self._cipher_buf[:packet_len]
-            del self._plain_buf[:packet_len]
+            parts.append(bytes(self._cipher_buf[offset:offset + packet_len]))
+            offset += packet_len
+
+        if offset:
+            del self._cipher_buf[:offset]
+            del self._plain_buf[:offset]
         return parts
 
     def flush(self) -> List[bytes]:
@@ -86,22 +88,23 @@ class MsgSplitter:
         self._plain_buf.clear()
         return [tail]
 
-    def _next_packet_len(self) -> Optional[int]:
-        if not self._plain_buf:
+    def _next_packet_len(self, offset: int, avail: int) -> Optional[int]:
+        if avail <= 0:
             return None
         if self._proto == PROTO_ABRIDGED_INT:
-            return self._next_abridged_len()
+            return self._next_abridged_len(offset, avail)
         if self._proto in (PROTO_INTERMEDIATE_INT,
                            PROTO_PADDED_INTERMEDIATE_INT):
-            return self._next_intermediate_len()
+            return self._next_intermediate_len(offset, avail)
         return 0
 
-    def _next_abridged_len(self) -> Optional[int]:
-        first = self._plain_buf[0]
+    def _next_abridged_len(self, offset: int, avail: int) -> Optional[int]:
+        first = self._plain_buf[offset]
         if first in (0x7F, 0xFF):
-            if len(self._plain_buf) < 4:
+            if avail < 4:
                 return None
-            payload_len = int.from_bytes(self._plain_buf[1:4], 'little') * 4
+            payload_len = int.from_bytes(
+                self._plain_buf[offset + 1:offset + 4], 'little') * 4
             header_len = 4
         else:
             payload_len = (first & 0x7F) * 4
@@ -109,21 +112,20 @@ class MsgSplitter:
         if payload_len <= 0:
             return 0
         packet_len = header_len + payload_len
-        if len(self._plain_buf) < packet_len:
+        if avail < packet_len:
             return None
         return packet_len
 
-    def _next_intermediate_len(self) -> Optional[int]:
-        if len(self._plain_buf) < 4:
+    def _next_intermediate_len(self, offset: int, avail: int) -> Optional[int]:
+        if avail < 4:
             return None
-        payload_len = _st_I_le.unpack_from(self._plain_buf, 0)[0] & 0x7FFFFFFF
+        payload_len = _st_I_le.unpack_from(self._plain_buf, offset)[0] & 0x7FFFFFFF
         if payload_len <= 0:
             return 0
         packet_len = 4 + payload_len
-        if len(self._plain_buf) < packet_len:
+        if avail < packet_len:
             return None
         return packet_len
-
 
 
 async def do_fallback(reader, writer, relay_init, label,
@@ -131,15 +133,26 @@ async def do_fallback(reader, writer, relay_init, label,
                        ctx: CryptoCtx, splitter=None):
     fallback_dst = DC_DEFAULT_IPS.get(dc)
     use_cf = proxy_config.fallback_cfproxy
-    cf_first = proxy_config.fallback_cfproxy_priority
+    worker_domains = proxy_config.cfproxy_worker_domains
 
-    methods: List[str] = ['tcp']
+    methods: List[str] = []
 
+    if worker_domains and fallback_dst:
+        methods.append('cf_worker')
     if use_cf:
-        methods.insert(0 if cf_first else 1, 'cf')
+        methods.append('cf')
+    if fallback_dst:
+        methods.append('tcp')
 
     for method in methods:
-        if method == 'cf':
+        if method == 'cf_worker' and fallback_dst:
+            ok = await _cfproxy_worker_fallback(
+                reader, writer, relay_init, label, ctx,
+                dc=dc, is_media=is_media, fallback_dst=fallback_dst,
+                splitter=splitter)
+            if ok:
+                return True
+        elif method == 'cf':
             ok = await _cfproxy_fallback(
                 reader, writer, relay_init, label, ctx,
                 dc=dc, is_media=is_media,
@@ -154,6 +167,48 @@ async def do_fallback(reader, writer, relay_init, label,
                 relay_init, label, ctx)
             if ok:
                 return True
+    return False
+
+
+async def _cfproxy_worker_fallback(reader, writer, relay_init, label,
+                                   ctx: CryptoCtx,
+                                   dc: int, is_media: bool,
+                                   fallback_dst: str,
+                                   splitter=None):
+    media_tag = ' media' if is_media else ''
+    worker_domains = proxy_config.cfproxy_worker_domains
+    if not worker_domains:
+        return False
+
+    for worker_domain in worker_domains:
+        ws = await cf_worker_pool.get(dc, worker_domain, fallback_dst)
+        if ws:
+            log.info("[%s] DC%d%s -> CF worker pool hit for %s",
+                     label, dc, media_tag, fallback_dst)
+        else:
+            query = urlencode({
+                'dst': fallback_dst,
+                'dc': str(dc),
+            })
+            path = f'/apiws?{query}'
+
+            log.info("[%s] DC%d%s -> trying CF worker %s for %s",
+                     label, dc, media_tag, worker_domain, fallback_dst)
+
+            try:
+                ws = await RawWebSocket.connect(worker_domain, worker_domain,
+                                                timeout=10.0, path=path)
+            except Exception as exc:
+                log.warning("[%s] DC%d%s CF worker %s failed: %s",
+                            label, dc, media_tag, worker_domain, repr(exc))
+                continue
+
+        stats.connections_cfproxy += 1
+        await ws.send(relay_init)
+        await bridge_ws_reencrypt(reader, writer, ws, label, ctx,
+                                   dc=dc, is_media=is_media,
+                                   splitter=splitter)
+        return True
     return False
 
 

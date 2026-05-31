@@ -81,9 +81,6 @@ def run_tg_ws_proxy_worker(
         argv.extend(["--dc-ip", "__empty__"])
     if not cfproxy_enabled:
         argv.append("--no-cfproxy")
-    # Upstream currently parses this option with type=bool, so the only CLI
-    # value that becomes False is an empty string.
-    argv.extend(["--cfproxy-priority", "true" if cfproxy_priority else ""])
     if cfproxy_domain.strip():
         argv.extend(["--cfproxy-domain", cfproxy_domain.strip()])
     if fake_tls_domain.strip():

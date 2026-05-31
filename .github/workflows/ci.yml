@@ -29,9 +29,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[dev]
 
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Build Nuitka x64
         shell: pwsh
-        run: .\scripts\build_nuitka.ps1 -Python python -OutputDir dist_nuitka -Compiler zig
+        run: .\scripts\build_nuitka.ps1 -Python python -OutputDir dist_nuitka -Compiler msvc
 
       - name: SignPath placeholder
         shell: pwsh
