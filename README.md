@@ -27,9 +27,7 @@
 <a href="https://github.com/goshkow/Zapret-Hub/releases/latest">
   <img src="https://img.shields.io/badge/Скачать-последнюю%20версию-blue?style=for-the-badge&logo=github" alt="Скачать последнюю версию">
 </a>
-
 <br><br>
-
 <img src="https://img.shields.io/github/downloads/goshkow/Zapret-Hub/total?style=for-the-badge&label=%D0%97%D0%B0%D0%B3%D1%80%D1%83%D0%B7%D0%BE%D0%BA" alt="Всего загрузок">
 <img src="https://img.shields.io/github/stars/goshkow/Zapret-Hub?style=for-the-badge&label=%D0%97%D0%B2%D1%91%D0%B7%D0%B4" alt="Звёзды">
 <img src="https://img.shields.io/github/v/release/goshkow/Zapret-Hub?style=for-the-badge&label=%D0%92%D0%B5%D1%80%D1%81%D0%B8%D1%8F" alt="Последняя версия">
