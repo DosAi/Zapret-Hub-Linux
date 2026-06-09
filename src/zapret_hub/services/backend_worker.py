@@ -140,6 +140,48 @@ def _restart_goshkow_vpn_if_running(context) -> bool:
     return bool(getattr(state, "status", "") == "running")
 
 
+def _prepare_general_autotest_runtime(context) -> dict[str, Any]:
+    settings = context.settings.get()
+    _states, _any_running, zapret_running, vpn_running = _runtime_running_states(context)
+    restore = {
+        "was_running": bool(zapret_running or vpn_running),
+        "selected_runtime_mode": str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret"),
+        "zapret_running": bool(zapret_running),
+        "vpn_running": bool(vpn_running),
+        "enabled_component_ids": list(settings.enabled_component_ids or []),
+    }
+    if zapret_running:
+        context.processes.stop_component("zapret")
+    if vpn_running:
+        context.processes.stop_component("goshkow-vpn")
+    return restore
+
+
+def _restore_general_autotest_runtime(context, restore: dict[str, Any]) -> bool:
+    if not bool(restore.get("was_running", False)):
+        return False
+    mode = str(restore.get("selected_runtime_mode", "") or "").strip()
+    if not mode:
+        mode = "goshkow-vpn" if bool(restore.get("vpn_running", False)) else "zapret"
+    if bool(restore.get("vpn_running", False)):
+        context.processes.start_component("goshkow-vpn")
+        _start_enabled_aux_components(context, exclude={"zapret", "goshkow-vpn"})
+        return True
+    if bool(restore.get("zapret_running", False)):
+        _finish_zapret_reconfiguration(context, restart=True)
+        _start_enabled_aux_components(context, exclude={"zapret", "goshkow-vpn"})
+        return True
+    if mode == "goshkow-vpn":
+        context.processes.start_component("goshkow-vpn")
+        _start_enabled_aux_components(context, exclude={"zapret", "goshkow-vpn"})
+        return True
+    if mode == "zapret":
+        _finish_zapret_reconfiguration(context, restart=True)
+        _start_enabled_aux_components(context, exclude={"zapret", "goshkow-vpn"})
+        return True
+    return False
+
+
 def _set_enabled_components(context, enabled: set[str]) -> None:
     context.settings.update(enabled_component_ids=sorted(enabled))
 
@@ -473,6 +515,20 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
     if action == "reset_goshkow_vpn_traffic":
         context.vpn.reset_traffic()
         return _snapshot(context)
+
+    if action == "prepare_general_autotest_runtime":
+        restore = _prepare_general_autotest_runtime(context)
+        result = {"restore_runtime": restore}
+        result.update(_snapshot(context))
+        return result
+
+    if action == "restore_general_autotest_runtime":
+        restore = payload.get("restore_runtime", {})
+        restored = _restore_general_autotest_runtime(context, restore if isinstance(restore, dict) else {})
+        result = {"runtime_restored": restored}
+        result.update(_snapshot(context))
+        _attach_telegram_proxy_info(context, result)
+        return result
 
     if action == "apply_settings":
         before = context.settings.get()
