@@ -14,10 +14,13 @@ dist_*/
 dist_fresh*/
 dist_inst*/
 dist_new*/
+dist_nuitka_*/
+release_*/
 .release_cache/
 github_release/
 portable/
 installer_payload/
+nuitka-crash-report.xml
 
 # runtime data
 logs/
@@ -34,6 +37,7 @@ default_packs/
 *.zip
 *.7z
 *.log
+*.tmp
 README.md
 
 # ide

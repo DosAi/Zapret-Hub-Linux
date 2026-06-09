@@ -10,10 +10,13 @@ from zapret_hub.services.autostart import AutostartManager
 from zapret_hub.services.components import ProcessManager
 from zapret_hub.services.diagnostics import DiagnosticsManager
 from zapret_hub.services.files import FilesManager
+from zapret_hub.services.goshkow_vpn import GoshkowVpnManager
 from zapret_hub.services.logging_service import LoggingManager
 from zapret_hub.services.merge import MergeEngine
 from zapret_hub.services.mods import ModsManager
+from zapret_hub.services.notifications import NotificationManager
 from zapret_hub.services.profiles import ProfilesManager
+from zapret_hub.services.service_catalog import FORTNITE_GENERAL_PRIORITY
 from zapret_hub.services.settings import SettingsManager
 from zapret_hub.services.storage import StorageManager
 from zapret_hub.services.updates import UpdatesManager
@@ -27,11 +30,13 @@ class ApplicationContext:
     autostart: AutostartManager
     processes: ProcessManager
     mods: ModsManager
+    notifications: NotificationManager
     merge: MergeEngine
     diagnostics: DiagnosticsManager
     updates: UpdatesManager
     profiles: ProfilesManager
     files: FilesManager
+    vpn: GoshkowVpnManager
     backend: Any | None = None
 
 
@@ -75,12 +80,14 @@ def bootstrap_application() -> ApplicationContext:
     logging = LoggingManager(storage)
     autostart = AutostartManager(logging)
     processes = ProcessManager(storage, logging, settings)
+    notifications = NotificationManager(storage)
     merge = MergeEngine(storage, logging, settings)
-    mods = ModsManager(storage, logging, merge, settings)
+    mods = ModsManager(storage, logging, merge, settings, processes=processes)
     diagnostics = DiagnosticsManager(storage, logging, processes, mods, merge)
-    updates = UpdatesManager(storage, logging)
+    updates = UpdatesManager(storage, logging, processes=processes)
     profiles = ProfilesManager(storage)
     files = FilesManager(storage, settings)
+    vpn = GoshkowVpnManager(storage, logging)
     _prime_first_run_state(settings, processes)
 
     return ApplicationContext(
@@ -91,11 +98,13 @@ def bootstrap_application() -> ApplicationContext:
         autostart=autostart,
         processes=processes,
         mods=mods,
+        notifications=notifications,
         merge=merge,
         diagnostics=diagnostics,
         updates=updates,
         profiles=profiles,
         files=files,
+        vpn=vpn,
         backend=None,
     )
 
@@ -113,8 +122,10 @@ def build_startup_snapshot(context: ApplicationContext) -> dict[str, Any]:
             "selected_zapret_general": current.selected_zapret_general,
             "favorite_zapret_generals": list(current.favorite_zapret_generals or []),
             "enabled_mod_ids": list(current.enabled_mod_ids or []),
+            "selected_runtime_mode": getattr(current, "selected_runtime_mode", "zapret"),
         },
         "general_options": general_options,
+        "goshkow_vpn": context.vpn.state(),
     }
 
 
@@ -125,8 +136,24 @@ def _prime_first_run_state(settings: SettingsManager, processes: ProcessManager)
         changes["tg_proxy_secret"] = secrets.token_hex(16)
     if str(current.zapret_ipset_mode or "").strip() not in {"loaded", "none", "any"}:
         changes["zapret_ipset_mode"] = "loaded"
-    if str(current.zapret_game_filter_mode or "").strip() not in {"auto", "disabled", "all", "tcp", "udp"}:
+    if str(current.zapret_game_filter_mode or "").strip() not in {"disabled", "tcp", "udp", "tcpudp"}:
         changes["zapret_game_filter_mode"] = "disabled"
+    if "fortnite" in set(current.selected_service_ids or []):
+        changes["zapret_ipset_mode"] = "any"
+        changes["zapret_game_filter_mode"] = "tcpudp"
+        options = list(processes.list_zapret_generals())
+        for wanted in FORTNITE_GENERAL_PRIORITY:
+            match = next(
+                (
+                    option
+                    for option in options
+                    if str(option.get("name", "")).strip().lower() == wanted.lower()
+                ),
+                None,
+            )
+            if match is not None:
+                changes["selected_zapret_general"] = str(match.get("id", "") or "")
+                break
     if changes:
         settings.update(**changes)
 

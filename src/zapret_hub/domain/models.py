@@ -8,7 +8,7 @@ from typing import Any
 
 @dataclass(slots=True)
 class AppSettings:
-    theme: str = "dark"
+    theme: str = "oled"
     language: str = "ru"
     start_in_tray: bool = False
     autostart_windows: bool = False
@@ -37,8 +37,20 @@ class AppSettings:
     selected_zapret_general: str = ""
     favorite_zapret_generals: list[str] = field(default_factory=list)
     general_autotest_done: bool = False
+    selected_service_ids: list[str] = field(default_factory=list)
+    selected_runtime_mode: str = "zapret"
     zapret_ipset_mode: str = "loaded"
     zapret_game_filter_mode: str = "disabled"
+    zapret_udp_exclude_ports: str = "51820"
+    goshkow_vpn_pending_start: bool = False
+    zapret_was_running_before_goshkow_vpn: bool = False
+    zapret_was_enabled_before_goshkow_vpn: bool = False
+    goshkow_vpn_subscription_url: str = ""
+    goshkow_vpn_tun_enabled: bool = True
+    goshkow_vpn_routing_mode: str = "global"
+    goshkow_vpn_rules_mode: str = "blacklist"
+    goshkow_vpn_system_proxy_mode: str = "pac"
+    goshkow_vpn_processes: str = ""
     apply_update_on_next_launch: bool = False
 
 
@@ -148,6 +160,18 @@ class LogEntry:
     level: str
     message: str
     context: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class NotificationEntry:
+    id: str
+    level: str
+    title: str
+    message: str
+    source: str = "app"
+    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    read: bool = False
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

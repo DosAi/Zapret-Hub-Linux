@@ -2,6 +2,7 @@
 import ctypes
 import hashlib
 import multiprocessing
+import os
 import sys
 import threading
 import tempfile
@@ -51,6 +52,15 @@ def _startup_trace(message: str) -> None:
         pass
 
 
+def _write_startup_error(message: str) -> None:
+    try:
+        path = Path(tempfile.gettempdir()) / "zapret_hub_startup_error.log"
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(f"[{datetime.now().isoformat(timespec='seconds')}] {message}\n")
+    except Exception:
+        pass
+
+
 def _set_windows_app_id() -> None:
     if not sys.platform.startswith("win"):
         return
@@ -70,9 +80,20 @@ def _ensure_admin_windows(argv: list[str]) -> int:
     if is_admin:
         return 0
 
-    params = " ".join(f'"{arg}"' if " " in arg else arg for arg in argv)
-    result = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
+    if is_packaged_runtime():
+        executable = sys.executable
+        params_args = list(argv)
+    else:
+        executable = sys.executable
+        src_root = development_install_root(__file__) / "src"
+        current_pythonpath = os.environ.get("PYTHONPATH", "")
+        os.environ["PYTHONPATH"] = str(src_root) if not current_pythonpath else f"{src_root}{os.pathsep}{current_pythonpath}"
+        params_args = ["-m", "zapret_hub.main", *argv]
+    params = " ".join(f'"{arg}"' if " " in arg else arg for arg in params_args)
+    _startup_trace(f"run: relaunch elevated executable={executable} params={params}")
+    result = ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, params, None, 1)
     if result <= 32:
+        _write_startup_error(f"Failed to request administrator rights. ShellExecuteW returned {result}.")
         return 3
     return 2
 
@@ -162,11 +183,8 @@ def _preload_startup_onboarding(context, *, launch_hidden: bool, startup_snapsho
     if launch_hidden:
         return False
     try:
-        settings = context.settings.get()
-        marker = context.paths.data_dir / ".onboarding_seen"
+        marker = context.paths.data_dir / ".services_onboarding_seen_v2"
         if marker.exists():
-            return False
-        if bool(settings.general_autotest_done):
             return False
         if isinstance(startup_snapshot, dict):
             raw_options = startup_snapshot.get("general_options")
@@ -237,10 +255,6 @@ def run(argv: list[str] | None = None) -> int:
     if _notify_existing_instance(instance_key, notify_message):
         _startup_trace("run: existing instance notified, exiting")
         return 0
-
-    bootstrap_thread = _BootstrapThread()
-    _startup_trace("run: bootstrap thread created")
-    app._bootstrap_thread = bootstrap_thread  # type: ignore[attr-defined]
 
     class _BootstrapBridge(QObject):
         @Slot(object)
@@ -313,7 +327,7 @@ def run(argv: list[str] | None = None) -> int:
             if known.autostart_launch and settings.auto_run_components:
                 def _start_after_backend() -> None:
                     if context.backend is not None:
-                        window.start_enabled_components_async()
+                        window.start_enabled_components_async(autostart_only=True)
                 autostart_callback = _start_after_backend
             else:
                 autostart_callback = None
@@ -342,14 +356,37 @@ def run(argv: list[str] | None = None) -> int:
         @Slot(str)
         def fail_bootstrap(self, message: str) -> None:
             _startup_trace(f"finish_bootstrap: failed {message}")
+            _write_startup_error(message or "Failed to prepare the application")
             QMessageBox.critical(None, "Zapret Hub", message or "Failed to prepare the application")
             app.quit()
 
     bootstrap_bridge = _BootstrapBridge()
     app._bootstrap_bridge = bootstrap_bridge  # type: ignore[attr-defined]
-    bootstrap_thread.ready.connect(bootstrap_bridge.finish_bootstrap, Qt.ConnectionType.QueuedConnection)
-    bootstrap_thread.failed.connect(bootstrap_bridge.fail_bootstrap, Qt.ConnectionType.QueuedConnection)
-    bootstrap_thread.start()
-    _startup_trace("run: bootstrap thread started")
+
+    def _bootstrap_on_main_thread() -> None:
+        try:
+            from zapret_hub.bootstrap import bootstrap_application, build_startup_snapshot
+
+            _startup_trace("run: bootstrap main-thread start")
+            context = bootstrap_application()
+            startup_snapshot = build_startup_snapshot(context)
+            startup_show_onboarding = _preload_startup_onboarding(
+                context,
+                launch_hidden=False,
+                startup_snapshot=startup_snapshot,
+            )
+            _startup_trace("run: bootstrap main-thread ready")
+            bootstrap_bridge.finish_bootstrap(
+                {
+                    "context": context,
+                    "startup_snapshot": startup_snapshot,
+                    "startup_show_onboarding": startup_show_onboarding,
+                }
+            )
+        except Exception as error:
+            bootstrap_bridge.fail_bootstrap(str(error))
+
+    QTimer.singleShot(0, _bootstrap_on_main_thread)
+    _startup_trace("run: bootstrap scheduled")
     return app.exec()
 

@@ -11,6 +11,7 @@ from .models import (
     LogEntry,
     MergeState,
     ModIndexItem,
+    NotificationEntry,
     ReleaseEntry,
     UpdateInfo,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "LogEntry",
     "MergeState",
     "ModIndexItem",
+    "NotificationEntry",
     "ReleaseEntry",
     "UpdateInfo",
 ]

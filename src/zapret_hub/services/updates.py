@@ -3,22 +3,17 @@ from __future__ import annotations
 import os
 import platform
 import re
-import ssl
 import subprocess
 import sys
 import tempfile
 import textwrap
-import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from urllib.error import URLError
-from urllib.request import Request, urlopen
-import json
-import certifi
 
 from zapret_hub import __version__
 from zapret_hub.domain import UpdateInfo
+from zapret_hub.services.github_network import GitHubNetworkClient
 from zapret_hub.services.logging_service import LoggingManager
 from zapret_hub.services.storage import StorageManager
 
@@ -28,9 +23,11 @@ class UpdatesManager:
     API_LATEST = "https://api.github.com/repos/goshkow/Zapret-Hub/releases/latest"
     API_RELEASES = "https://api.github.com/repos/goshkow/Zapret-Hub/releases"
 
-    def __init__(self, storage: StorageManager, logging: LoggingManager) -> None:
+    def __init__(self, storage: StorageManager, logging: LoggingManager, *, processes: object | None = None) -> None:
         self.storage = storage
         self.logging = logging
+        recovery = getattr(processes, "with_github_connectivity_recovery", None)
+        self.github = GitHubNetworkClient(logging, recovery_runner=recovery if callable(recovery) else None)
 
     def check_updates(self) -> list[UpdateInfo]:
         app_release = self.fetch_latest_application_release()
@@ -112,55 +109,12 @@ class UpdatesManager:
         }
 
     def _request_json(self, url: str, *, timeout: int) -> object:
-        payload = self._download_bytes(url, timeout=timeout)
-        return json.loads(payload.decode("utf-8"))
+        return self.github.github_json(url, timeout=timeout, purpose="app-release-metadata")
 
     def _download_bytes(self, url: str, *, timeout: int) -> bytes:
-        request = Request(url, headers={"User-Agent": f"ZapretHub/{__version__}"})
-        errors: list[str] = []
-        for label, context in self._ssl_context_chain():
-            for attempt in range(2):
-                try:
-                    with urlopen(request, timeout=timeout, context=context) as response:
-                        self.logging.log("info", "Update request succeeded", url=url, ssl_path=label, attempt=attempt + 1)
-                        return response.read()
-                except URLError as error:
-                    errors.append(f"{label}: {error}")
-                    if self._is_certificate_error(error):
-                        self.logging.log("warning", "Update request certificate fallback", url=url, ssl_path=label, error=str(error))
-                        break
-                    if attempt == 0:
-                        time.sleep(0.8)
-                        continue
-                    break
-                except Exception as error:
-                    errors.append(f"{label}: {error}")
-                    if self._is_certificate_error(error):
-                        self.logging.log("warning", "Update request certificate fallback", url=url, ssl_path=label, error=str(error))
-                        break
-                    if attempt == 0:
-                        time.sleep(0.8)
-                        continue
-                    break
-            if errors and not self._is_certificate_error(RuntimeError(errors[-1])):
-                break
-        raise RuntimeError("; ".join(errors) or "Unknown update request failure")
-
-    def _ssl_context_chain(self) -> list[tuple[str, ssl.SSLContext]]:
-        chain = [("system", ssl.create_default_context())]
-        certifi_context = ssl.create_default_context(cafile=certifi.where())
-        chain.append(("certifi", certifi_context))
-        return chain
+        return self.github.github_bytes(url, timeout=timeout, purpose="app-update-download")
 
     def _is_certificate_error(self, error: Exception) -> bool:
-        if isinstance(error, ssl.SSLCertVerificationError):
-            return True
-        if isinstance(error, URLError):
-            reason = getattr(error, "reason", None)
-            if isinstance(reason, ssl.SSLCertVerificationError):
-                return True
-            if isinstance(reason, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(reason).upper():
-                return True
         return "CERTIFICATE_VERIFY_FAILED" in str(error).upper()
 
     def _normalize_release_entries(self, payload: object) -> list[dict[str, object]]:

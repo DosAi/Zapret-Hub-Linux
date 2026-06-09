@@ -37,6 +37,16 @@ class StorageManager:
                 "autostart": False,
             },
             {
+                "id": "goshkow-vpn",
+                "name": "goshkow vpn",
+                "description": "Авторская VPN-подписка без ограничений по трафику и количеству устройств. Доступна на смартфонах, ПК, ноутбуках и других устройствах.",
+                "version": "2.0.0",
+                "source": "https://vpn.goshkow.ru",
+                "command": [],
+                "enabled": False,
+                "autostart": False,
+            },
+            {
                 "id": "tg-ws-proxy",
                 "name": "Tg-Ws-Proxy",
                 "description": "РџСЂРѕРєСЃРё РґР»СЏ Telegram С‡РµСЂРµР· Р»РѕРєР°Р»СЊРЅС‹Р№ РїРѕСЂС‚.",
@@ -143,10 +153,10 @@ class StorageManager:
         default_mod_id = "unified-by-goshkow"
         default_mod_meta = {
             "id": default_mod_id,
-            "name": "Unified",
-            "description": "РџРѕР·РІРѕР»СЏРµС‚ РѕР±РѕР№С‚Рё Р±Р»РѕРєРёСЂРѕРІРєРё СЃР°РјС‹С… РїРѕРїСѓР»СЏСЂРЅС‹С… СЃРµСЂРІРёСЃРѕРІ, РІРєР»СЋС‡Р°СЏ РёРіСЂРѕРІС‹Рµ СЃРµСЂРІРёСЃС‹, СЃРѕС†РёР°Р»СЊРЅС‹Рµ СЃРµС‚Рё Рё РґСЂСѓРіРёРµ РїР»Р°С‚С„РѕСЂРјС‹.",
+            "name": "Hub",
+            "description": "Позволяет обойти блокировки самых популярных сервисов, включая игровые сервисы, социальные сети и другие платформы.",
             "author": "goshkow",
-                    "version": "1.9.9a",
+            "version": "1.9.9a-unified3",
             "source_url": "bundled://unified-by-goshkow",
             "category": "gaming",
             "tags": ["gaming", "social", "cloudflare", "ubisoft", "arc-raiders"],
@@ -167,7 +177,7 @@ class StorageManager:
             ),
             None,
         )
-        desired_version = str(default_mod_meta.get("version", "1.9.9a"))
+        desired_version = str(default_mod_meta.get("version", "1.9.9a-unified2"))
         default_bundle = self._ensure_default_bundled_mod(
             default_mod_id,
             default_mod_meta,
@@ -265,7 +275,7 @@ class StorageManager:
         )
         return {
             "id": mod_id,
-                "version": str(meta.get("version", "1.9.9a")),
+                "version": str(meta.get("version", "1.9.9a-unified2")),
             "path": str(target_dir),
             "enabled": False,
             "name": str(meta.get("name", "")),
@@ -360,6 +370,7 @@ class StorageManager:
             "chevron_down.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 9l6 6l6-6" stroke="#9fb3d4" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
             "edit.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#9fb3d4" d="M3 17.25V21h3.75L19.81 7.94l-3.75-3.75z"/><path fill="#c7d7f2" d="M20.71 6.04a1 1 0 0 0 0-1.41L19.37 3.29a1 1 0 0 0-1.41 0l-1.13 1.13l3.75 3.75z"/></svg>',
             "tool.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="none" stroke="#9fb3d4" stroke-width="1.9" stroke-linecap="round"><path d="M6 7.5h12"/><circle cx="9" cy="7.5" r="2.1" fill="#9fb3d4" stroke="none"/><path d="M6 12h12"/><circle cx="15" cy="12" r="2.1" fill="#9fb3d4" stroke="none"/><path d="M6 16.5h12"/><circle cx="11" cy="16.5" r="2.1" fill="#9fb3d4" stroke="none"/></g></svg>',
+            "bell.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="none" stroke="#9fb3d4" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 9.5a6 6 0 0 0-12 0c0 5-2 6-2 6h16s-2-1-2-6z"/><path d="M9.8 19a2.4 2.4 0 0 0 4.4 0"/></g></svg>',
             "settings.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="none" stroke="#9fb3d4" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.2l1 .3l.6 1.9l1.6.7l1.8-.7l1.4 1.4l-.7 1.8l.7 1.6l1.9.6l.3 1l-.3 1l-1.9.6l-.7 1.6l.7 1.8l-1.4 1.4l-1.8-.7l-1.6.7l-.6 1.9l-1 .3l-1-.3l-.6-1.9l-1.6-.7l-1.8.7l-1.4-1.4l.7-1.8l-.7-1.6l-1.9-.6l-.3-1l.3-1l1.9-.6l.7-1.6l-.7-1.8l1.4-1.4l1.8.7l1.6-.7l.6-1.9z"/><circle cx="12" cy="12" r="2.7"/></g></svg>',
             "check.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M3.2 8.6l2.4 2.5l7.2-6.2" fill="none" stroke="#ffffff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>',
             "plus.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="#9fb3d4" stroke-width="2" stroke-linecap="round"/></svg>',

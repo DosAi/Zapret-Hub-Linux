@@ -5,6 +5,7 @@ import sys
 from dataclasses import asdict
 
 from zapret_hub.domain import AppSettings
+from zapret_hub.services.service_catalog import SERVICE_PRESET_IDS
 from zapret_hub.services.storage import StorageManager
 
 if sys.platform.startswith("win"):
@@ -54,16 +55,59 @@ class SettingsManager:
             changed = True
 
         if raw.get("theme") not in ("night", "midnight", "dark", "oled", "light", "light blue"):
-            settings.theme = self._detect_system_theme()
+            settings.theme = "oled"
             changed = True
 
         if raw.get("zapret_ipset_mode") not in {"loaded", "none", "any"}:
             settings.zapret_ipset_mode = "loaded"
             changed = True
 
-        if raw.get("zapret_game_filter_mode") not in {"auto", "disabled", "all", "tcp", "udp"}:
+        if raw.get("zapret_game_filter_mode") == "all":
+            settings.zapret_game_filter_mode = "tcpudp"
+            changed = True
+        elif raw.get("zapret_game_filter_mode") == "auto":
             settings.zapret_game_filter_mode = "disabled"
             changed = True
+        elif raw.get("zapret_game_filter_mode") not in {"disabled", "tcp", "udp", "tcpudp"}:
+            settings.zapret_game_filter_mode = "disabled"
+            changed = True
+
+        if raw.get("selected_runtime_mode") not in {"zapret", "goshkow-vpn"}:
+            settings.selected_runtime_mode = "zapret"
+            changed = True
+
+        if raw.get("goshkow_vpn_routing_mode") not in {"global", "blacklist", "whitelist"}:
+            settings.goshkow_vpn_routing_mode = "global"
+            changed = True
+
+        if raw.get("goshkow_vpn_rules_mode") not in {"blacklist", "whitelist"}:
+            settings.goshkow_vpn_rules_mode = "blacklist"
+            changed = True
+
+        if raw.get("goshkow_vpn_system_proxy_mode") not in {"clear", "set", "unchanged", "pac"}:
+            settings.goshkow_vpn_system_proxy_mode = "pac"
+            changed = True
+
+        selected_service_ids = raw.get("selected_service_ids", [])
+        if not isinstance(selected_service_ids, list):
+            settings.selected_service_ids = []
+            changed = True
+        else:
+            migrated_service_ids = [
+                "clouds" if str(item).strip() == "steam" else "fortnite" if str(item).strip() == "twitch" else str(item).strip()
+                for item in selected_service_ids
+            ]
+            normalized_service_ids = [item for item in migrated_service_ids if item in SERVICE_PRESET_IDS]
+            if normalized_service_ids != list(settings.selected_service_ids):
+                settings.selected_service_ids = normalized_service_ids
+                changed = True
+            if "fortnite" in normalized_service_ids:
+                if settings.zapret_ipset_mode != "any":
+                    settings.zapret_ipset_mode = "any"
+                    changed = True
+                if settings.zapret_game_filter_mode != "tcpudp":
+                    settings.zapret_game_filter_mode = "tcpudp"
+                    changed = True
 
         if changed:
             self.storage.write_json(self._settings_path, asdict(settings))

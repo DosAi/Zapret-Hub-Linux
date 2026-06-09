@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import ctypes
 import json
 import os
@@ -13,18 +14,21 @@ import time
 import webbrowser
 import shutil
 import tempfile
+import urllib.parse
+import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
-from zapret_hub import __version__
 from zapret_hub.domain import ComponentDefinition, ComponentState
 from zapret_hub.runtime_env import is_packaged_runtime
+from zapret_hub.services.github_network import GitHubNetworkClient, is_recoverable_github_error
 from zapret_hub.services.logging_service import LoggingManager
+from zapret_hub.services.service_catalog import prioritize_generals_for_services
+from zapret_hub.services.service_rules import SERVICE_RULES
 from zapret_hub.services.settings import SettingsManager
 from zapret_hub.services.storage import StorageManager
 
@@ -61,6 +65,22 @@ _VPN_ADAPTER_PATTERNS = (
     "clash",
     "mihomo",
     "tun",
+)
+
+_ZAPRET_DRIVER_SERVICE_NAMES = ("zapret", "WinDivert", "WinDivert14")
+_TORRENT_PROCESS_NAMES = (
+    "qbittorrent.exe",
+    "qbittorrent",
+    "transmission-qt.exe",
+    "transmission.exe",
+    "utorrent.exe",
+    "bittorrent.exe",
+    "deluge.exe",
+    "aria2c.exe",
+    "biglybt.exe",
+    "vuze.exe",
+    "tixati.exe",
+    "webtorrent.exe",
 )
 
 
@@ -143,7 +163,10 @@ class ProcessManager:
         self._state_cache_at = 0.0
         self._hub_runtime_token = secrets.token_urlsafe(24)
         self._log_streams: dict[str, Any] = {}
+        self._telegram_proxy_launch_info: dict[str, Any] | None = None
+        self._diagnostic_runtime_override = False
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
+        self.github = GitHubNetworkClient(logging, recovery_runner=self.with_github_connectivity_recovery)
         self._creationflags = 0
         self._startupinfo: subprocess.STARTUPINFO | None = None
         if sys.platform.startswith("win"):
@@ -164,7 +187,7 @@ class ProcessManager:
 
     def list_zapret_generals(self) -> list[dict[str, str]]:
         options: list[dict[str, str]] = []
-        bundles = self._get_zapret_bundles(enabled_only=True)
+        bundles = self._get_zapret_bundles(enabled_only=True, include_hidden_generals=True)
         for bundle in bundles:
             bundle_id = bundle["id"]
             bundle_title = bundle["title"]
@@ -183,7 +206,7 @@ class ProcessManager:
                         "path": str(script),
                     }
                 )
-        return options
+        return sorted(options, key=self._general_option_sort_key)
 
     def prompt_telegram_proxy_link(self) -> None:
         settings = self.settings.get()
@@ -193,11 +216,16 @@ class ProcessManager:
         if not secret:
             secret = secrets.token_hex(16)
             settings = self.settings.update(tg_proxy_secret=secret)
-        self._open_telegram_proxy_link(
+        self._ensure_telegram_and_open_proxy_link(
             host=settings.tg_proxy_host,
             port=int(settings.tg_proxy_port),
             secret=secret,
         )
+
+    def consume_telegram_proxy_launch_info(self) -> dict[str, Any] | None:
+        info = self._telegram_proxy_launch_info
+        self._telegram_proxy_launch_info = None
+        return dict(info) if isinstance(info, dict) else None
 
     def list_states(self) -> list[ComponentState]:
         if self._state_cache and (time.time() - self._state_cache_at) < 0.7:
@@ -240,6 +268,14 @@ class ProcessManager:
                 else:
                     state.status = "stopped"
                     state.pid = None
+            elif component.id == "goshkow-vpn":
+                process = self._processes.get(component.id)
+                if process and process.poll() is None:
+                    state.status = "running"
+                    state.pid = process.pid
+                else:
+                    state.status = "stopped"
+                    state.pid = None
             else:
                 process = self._processes.get(component.id)
                 if process and process.poll() is None:
@@ -258,11 +294,16 @@ class ProcessManager:
     def start_component(self, component_id: str) -> ComponentState:
         component = next(item for item in self.list_components() if item.id == component_id)
         if component.id == "zapret":
+            self.stop_component("goshkow-vpn")
             state = self._start_zapret(component_id)
             self._invalidate_state_cache()
             return state
         if component.id == "tg-ws-proxy":
             state = self._start_tg_ws_proxy(component_id)
+            self._invalidate_state_cache()
+            return state
+        if component.id == "goshkow-vpn":
+            state = self._start_goshkow_vpn(component_id)
             self._invalidate_state_cache()
             return state
         current = self._processes.get(component_id)
@@ -288,9 +329,12 @@ class ProcessManager:
         state = self._states.get(component_id, ComponentState(component_id=component_id))
 
         if component_id == "zapret":
+            active_runtime = self._current_zapret_runtime
             self._force_stop_zapret_runtime()
             self._close_source_log_stream("zapret")
             self._processes.pop(component_id, None)
+            if active_runtime is not None:
+                self._reset_active_runtime_dir(active_runtime)
             state.status = "stopped" if not self._is_image_running("winws.exe") else "running"
             state.pid = None
             if state.status != "stopped":
@@ -316,6 +360,24 @@ class ProcessManager:
             state.pid = None
             self._states[component_id] = state
             self.logging.log("info", "TG WS Proxy stopped")
+            self._invalidate_state_cache()
+            return state
+        if component_id == "goshkow-vpn":
+            process = self._processes.get(component_id)
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            if process and process.pid:
+                self._run_quiet(["taskkill", "/PID", str(process.pid), "/F", "/T"])
+            self._close_source_log_stream(component_id)
+            state.status = "stopped"
+            state.pid = None
+            state.last_error = ""
+            self._states[component_id] = state
+            self.logging.log("info", "goshkow vpn stopped")
             self._invalidate_state_cache()
             return state
         process = self._processes.get(component_id)
@@ -348,6 +410,24 @@ class ProcessManager:
                     self._states[component.id] = state
                     self.logging.log("error", "Enabled component failed to start", component_id=component.id, error=str(error))
                     started.append(state)
+        return started
+
+    def start_autostart_components(self) -> list[ComponentState]:
+        started = []
+        for component in self.list_components():
+            if not (component.enabled and component.autostart):
+                continue
+            try:
+                started.append(self.start_component(component.id))
+            except Exception as error:
+                state = ComponentState(
+                    component_id=component.id,
+                    status="error",
+                    last_error=str(error),
+                )
+                self._states[component.id] = state
+                self.logging.log("error", "Autostart component failed to start", component_id=component.id, error=str(error))
+                started.append(state)
         return started
 
     def stop_all(self) -> list[ComponentState]:
@@ -407,6 +487,7 @@ class ProcessManager:
             if not (bin_dir / "winws.exe").exists():
                 raise FileNotFoundError(f"winws.exe was not materialized: {bin_dir / 'winws.exe'}")
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
+            winws_command = self._apply_selected_service_command_extensions(winws_command, lists_dir=lists_dir)
             winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
             if not winws_command:
                 state = ComponentState(
@@ -442,12 +523,15 @@ class ProcessManager:
                 state = ComponentState(component_id=component_id, status="running", pid=process.pid)
                 self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0])
             else:
+                self._close_source_log_stream("zapret")
+                log_hint = self._recent_source_log_error("zapret")
+                error_message = log_hint or "winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert."
                 state = ComponentState(
                     component_id=component_id,
                     status="error",
-                    last_error="winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert.",
+                    last_error=error_message,
                 )
-                self.logging.log("error", "Zapret failed to start", script=str(active_script))
+                self.logging.log("error", "Zapret failed to start", script=str(active_script), error=error_message)
         except OSError as error:
             if getattr(error, "winerror", 0) == 740:
                 state = ComponentState(
@@ -481,6 +565,483 @@ class ProcessManager:
             self._current_zapret_runtime = None
         self._states[component_id] = state
         return state
+
+    def _start_goshkow_vpn_legacy_gui_disabled(self, component_id: str) -> ComponentState:
+        state = ComponentState(component_id=component_id, status="error")
+        state.last_error = "Legacy goshkow vpn GUI startup path is disabled."
+        return state
+        current = self._processes.get(component_id)
+        if current and current.poll() is None:
+            existing = self._states.get(component_id, ComponentState(component_id=component_id, status="running", pid=current.pid))
+            existing.status = "running"
+            existing.pid = current.pid
+            return existing
+        state = ComponentState(component_id=component_id)
+        vpn_state = self.storage.read_json(self.storage.paths.data_dir / "goshkow_vpn.json", default={}) or {}
+        if not isinstance(vpn_state, dict) or not vpn_state.get("subscription_url") or not vpn_state.get("servers"):
+            state.status = "error"
+            state.last_error = "Сначала добавьте подписку goshkow vpn."
+            self._states[component_id] = state
+            return state
+        zapret_running = bool(self._is_image_running("winws.exe"))
+        if sys.platform.startswith("win") and not self._is_admin_windows():
+            self.settings.update(
+                selected_runtime_mode="goshkow-vpn",
+                zapret_was_running_before_goshkow_vpn=zapret_running,
+            )
+            self.settings.update(goshkow_vpn_pending_start=True)
+            state.status = "error"
+            state.last_error = "Для запуска TUN-режима нужны права администратора. Перезапустите приложение от имени администратора."
+            self._states[component_id] = state
+            return state
+        try:
+            self.settings.update(
+                selected_runtime_mode="goshkow-vpn",
+                zapret_was_running_before_goshkow_vpn=zapret_running,
+                goshkow_vpn_pending_start=False,
+            )
+            if zapret_running:
+                self.stop_component("zapret")
+            exe = self._ensure_v2rayn_runtime()
+            self._write_goshkow_vpn_subscription_hint(vpn_state)
+            process = subprocess.Popen(
+                [str(exe)],
+                cwd=str(exe.parent),
+                creationflags=self._creationflags,
+                startupinfo=self._startupinfo,
+                stdout=self._open_source_log_stream(component_id),
+                stderr=subprocess.STDOUT,
+            )
+            if self._job:
+                self._job.assign_pid(process.pid)
+            state.status = "running"
+            state.pid = process.pid
+            state.last_error = ""
+            self._processes[component_id] = process
+            self._states[component_id] = state
+            self.logging.log("info", "goshkow vpn started", pid=process.pid)
+            return state
+        except Exception as error:
+            state.status = "error"
+            state.last_error = str(error)
+            self._states[component_id] = state
+            self.logging.log("error", "goshkow vpn failed to start", error=str(error))
+            return state
+
+    def _is_admin_windows(self) -> bool:
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+
+    def _write_goshkow_vpn_subscription_hint(self, vpn_state: dict[str, Any]) -> None:
+        target = self.storage.paths.runtime_dir / "v2rayN" / "goshkow-vpn-subscription.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        selected_id = str(vpn_state.get("selected_server_id", "") or "")
+        selected = None
+        for item in vpn_state.get("servers", []) or []:
+            if isinstance(item, dict) and str(item.get("id", "")) == selected_id:
+                selected = item
+                break
+        lines = [
+            "goshkow vpn",
+            f"subscription={vpn_state.get('subscription_url', '')}",
+            f"selected={selected.get('name', '') if isinstance(selected, dict) else ''}",
+            "Этот файл создан Zapret Hub для интеграции подписки vpn.goshkow.ru с v2rayN.",
+        ]
+        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _ensure_v2rayn_runtime(self) -> Path:
+        runtime_root = self.storage.paths.runtime_dir / "v2rayN"
+        for candidate in runtime_root.rglob("sing-box.exe"):
+            if candidate.name.lower() == "sing-box.exe":
+                return candidate
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        archive = self._download_latest_v2rayn_archive()
+        with zipfile.ZipFile(archive) as bundle:
+            bundle.extractall(runtime_root)
+        for candidate in runtime_root.rglob("sing-box.exe"):
+            if candidate.name.lower() == "sing-box.exe":
+                return candidate
+        raise FileNotFoundError("v2rayN был загружен, но исполняемый файл не найден.")
+
+    def _download_latest_v2rayn_archive(self) -> Path:
+        api_url = "https://api.github.com/repos/2dust/v2rayN/releases/latest"
+        request = urllib.request.Request(api_url, headers={"User-Agent": "Zapret-Hub/2.0"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            release = json.loads(response.read().decode("utf-8", errors="ignore"))
+        assets = release.get("assets", []) if isinstance(release, dict) else []
+        selected_url = ""
+        selected_name = ""
+        for marker in ("windows-64-desktop", "windows-64"):
+            for asset in assets:
+                if not isinstance(asset, dict):
+                    continue
+                name = str(asset.get("name", "") or "")
+                url = str(asset.get("browser_download_url", "") or "")
+                if url and name.lower().endswith(".zip") and marker in name.lower():
+                    selected_url = url
+                    selected_name = name
+                    break
+            if selected_url:
+                break
+        if not selected_url:
+            raise FileNotFoundError("В последнем релизе v2rayN не найден Windows x64 архив.")
+        target = self.storage.paths.cache_dir / selected_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(selected_url, target)
+        return target
+
+    def _start_goshkow_vpn(self, component_id: str) -> ComponentState:
+        current = self._processes.get(component_id)
+        if current and current.poll() is None:
+            existing = self._states.get(component_id, ComponentState(component_id=component_id, status="running", pid=current.pid))
+            existing.status = "running"
+            existing.pid = current.pid
+            return existing
+        state = ComponentState(component_id=component_id)
+        vpn_state = self.storage.read_json(self.storage.paths.data_dir / "goshkow_vpn.json", default={}) or {}
+        if not isinstance(vpn_state, dict) or str(vpn_state.get("subscription_state", "") or "") != "valid":
+            state.status = "error"
+            state.last_error = "Сначала добавьте валидную подписку goshkow vpn."
+            self._states[component_id] = state
+            return state
+        selected_server = self._selected_goshkow_vpn_server(vpn_state)
+        if selected_server is None:
+            state.status = "error"
+            state.last_error = "Не выбрана локация goshkow vpn."
+            self._states[component_id] = state
+            return state
+        saved_flag = bool(getattr(self.settings.get(), "zapret_was_running_before_goshkow_vpn", False))
+        zapret_running = bool(self._is_image_running("winws.exe") or saved_flag)
+        try:
+            config_path = self._write_goshkow_vpn_runtime_config(vpn_state, selected_server)
+            core = self._ensure_goshkow_vpn_core()
+            self.logging.log(
+                "info",
+                "goshkow vpn launching",
+                component_id=component_id,
+                selected_server=str(selected_server.get("name", "") or selected_server.get("id", "") or ""),
+                tun_enabled=bool(vpn_state.get("tun_enabled", True)),
+                routing_mode=str(vpn_state.get("routing_mode", "global") or "global"),
+                system_proxy_mode=str(vpn_state.get("system_proxy_mode", "pac") or "pac"),
+                processes=[
+                    item.strip()
+                    for item in str(vpn_state.get("processes", "") or "").split(",")
+                    if item.strip()
+                ],
+                config=str(config_path),
+            )
+        except Exception as error:
+            state.status = "error"
+            state.last_error = str(error)
+            self._states[component_id] = state
+            self.logging.log("error", "goshkow vpn failed to prepare", error=str(error))
+            return state
+        if sys.platform.startswith("win") and not self._is_admin_windows():
+            self.settings.update(
+                selected_runtime_mode="goshkow-vpn",
+                zapret_was_running_before_goshkow_vpn=zapret_running,
+            )
+            self.settings.update(goshkow_vpn_pending_start=True)
+            state.status = "error"
+            state.last_error = "Для запуска TUN-режима нужны права администратора. Перезапустите приложение от имени администратора."
+            self._states[component_id] = state
+            return state
+        try:
+            self.settings.update(
+                selected_runtime_mode="goshkow-vpn",
+                zapret_was_running_before_goshkow_vpn=zapret_running,
+                goshkow_vpn_pending_start=False,
+            )
+            if zapret_running:
+                self.stop_component("zapret")
+            process = subprocess.Popen(
+                [str(core), "run", "-c", str(config_path)],
+                cwd=str(core.parent),
+                creationflags=self._creationflags,
+                startupinfo=self._startupinfo,
+                stdout=self._open_source_log_stream(component_id),
+                stderr=subprocess.STDOUT,
+            )
+            if self._job:
+                self._job.assign_pid(process.pid)
+            for _ in range(8):
+                if process.poll() is not None:
+                    break
+                time.sleep(0.25)
+            if process.poll() is not None:
+                log_error = self._recent_source_log_error(component_id)
+                state.status = "error"
+                state.pid = None
+                state.last_error = log_error or "goshkow vpn завершился сразу после запуска. Проверьте конфигурацию и права администратора."
+                self._states[component_id] = state
+                self._close_source_log_stream(component_id)
+                self.logging.log("error", "goshkow vpn exited early", error=state.last_error, config=str(config_path))
+                return state
+            self._processes[component_id] = process
+            state.status = "running"
+            state.pid = process.pid
+            state.last_error = ""
+            self._states[component_id] = state
+            self.logging.log("info", "goshkow vpn started", pid=process.pid, config=str(config_path))
+            return state
+        except Exception as error:
+            state.status = "error"
+            state.last_error = str(error)
+            self._states[component_id] = state
+            self.logging.log("error", "goshkow vpn failed to start", error=str(error))
+            return state
+
+    def _selected_goshkow_vpn_server(self, vpn_state: dict[str, Any]) -> dict[str, Any] | None:
+        selected_id = str(vpn_state.get("selected_server_id", "") or "")
+        for item in vpn_state.get("servers", []) or []:
+            if isinstance(item, dict) and str(item.get("id", "")) == selected_id:
+                return dict(item)
+        return None
+
+    def _goshkow_vpn_runtime_root(self) -> Path:
+        return self.storage.paths.runtime_dir / "v2rayN"
+
+    def _ensure_goshkow_vpn_core(self) -> Path:
+        runtime_root = self._goshkow_vpn_runtime_root()
+        for candidate in runtime_root.rglob("sing-box.exe"):
+            if candidate.name.lower() == "sing-box.exe":
+                return candidate
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        archive = self._download_latest_v2rayn_archive()
+        with zipfile.ZipFile(archive) as bundle:
+            bundle.extractall(runtime_root)
+        for candidate in runtime_root.rglob("sing-box.exe"):
+            if candidate.name.lower() == "sing-box.exe":
+                return candidate
+        raise FileNotFoundError("В runtime v2rayN не найден sing-box.exe.")
+
+    def _write_goshkow_vpn_runtime_config(self, vpn_state: dict[str, Any], selected_server: dict[str, Any]) -> Path:
+        runtime_root = self._goshkow_vpn_runtime_root()
+        config_dir = runtime_root / "goshkow-vpn"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.json"
+        config = self._build_goshkow_vpn_config(vpn_state, selected_server)
+        config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        return config_path
+
+    def _build_goshkow_vpn_config(self, vpn_state: dict[str, Any], selected_server: dict[str, Any]) -> dict[str, Any]:
+        endpoint = self._parse_goshkow_vpn_endpoint(selected_server)
+        if endpoint is None:
+            raise ValueError("Формат выбранной локации пока не поддерживается во встроенном TUN-режиме.")
+        processes = [item.strip() for item in str(vpn_state.get("processes", "") or "").split(",") if item.strip()]
+        rules_mode = str(vpn_state.get("rules_mode", "blacklist") or "blacklist")
+        routing_mode = str(vpn_state.get("routing_mode", "global") or "global")
+        tun_enabled = bool(vpn_state.get("tun_enabled", True))
+        route_final = "proxy"
+        route_rules: list[dict[str, Any]] = [
+            {"action": "sniff"},
+            {"action": "route", "protocol": "bittorrent", "outbound": "direct"},
+            {"action": "route", "process_name": list(_TORRENT_PROCESS_NAMES), "outbound": "direct"},
+            {"action": "hijack-dns", "port": 53, "network": ["tcp", "udp"]},
+            {"protocol": "dns", "action": "hijack-dns"},
+            {"action": "route", "ip_is_private": True, "outbound": "direct"},
+        ]
+        if processes:
+            route_rules.append({"action": "route", "process_name": processes, "outbound": "proxy"})
+            route_final = "direct"
+        inbound: dict[str, Any]
+        if tun_enabled:
+            inbound = {
+                "type": "tun",
+                "tag": "tun-in",
+                "interface_name": "zapret_hub_tun",
+                "address": ["172.18.0.1/30"],
+                "mtu": 9000,
+                "auto_route": True,
+                "strict_route": True,
+                "stack": "system",
+            }
+        else:
+            inbound = {
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "127.0.0.1",
+                "listen_port": 10808,
+            }
+
+        config: dict[str, Any] = {
+            "log": {"level": "info"},
+            "dns": {
+                "strategy": "ipv4_only",
+                "independent_cache": True,
+                "servers": [
+                    {"tag": "local", "type": "local", "prefer_go": True},
+                    {
+                        "tag": "remote",
+                        "type": "https",
+                        "server": "1.1.1.1",
+                        "server_port": 443,
+                        "path": "/dns-query",
+                        "connect_timeout": "4s",
+                        "detour": "proxy",
+                        "tls": {"enabled": True, "server_name": "cloudflare-dns.com"},
+                    },
+                ],
+                "final": "remote",
+            },
+            "inbounds": [inbound],
+            "outbounds": [
+                endpoint,
+                {"type": "direct", "tag": "direct"},
+                {"type": "block", "tag": "block"},
+            ],
+            "route": {
+                "auto_detect_interface": True,
+                "default_domain_resolver": {"server": "local", "strategy": "ipv4_only"},
+                "final": route_final,
+                "rules": route_rules,
+            },
+        }
+        if str(vpn_state.get("system_proxy_mode", "clear") or "clear") == "set":
+            config["experimental"] = {"clash_api": {"external_controller": "127.0.0.1:9090"}}
+        return config
+
+    def _parse_goshkow_vpn_endpoint(self, selected_server: dict[str, Any]) -> dict[str, Any] | None:
+        raw = str(selected_server.get("raw", "") or "").strip()
+        if not raw:
+            return None
+        parsed = urllib.parse.urlparse(raw)
+        scheme = parsed.scheme.lower()
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        host = parsed.hostname or str(selected_server.get("host", "") or "")
+        port = int(parsed.port or 443)
+        if scheme == "vless":
+            uuid = urllib.parse.unquote(parsed.username or "")
+            if not uuid or not host:
+                return None
+            transport = str(query.get("type", ["tcp"])[0] or "tcp").lower()
+            security = str(query.get("security", [""])[0] or "").lower()
+            service_name = str(query.get("serviceName", query.get("service_name", [""]))[0] or "").strip()
+            server_name = str(query.get("sni", query.get("servername", [host]))[0] or host).strip()
+            flow = str(query.get("flow", [""])[0] or "").strip()
+            alpn = [item for item in str(query.get("alpn", [""])[0] or "").split(",") if item]
+            tls: dict[str, Any] = {}
+            if security:
+                tls["enabled"] = True
+                tls["server_name"] = server_name or host
+                if alpn:
+                    tls["alpn"] = alpn
+                tls["insecure"] = str(query.get("allowInsecure", ["0"])[0]).lower() in {"1", "true", "yes"}
+                fingerprint = str(query.get("fp", [""])[0] or "").strip()
+                if fingerprint:
+                    tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
+                if security == "reality":
+                    public_key = str(query.get("pbk", [""])[0] or "").strip()
+                    short_id = str(query.get("sid", [""])[0] or "").strip()
+                    if public_key:
+                        tls["reality"] = {"enabled": True, "public_key": public_key, "short_id": short_id}
+            outbound: dict[str, Any] = {
+                "type": "vless",
+                "tag": "proxy",
+                "server": host,
+                "server_port": port,
+                "uuid": uuid,
+            }
+            if not self._looks_like_ip_address(host):
+                outbound["domain_resolver"] = "local"
+            if flow:
+                outbound["flow"] = flow
+            if tls:
+                outbound["tls"] = tls
+            if transport == "grpc":
+                outbound["transport"] = {"type": "grpc", "service_name": service_name or "goshkow-vpn"}
+            return outbound
+        if scheme == "trojan":
+            password = urllib.parse.unquote(parsed.username or "")
+            if not password or not host:
+                return None
+            outbound = {
+                "type": "trojan",
+                "tag": "proxy",
+                "server": host,
+                "server_port": port,
+                "password": password,
+                "tls": {
+                    "enabled": True,
+                    "server_name": str(query.get("sni", [host])[0] or host),
+                    "insecure": str(query.get("allowInsecure", ["0"])[0]).lower() in {"1", "true", "yes"},
+                },
+            }
+            if not self._looks_like_ip_address(host):
+                outbound["domain_resolver"] = "local"
+            if str(query.get("security", ["tls"])[0] or "tls").lower() == "reality":
+                public_key = str(query.get("pbk", [""])[0] or "").strip()
+                short_id = str(query.get("sid", [""])[0] or "").strip()
+                if public_key:
+                    outbound["tls"]["reality"] = {"enabled": True, "public_key": public_key, "short_id": short_id}
+            return outbound
+        if scheme in {"ss", "shadowsocks"}:
+            method = str(query.get("method", [""])[0] or "").strip()
+            password = urllib.parse.unquote(parsed.password or "")
+            if not method or not password or not host:
+                return None
+            return {
+                "type": "shadowsocks",
+                "tag": "proxy",
+                "server": host,
+                "server_port": port,
+                "method": method,
+                "password": password,
+                **({"domain_resolver": "local"} if not self._looks_like_ip_address(host) else {}),
+            }
+        if scheme in {"hysteria2", "hy2"}:
+            password = urllib.parse.unquote(parsed.username or "")
+            if not password or not host:
+                return None
+            return {
+                "type": "hysteria2",
+                "tag": "proxy",
+                "server": host,
+                "server_port": port,
+                "password": password,
+                **({"domain_resolver": "local"} if not self._looks_like_ip_address(host) else {}),
+                "tls": {
+                    "enabled": True,
+                    "server_name": str(query.get("sni", [host])[0] or host),
+                    "insecure": str(query.get("insecure", ["0"])[0]).lower() in {"1", "true", "yes"},
+                },
+            }
+        if scheme == "vmess":
+            vmess = self._parse_vmess(raw)
+            if vmess is None:
+                return None
+            host = vmess.get("host", host)
+            uuid = vmess.get("uuid", "")
+            if not host or not uuid:
+                return None
+            outbound = {
+                "type": "vmess",
+                "tag": "proxy",
+                "server": host,
+                "server_port": int(vmess.get("port", port) or port),
+                "uuid": uuid,
+            }
+            if not self._looks_like_ip_address(host):
+                outbound["domain_resolver"] = "local"
+            return outbound
+        return None
+
+    def _parse_vmess(self, raw: str) -> dict[str, str] | None:
+        try:
+            payload = raw.split("://", 1)[1].strip()
+            padded = payload + "=" * (-len(payload) % 4)
+            data = json.loads(base64.b64decode(padded).decode("utf-8", errors="ignore"))
+            if not isinstance(data, dict):
+                return None
+            return {
+                "host": str(data.get("add", "") or ""),
+                "uuid": str(data.get("id", "") or ""),
+                "port": str(data.get("port", "") or ""),
+            }
+        except Exception:
+            return None
 
     def _extract_winws_command(self, script_path: Path, bin_dir: Path, lists_dir: Path) -> list[str]:
         game_filter, game_filter_tcp, game_filter_udp = self._get_game_filter_values(script_path.parent)
@@ -552,26 +1113,100 @@ class ProcessManager:
 
         adapter_indexes = [int(item) for item in vpn_data.get("adapter_indexes", []) if str(item).isdigit()]
         remote_ips = [str(item).strip() for item in vpn_data.get("remote_ips", []) if str(item).strip()]
+        excluded_udp_ports = self._parse_port_ranges(self.settings.get().zapret_udp_exclude_ports)
+        if excluded_udp_ports:
+            command = self._exclude_udp_ports_from_command(command, excluded_udp_ports)
         if not adapter_indexes and not remote_ips:
             return command
 
         updated = list(command)
+        raw_parts: list[str] = []
         if adapter_indexes:
             raw_filter = " and ".join(f"(ifIdx != {index} and subIfIdx != {index})" for index in sorted(set(adapter_indexes)))
-            updated.append(f"--wf-raw-part={raw_filter}")
+            raw_parts.append(raw_filter)
 
         if remote_ips:
             vpn_exclude_path = lists_dir / "ipset-vpn-exclude.txt"
             vpn_exclude_path.write_text("\n".join(sorted(set(remote_ips))) + "\n", encoding="utf-8")
             updated.append(f"--ipset-exclude={vpn_exclude_path}")
 
+        if raw_parts:
+            combined_filter = " and ".join(f"({part})" for part in raw_parts)
+            updated.append(f"--wf-raw-part={combined_filter}")
+
         self.logging.log(
             "info",
             "Applied VPN priority safeguards to zapret",
             adapter_indexes=sorted(set(adapter_indexes)),
             remote_ips=sorted(set(remote_ips)),
+            excluded_udp_ports=self.settings.get().zapret_udp_exclude_ports,
         )
         return updated
+
+    def _exclude_udp_ports_from_command(self, command: list[str], excluded_ranges: list[tuple[int, int]]) -> list[str]:
+        updated: list[str] = []
+        for arg in command:
+            if arg.startswith("--wf-udp=") or arg.startswith("--filter-udp="):
+                key, value = arg.split("=", 1)
+                ranges = self._parse_port_ranges(value)
+                if ranges:
+                    filtered = self._subtract_port_ranges(ranges, excluded_ranges)
+                    value = self._format_port_ranges(filtered) or "12"
+                    arg = f"{key}={value}"
+            updated.append(arg)
+        return updated
+
+    def _subtract_port_ranges(
+        self,
+        ranges: list[tuple[int, int]],
+        excluded_ranges: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        result: list[tuple[int, int]] = []
+        for start, end in ranges:
+            segments = [(start, end)]
+            for ex_start, ex_end in excluded_ranges:
+                next_segments: list[tuple[int, int]] = []
+                for seg_start, seg_end in segments:
+                    if ex_end < seg_start or ex_start > seg_end:
+                        next_segments.append((seg_start, seg_end))
+                        continue
+                    if seg_start < ex_start:
+                        next_segments.append((seg_start, ex_start - 1))
+                    if ex_end < seg_end:
+                        next_segments.append((ex_end + 1, seg_end))
+                segments = next_segments
+            result.extend(segment for segment in segments if segment[0] <= segment[1])
+        return result
+
+    def _format_port_ranges(self, ranges: list[tuple[int, int]]) -> str:
+        return ",".join(str(start) if start == end else f"{start}-{end}" for start, end in ranges)
+
+    def _parse_port_ranges(self, value: str) -> list[tuple[int, int]]:
+        ranges: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for raw in re.split(r"[\s,;]+", str(value or "")):
+            token = raw.strip()
+            if not token:
+                continue
+            if "-" in token:
+                left, right = token.split("-", 1)
+            else:
+                left = right = token
+            try:
+                start = int(left)
+                end = int(right)
+            except ValueError:
+                continue
+            if start > end:
+                start, end = end, start
+            if start < 1 or end > 65535:
+                continue
+            item = (start, end)
+            if item in seen:
+                continue
+            seen.add(item)
+            ranges.append(item)
+        return ranges
 
     def _detect_vpn_priority_context(self) -> dict[str, list[str]]:
         script = r"""
@@ -712,11 +1347,19 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             result = result.replace(key, replacement).replace(key.lower(), replacement).replace(key.upper(), replacement)
         return result
 
+    def _fortnite_service_selected(self) -> bool:
+        return "fortnite" in {str(item) for item in list(self.settings.get().selected_service_ids or [])}
+
+    def _should_force_fortnite_runtime_modes(self) -> bool:
+        return self._fortnite_service_selected() and not self._diagnostic_runtime_override
+
     def _get_game_filter_values(self, runtime_root: Path) -> tuple[str, str, str]:
         mode_from_settings = (self.settings.get().zapret_game_filter_mode or "").strip().lower()
+        if self._should_force_fortnite_runtime_modes():
+            mode_from_settings = "tcpudp"
         if mode_from_settings == "auto":
             mode_from_settings = ""
-        if mode_from_settings == "all":
+        if mode_from_settings in {"all", "tcpudp"}:
             return ("1024-65535", "1024-65535", "1024-65535")
         if mode_from_settings == "tcp":
             return ("1024-65535", "1024-65535", "12")
@@ -728,7 +1371,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         if not mode_file.exists():
             return ("12", "12", "12")
         mode = mode_file.read_text(encoding="utf-8", errors="ignore").strip().lower()
-        if mode == "all":
+        if mode in {"all", "tcpudp"}:
             return ("1024-65535", "1024-65535", "1024-65535")
         if mode == "tcp":
             return ("1024-65535", "1024-65535", "12")
@@ -744,6 +1387,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         utils_dir.mkdir(parents=True, exist_ok=True)
 
         ipset_mode = (settings.zapret_ipset_mode or "loaded").strip().lower()
+        if self._should_force_fortnite_runtime_modes():
+            ipset_mode = "any"
         ipset_all = lists_dir / "ipset-all.txt"
         if ipset_mode == "none":
             ipset_all.write_text("203.0.113.113/32\n", encoding="utf-8")
@@ -753,8 +1398,10 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             ipset_all.write_text("", encoding="utf-8")
 
         game_mode = (settings.zapret_game_filter_mode or "disabled").strip().lower()
+        if self._should_force_fortnite_runtime_modes():
+            game_mode = "tcpudp"
         game_flag = utils_dir / "game_filter.enabled"
-        if game_mode in ("all", "tcp", "udp"):
+        if game_mode in ("all", "tcp", "udp", "tcpudp"):
             game_flag.write_text(game_mode, encoding="utf-8")
         elif game_flag.exists():
             game_flag.unlink(missing_ok=True)
@@ -896,9 +1543,10 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 return str(candidate)
         return sys.executable
 
-    def _get_zapret_bundles(self, enabled_only: bool) -> list[dict[str, Any]]:
+    def _get_zapret_bundles(self, enabled_only: bool, *, include_hidden_generals: bool = False) -> list[dict[str, Any]]:
         bundles: list[dict[str, Any]] = []
         base = self.storage.paths.runtime_dir / "zapret-discord-youtube"
+        unified_root = self.storage.paths.mods_dir / "unified-by-goshkow"
         index_map = {
             str(item.get("id", "")): str(item.get("name", "")).strip()
             for item in (self.storage.read_json(self.storage.paths.cache_dir / "mods_index.json", default=[]) or [])
@@ -914,11 +1562,28 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if not path.exists():
                 continue
             mod_id = str(raw.get("id", "bundle"))
+            if mod_id == "unified-by-goshkow":
+                continue
             title = str(raw.get("name") or "").strip() or index_map.get(mod_id) or mod_id
             bundles.append({"id": mod_id, "title": title, "path": path})
+        if include_hidden_generals and unified_root.exists():
+            bundles.insert(0, {"id": "unified-general", "title": "Hub", "path": unified_root})
         if base.exists():
             bundles.append({"id": "base", "title": "", "path": base})
         return bundles
+
+    def _general_option_sort_key(self, item: dict[str, str]) -> tuple[int, int, str]:
+        bundle_id = str(item.get("bundle_id", ""))
+        name = str(item.get("name", ""))
+        lowered = name.lower()
+        number = -1
+        match = re.search(r"alt\s*(\d+)", lowered)
+        if match:
+            number = int(match.group(1))
+        elif lowered == "general.bat":
+            number = 0
+        modified_rank = 0 if bundle_id == "unified-general" else 1 if bundle_id != "base" else 2
+        return (modified_rank, -number, lowered)
 
     def _resolve_selected_general_option(self) -> dict[str, str] | None:
         options = self.list_zapret_generals()
@@ -928,14 +1593,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         selected = settings.selected_zapret_general
         picked = next((item for item in options if item["id"] == selected), None)
         if picked is None:
-            preferred = next(
-                (
-                    item
-                    for item in options
-                    if item["name"].lower() == "general.bat" and str(item.get("bundle_id", "")) == "base"
-                ),
-                next((item for item in options if str(item.get("bundle_id", "")) == "base"), options[0]),
-            )
+            preferred = options[0]
             selected = preferred["id"]
             self.settings.update(selected_zapret_general=selected)
             picked = preferred
@@ -968,9 +1626,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 continue
             self._merge_lists_into_target(lists_target, lists_source)
 
+        self._apply_selected_service_rules(active_root)
+
         selected_script = selected_bundle_root / selected_script_name
         if selected_script.exists():
             shutil.copy2(selected_script, active_root / selected_script.name)
+        if selected_bundle_id == "unified-general":
+            self._overlay_zapret_bundle_runtime(active_root, selected_bundle_root)
+            if selected_script.exists():
+                shutil.copy2(selected_script, active_root / selected_script.name)
 
         self._apply_user_collection_overrides(lists_target)
         self._materialize_visible_merged_runtime(active_root)
@@ -1068,6 +1732,112 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 result.append(item)
             target.write_text("\n".join(result) + ("\n" if result else ""), encoding="utf-8")
 
+    def _apply_selected_service_rules(self, active_root: Path) -> None:
+        selected_ids = list(self.settings.get().selected_service_ids or [])
+        if not selected_ids:
+            return
+        lists_dir = active_root / "lists"
+        lists_dir.mkdir(parents=True, exist_ok=True)
+        mapping = {
+            "list-general.txt": "list_general",
+            "list-exclude.txt": "list_exclude",
+            "list-google.txt": "list_google",
+            "ipset-all.txt": "ipset_all",
+            "ipset-exclude.txt": "ipset_exclude",
+        }
+        for filename, attr in mapping.items():
+            incoming: list[str] = []
+            for service_id in selected_ids:
+                rule = SERVICE_RULES.get(str(service_id))
+                if rule is None:
+                    continue
+                incoming.extend(getattr(rule, attr))
+            if not incoming:
+                continue
+            target = lists_dir / filename
+            existing = self._read_list_lines(target)
+            merged = self._merge_with_conflict_resolution(lists_dir, filename, existing, incoming)
+            target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+        for service_id in selected_ids:
+            rule = SERVICE_RULES.get(str(service_id))
+            if rule is None:
+                continue
+            for filename, lines in rule.extra_lists:
+                safe_name = Path(filename).name
+                if not safe_name.endswith(".txt"):
+                    continue
+                target = lists_dir / safe_name
+                existing = self._read_list_lines(target)
+                merged = self._merge_with_conflict_resolution(lists_dir, safe_name.lower(), existing, list(lines))
+                target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+            for filename, relative_source in getattr(rule, "extra_list_files", ()):
+                safe_name = Path(filename).name
+                if not safe_name.endswith(".txt"):
+                    continue
+                source = (self.storage.paths.install_root / str(relative_source)).resolve()
+                if not source.exists() or not source.is_file():
+                    continue
+                incoming = self._read_list_lines(source)
+                if not incoming:
+                    continue
+                target = lists_dir / safe_name
+                existing = self._read_list_lines(target)
+                merged = self._merge_with_conflict_resolution(lists_dir, safe_name.lower(), existing, incoming)
+                target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+        self._merge_selected_service_hosts(active_root)
+
+    def _merge_selected_service_hosts(self, active_root: Path) -> None:
+        selected_ids = list(self.settings.get().selected_service_ids or [])
+        incoming: list[str] = []
+        for service_id in selected_ids:
+            rule = SERVICE_RULES.get(str(service_id))
+            if rule is None:
+                continue
+            incoming.extend(rule.hosts)
+        if not incoming:
+            return
+        service_dir = active_root / ".service"
+        service_dir.mkdir(parents=True, exist_ok=True)
+        target = service_dir / "hosts"
+        existing = self._read_hosts_lines(target)
+        merged: list[str] = []
+        seen: set[str] = set()
+        for line in [*existing, *incoming]:
+            if not line.strip() or line.lstrip().startswith("#"):
+                merged.append(line)
+                continue
+            key = " ".join(line.split()).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(line)
+        target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+
+    def _read_hosts_lines(self, path: Path) -> list[str]:
+        if not path.exists():
+            return []
+        return [raw.rstrip() for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines()]
+
+    def _apply_selected_service_command_extensions(self, command: list[str], *, lists_dir: Path) -> list[str]:
+        if not command:
+            return command
+        selected_ids = list(self.settings.get().selected_service_ids or [])
+        extra_args: list[str] = []
+        seen_segments: set[tuple[str, ...]] = set()
+        for service_id in selected_ids:
+            rule = SERVICE_RULES.get(str(service_id))
+            if rule is None or not rule.winws_args:
+                continue
+            segment = tuple(rule.winws_args)
+            if segment in seen_segments:
+                continue
+            seen_segments.add(segment)
+            for arg in segment:
+                extra_args.append(str(arg).replace("{lists}", str(lists_dir)))
+        if not extra_args:
+            return command
+        return [*command, *extra_args]
+
     def _read_list_lines(self, path: Path) -> list[str]:
         if not path.exists():
             return []
@@ -1116,6 +1886,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             "selected_zapret_general": settings.selected_zapret_general,
             "zapret_ipset_mode": settings.zapret_ipset_mode,
             "zapret_game_filter_mode": settings.zapret_game_filter_mode,
+            "zapret_udp_exclude_ports": settings.zapret_udp_exclude_ports,
         }
 
     def _restore_diagnostic_settings(self, snapshot: dict[str, object]) -> None:
@@ -1123,6 +1894,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             selected_zapret_general=str(snapshot.get("selected_zapret_general", "") or ""),
             zapret_ipset_mode=str(snapshot.get("zapret_ipset_mode", "loaded") or "loaded"),
             zapret_game_filter_mode=str(snapshot.get("zapret_game_filter_mode", "disabled") or "disabled"),
+            zapret_udp_exclude_ports=str(snapshot.get("zapret_udp_exclude_ports", "51820") or "51820"),
         )
 
     def _prepare_diagnostic_runtime(self, *, general_id: str, ipset_mode: str, game_mode: str) -> bool:
@@ -1139,6 +1911,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def run_single_general_diagnostic(
         self,
         general_id: str,
+        *,
+        ipset_mode: str = "loaded",
+        game_mode: str = "tcpudp",
         progress_callback: callable | None = None,
         stop_callback: callable | None = None,
     ) -> dict[str, object]:
@@ -1147,10 +1922,11 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         if option is None:
             return {"status": "error", "error": "general not found", "passed_targets": 0, "total_targets": 0}
         settings_snapshot = self._capture_diagnostic_settings()
+        self._diagnostic_runtime_override = True
         original_running = self._prepare_diagnostic_runtime(
             general_id=general_id,
-            ipset_mode="loaded",
-            game_mode="all",
+            ipset_mode=ipset_mode,
+            game_mode=game_mode,
         )
         try:
             outcome = self._run_general_connectivity_check(
@@ -1167,10 +1943,14 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "error": str(outcome.get("error", "")),
                 "passed_targets": int(outcome.get("passed_targets", 0)),
                 "total_targets": int(outcome.get("total_targets", 0)),
+                "failed_targets": list(outcome.get("failed_targets", []) or []),
+                "ipset_mode": ipset_mode,
+                "game_mode": game_mode,
             }
         finally:
             self.stop_component("zapret")
             self._restore_diagnostic_settings(settings_snapshot)
+            self._diagnostic_runtime_override = False
             if original_running and str(settings_snapshot.get("selected_zapret_general", "")):
                 self.start_component("zapret")
 
@@ -1180,6 +1960,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         stop_callback: callable | None = None,
     ) -> list[dict[str, str]]:
         options = self.list_zapret_generals()
+        options = prioritize_generals_for_services(options, self.settings.get().selected_service_ids)
         if not options:
             return []
 
@@ -1191,6 +1972,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         total_steps = len(options) * per_general_steps
 
         try:
+            self._diagnostic_runtime_override = True
             if original_running:
                 self.stop_component("zapret")
             for index, option in enumerate(options, start=1):
@@ -1198,8 +1980,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     break
                 self.settings.update(
                     selected_zapret_general=option["id"],
-                    zapret_ipset_mode="loaded",
-                    zapret_game_filter_mode="all",
+                    zapret_ipset_mode=str(option.get("ipset_mode", "loaded") or "loaded"),
+                    zapret_game_filter_mode=str(option.get("game_mode", "tcpudp") or "tcpudp"),
                 )
                 base_step = (index - 1) * per_general_steps
                 if progress_callback is not None:
@@ -1231,10 +2013,14 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                         "error": str(outcome.get("error", "")),
                         "passed_targets": str(outcome.get("passed_targets", 0)),
                         "total_targets": str(outcome.get("total_targets", 0)),
+                        "failed_targets": list(outcome.get("failed_targets", []) or []),
+                        "ipset_mode": str(option.get("ipset_mode", "loaded") or "loaded"),
+                        "game_mode": str(option.get("game_mode", "tcpudp") or "tcpudp"),
                     }
                 )
                 self.stop_component("zapret")
         finally:
+            self._diagnostic_runtime_override = False
             self._restore_diagnostic_settings(settings_snapshot)
             if original_running and str(settings_snapshot.get("selected_zapret_general", "")):
                 self.start_component("zapret")
@@ -1251,7 +2037,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         if not general_id:
             return {"results": [], "status": "error", "error": "No selected general"}
         ipset_modes = ["loaded", "none", "any"]
-        game_modes = ["disabled", "all", "tcp", "udp", "auto"]
+        game_modes = ["disabled", "tcpudp", "tcp", "udp"]
         combinations = [(ipset, game) for ipset in ipset_modes for game in game_modes]
         targets = self._load_standard_test_targets()
         results: list[dict[str, object]] = []
@@ -1302,11 +2088,141 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         best = ranked[0] if ranked else None
         return {"results": ranked, "best": best, "status": "ok" if ranked else "error"}
 
+    def with_github_connectivity_recovery(self, operation: Callable[[], Any], purpose: str) -> Any:
+        snapshot = self._capture_github_recovery_snapshot()
+        errors: list[str] = []
+        try:
+            result = self._try_github_operation(operation, errors, f"{purpose}: current")
+            if result[0]:
+                return result[1]
+
+            if bool(snapshot["was_running"]):
+                self.stop_component("zapret")
+                time.sleep(0.8)
+                result = self._try_github_operation(operation, errors, f"{purpose}: stopped")
+                if result[0]:
+                    return result[1]
+
+                self._restore_github_recovery_snapshot(snapshot, restart=True)
+                time.sleep(1.2)
+                result = self._try_github_operation(operation, errors, f"{purpose}: original-restarted")
+                if result[0]:
+                    return result[1]
+
+            for candidate in self._github_recovery_candidates(snapshot):
+                self.stop_component("zapret")
+                self._apply_github_recovery_settings(
+                    selected_zapret_general=str(candidate["general_id"]),
+                    zapret_ipset_mode=str(candidate["ipset_mode"]),
+                    zapret_game_filter_mode=str(candidate["game_mode"]),
+                    zapret_udp_exclude_ports=str(snapshot["zapret_udp_exclude_ports"]),
+                )
+                state = self.start_component("zapret")
+                if state.status != "running":
+                    errors.append(f"{purpose}: failed to start temporary Zapret profile {candidate}")
+                    continue
+                time.sleep(1.0)
+                result = self._try_github_operation(operation, errors, f"{purpose}: {candidate['label']}")
+                if result[0]:
+                    return result[1]
+        finally:
+            self._restore_github_recovery_snapshot(snapshot, restart=bool(snapshot["was_running"]))
+        raise RuntimeError("; ".join(errors) or "GitHub request failed after Zapret recovery")
+
+    def _try_github_operation(self, operation: Callable[[], Any], errors: list[str], label: str) -> tuple[bool, Any]:
+        try:
+            return True, operation()
+        except Exception as error:
+            errors.append(f"{label}: {error}")
+            self.logging.log("warning", "GitHub recovery attempt failed", attempt=label, error=str(error))
+            if not is_recoverable_github_error(error):
+                raise
+            time.sleep(0.8)
+            return False, None
+
+    def _capture_github_recovery_snapshot(self) -> dict[str, object]:
+        settings = self.settings.get()
+        return {
+            "selected_zapret_general": settings.selected_zapret_general,
+            "zapret_ipset_mode": settings.zapret_ipset_mode,
+            "zapret_game_filter_mode": settings.zapret_game_filter_mode,
+            "zapret_udp_exclude_ports": settings.zapret_udp_exclude_ports,
+            "was_running": self._is_image_running("winws.exe"),
+        }
+
+    def _restore_github_recovery_snapshot(self, snapshot: dict[str, object], *, restart: bool) -> None:
+        self.settings.update(
+            selected_zapret_general=str(snapshot.get("selected_zapret_general", "") or ""),
+            zapret_ipset_mode=str(snapshot.get("zapret_ipset_mode", "loaded") or "loaded"),
+            zapret_game_filter_mode=str(snapshot.get("zapret_game_filter_mode", "disabled") or "disabled"),
+            zapret_udp_exclude_ports=str(snapshot.get("zapret_udp_exclude_ports", "51820") or "51820"),
+        )
+        if restart:
+            try:
+                self.stop_component("zapret")
+                self.start_component("zapret")
+            except Exception as error:
+                self.logging.log("warning", "Failed to restore Zapret after GitHub recovery", error=str(error))
+        else:
+            try:
+                self.stop_component("zapret")
+            except Exception:
+                pass
+
+    def _apply_github_recovery_settings(self, **changes: str) -> None:
+        current = self.settings.get()
+        for key, value in changes.items():
+            setattr(current, key, value)
+
+    def _github_recovery_candidates(self, snapshot: dict[str, object]) -> list[dict[str, str]]:
+        current_general = str(snapshot.get("selected_zapret_general", "") or "").strip()
+        base_general = ""
+        for option in self.list_zapret_generals():
+            if str(option.get("name", "")).lower() == "general.bat" and str(option.get("bundle_id", "")) == "base":
+                base_general = str(option.get("id", "") or "")
+                break
+        favorite_general = next((item for item in self.settings.get().favorite_zapret_generals if str(item).strip()), "")
+        general_fallback = favorite_general or base_general
+        raw: list[tuple[str, str, str, str]] = [
+            ("current loaded/disabled", current_general, "loaded", "disabled"),
+            ("current any/disabled", current_general, "any", "disabled"),
+            ("current loaded/tcp+udp", current_general, "loaded", "tcpudp"),
+        ]
+        if general_fallback and general_fallback != current_general:
+            raw.append(("fallback loaded/disabled", general_fallback, "loaded", "disabled"))
+        candidates: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for label, general_id, ipset_mode, game_mode in raw:
+            if not general_id:
+                continue
+            key = (general_id, ipset_mode, game_mode)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    "label": label,
+                    "general_id": general_id,
+                    "ipset_mode": ipset_mode,
+                    "game_mode": game_mode,
+                }
+            )
+        return candidates
+
     def fetch_latest_zapret_release(self) -> dict[str, str]:
         api_url = "https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest"
-        request = Request(api_url, headers={"User-Agent": f"ZapretHub/{__version__}"})
-        with urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        try:
+            payload = self.github.github_json(api_url, timeout=20, purpose="zapret-release-metadata")
+            if not isinstance(payload, dict):
+                raise ValueError("Invalid zapret release metadata")
+        except Exception as error:
+            self.logging.log("warning", "Zapret release metadata fallback", error=str(error))
+            return {
+                "latest_version": "",
+                "asset_url": "",
+                "asset_name": "",
+                "zipball_url": "https://codeload.github.com/Flowseal/zapret-discord-youtube/zip/refs/heads/main",
+            }
         latest_version = str(payload.get("tag_name") or payload.get("name") or "").strip().lstrip("v")
         asset = next(
             (
@@ -1325,9 +2241,18 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
     def fetch_latest_tg_ws_proxy_release(self) -> dict[str, str]:
         api_url = "https://api.github.com/repos/Flowseal/tg-ws-proxy/releases/latest"
-        request = Request(api_url, headers={"User-Agent": f"ZapretHub/{__version__}"})
-        with urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        try:
+            payload = self.github.github_json(api_url, timeout=20, purpose="tg-ws-proxy-release-metadata")
+            if not isinstance(payload, dict):
+                raise ValueError("Invalid tg-ws-proxy release metadata")
+        except Exception as error:
+            self.logging.log("warning", "TG WS Proxy release metadata fallback", error=str(error))
+            return {
+                "latest_version": "",
+                "source_url": "https://codeload.github.com/Flowseal/tg-ws-proxy/zip/refs/heads/main",
+                "exe_url": "https://github.com/Flowseal/tg-ws-proxy/releases/latest/download/TgWsProxy_windows.exe",
+                "exe_name": "TgWsProxy_windows.exe",
+            }
         latest_version = str(payload.get("tag_name") or payload.get("name") or "").strip().lstrip("v")
         assets = [item for item in list(payload.get("assets") or []) if isinstance(item, dict)]
         windows_asset = next(
@@ -1364,6 +2289,12 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         candidates = [(url, name) for url, name in candidates if url]
         if not candidates:
             return {"status": "error", "error": "No zapret archive URL found"}
+        return self._install_zapret_archive(version=latest_version or current_version, candidates=candidates)
+
+    def _install_zapret_archive(self, *, version: str, candidates: list[tuple[str, str]]) -> dict[str, str]:
+        current_version = self.storage._detect_zapret_version()
+        if version and current_version == version:
+            return {"status": "up-to-date", "version": current_version}
         runtime_root = self.storage.paths.runtime_dir / "zapret-discord-youtube"
         was_running = self._is_image_running("winws.exe")
         temp_root = Path(tempfile.mkdtemp(prefix="zapret_hub_zapret_update_"))
@@ -1393,40 +2324,26 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if runtime_root.exists():
                 shutil.rmtree(runtime_root, ignore_errors=True)
             shutil.copytree(source_root, runtime_root, dirs_exist_ok=True)
-            if latest_version:
-                self._patch_zapret_local_version(runtime_root, latest_version)
+            if version:
+                self._patch_zapret_local_version(runtime_root, version)
             self.storage._ensure_default_bundled_mod("unified-by-goshkow", {
-                "name": "Unified",
+                "name": "Hub",
                 "author": "goshkow",
                 "description": "Bundled unified pack",
-                "version": latest_version or current_version,
+                "version": "1.9.9a-unified3",
                 "source_url": "bundled://unified-by-goshkow",
             }, force_refresh=True)
             self.storage.ensure_layout()
             self._rebuild_visible_zapret_runtime_snapshot()
             if was_running:
                 self.start_component("zapret")
-            self.logging.log("info", "Zapret updated", version=latest_version, backup=str(backup or ""))
-            return {"status": "updated", "version": latest_version or current_version}
+            self.logging.log("info", "Zapret updated", version=version, backup=str(backup or ""))
+            return {"status": "updated", "version": version or current_version}
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
 
     def _download_to_file(self, url: str, destination: Path, timeout: int = 60) -> None:
-        request = Request(url, headers={"User-Agent": f"ZapretHub/{__version__}"})
-        last_error: Exception | None = None
-        for _ in range(2):
-            try:
-                with urlopen(request, timeout=timeout) as response:
-                    data = response.read()
-                break
-            except (HTTPError, URLError, TimeoutError, OSError) as error:
-                last_error = error
-                time.sleep(0.8)
-        else:
-            raise last_error or OSError("Download failed")
-        if len(data) < 1024:
-            raise OSError("Downloaded archive is unexpectedly small")
-        destination.write_bytes(data)
+        self.github.github_download(url, destination, timeout=timeout, purpose=f"download:{Path(destination).name}", min_bytes=1024)
 
     def _find_extracted_zapret_root(self, extract_root: Path) -> Path | None:
         candidates = [extract_root]
@@ -1475,6 +2392,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if target_root.exists():
                 shutil.rmtree(target_root, ignore_errors=True)
             shutil.copytree(base_root, target_root, dirs_exist_ok=True, ignore=self._runtime_copy_ignore)
+
+    def rebuild_zapret_runtime_snapshot(self) -> None:
+        self._rebuild_visible_zapret_runtime_snapshot()
 
     def update_tg_ws_proxy_runtime(self) -> dict[str, str]:
         release = self.fetch_latest_tg_ws_proxy_release()
@@ -1564,6 +2484,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "error": state.last_error or "failed to start",
                 "passed_targets": 0,
                 "total_targets": 0,
+                "failed_targets": [],
             }
 
         targets = list(targets or self._load_standard_test_targets())
@@ -1573,6 +2494,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "error": "",
                 "passed_targets": 0,
                 "total_targets": 0,
+                "failed_targets": [],
             }
 
         if stop_callback is not None and stop_callback():
@@ -1581,6 +2503,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "error": "cancelled",
                 "passed_targets": 0,
                 "total_targets": len(targets),
+                "failed_targets": [str(target.get("name", "")) for target in targets],
             }
 
         passed_targets = 0
@@ -1596,6 +2519,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                         "error": "cancelled",
                         "passed_targets": passed_targets,
                         "total_targets": len(targets),
+                        "failed_targets": failed_names,
                     }
                 target = future_map[future]
                 try:
@@ -1616,12 +2540,14 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "error": f"failed targets: {', '.join(failed_names[:6])}",
                 "passed_targets": passed_targets,
                 "total_targets": len(targets),
+                "failed_targets": failed_names,
             }
         return {
             "status": "ok",
             "error": "",
             "passed_targets": passed_targets,
             "total_targets": len(targets),
+            "failed_targets": [],
         }
 
     def _load_standard_test_targets(self) -> list[dict[str, str]]:
@@ -1637,18 +2563,74 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 value = match.group(2).strip()
                 targets.append(self._convert_test_target(name, value))
         if targets:
-            return targets
+            return self._append_selected_service_test_targets(targets)
 
         defaults = [
-            ("Discord Main", "https://discord.com"),
-            ("Discord Gateway", "https://gateway.discord.gg"),
-            ("YouTube Web", "https://www.youtube.com"),
             ("Google Main", "https://www.google.com"),
-            ("Cloudflare Web", "https://www.cloudflare.com"),
-            ("Cloudflare DNS 1.1.1.1", "PING:1.1.1.1"),
             ("Google DNS 8.8.8.8", "PING:8.8.8.8"),
         ]
-        return [self._convert_test_target(name, value) for name, value in defaults]
+        return self._append_selected_service_test_targets([self._convert_test_target(name, value) for name, value in defaults])
+
+    def _append_selected_service_test_targets(self, targets: list[dict[str, str]]) -> list[dict[str, str]]:
+        result = self._filter_unselected_service_test_targets(targets)
+        seen: set[tuple[str, str]] = set()
+        for target in result:
+            marker = (
+                str(target.get("type", "")),
+                str(target.get("url") or target.get("host") or target.get("name") or ""),
+            )
+            seen.add(marker)
+        for service_id in self.settings.get().selected_service_ids or []:
+            rule = SERVICE_RULES.get(str(service_id))
+            if rule is None:
+                continue
+            for name, value in rule.test_targets:
+                converted = self._convert_test_target(name, value)
+                marker = (
+                    str(converted.get("type", "")),
+                    str(converted.get("url") or converted.get("host") or converted.get("name") or ""),
+                )
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                result.append(converted)
+        return result
+
+    def _filter_unselected_service_test_targets(self, targets: list[dict[str, str]]) -> list[dict[str, str]]:
+        selected = {str(item) for item in self.settings.get().selected_service_ids or []}
+        service_domains: dict[str, set[str]] = {}
+        for service_id, rule in SERVICE_RULES.items():
+            domains = {item.lower().lstrip(".") for item in rule.list_general if "/" not in item and "*" not in item}
+            for _name, value in rule.test_targets:
+                converted = self._convert_test_target(_name, value)
+                host = str(converted.get("host", "")).lower().lstrip(".")
+                if host:
+                    domains.add(host)
+            service_domains[service_id] = domains
+
+        filtered: list[dict[str, str]] = []
+        for target in targets:
+            host = str(target.get("host", "")).lower().lstrip(".")
+            name = str(target.get("name", "")).lower()
+            matched_service = ""
+            if host:
+                for service_id, domains in service_domains.items():
+                    if any(host == domain or host.endswith(f".{domain}") for domain in domains):
+                        matched_service = service_id
+                        break
+            if not matched_service:
+                for service_id, domains in service_domains.items():
+                    title_token = service_id.replace("-desktop", "").replace("-", " ")
+                    if title_token and title_token in name:
+                        matched_service = service_id
+                        break
+                    if any(domain.split(".", 1)[0] in name for domain in domains):
+                        matched_service = service_id
+                        break
+            if matched_service and matched_service not in selected:
+                continue
+            filtered.append(target)
+        return filtered
 
     def _convert_test_target(self, name: str, value: str) -> dict[str, str]:
         if value.upper().startswith("PING:"):
@@ -1852,9 +2834,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     pass
         if process and process.pid:
             self._run_quiet(["taskkill", "/PID", str(process.pid), "/F", "/T"])
-        if self._zapret_service_exists():
-            self._run_quiet(["sc", "stop", "zapret"])
-            self._run_quiet(["sc", "delete", "zapret"])
+        self._cleanup_zapret_driver_services(self._current_zapret_runtime)
         for _ in range(8):
             self._kill_image("winws.exe")
             if not self._is_image_running("winws.exe"):
@@ -1866,18 +2846,21 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def _reset_active_runtime_dir(self, active_root: Path) -> None:
         driver_marker = active_root / ".driver_path_in_use"
         if driver_marker.exists() and (active_root / "bin" / "WinDivert64.sys").exists():
-            self.logging.log(
-                "info",
-                "Keeping Zapret active runtime path for loaded WinDivert driver compatibility",
-                path=str(active_root),
-            )
-            return
+            self._cleanup_zapret_driver_services(active_root)
+            if self._driver_service_references_runtime(active_root):
+                self.logging.log(
+                    "info",
+                    "Keeping Zapret active runtime path because a driver service still references it",
+                    path=str(active_root),
+                )
+                return
         for _ in range(6):
             try:
                 shutil.rmtree(active_root, ignore_errors=False)
                 return
             except PermissionError:
                 self._force_stop_zapret_runtime()
+                self._cleanup_zapret_driver_services(active_root)
                 time.sleep(0.35)
             except Exception:
                 shutil.rmtree(active_root, ignore_errors=True)
@@ -1913,6 +2896,57 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         proc = self._run_quiet(["sc", "query", "zapret"])
         return proc.returncode == 0
 
+    def _cleanup_zapret_driver_services(self, runtime_root: Path | None = None) -> None:
+        for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
+            if not self._service_exists(service_name):
+                continue
+            if service_name.lower() != "zapret":
+                image_path = self._service_image_path(service_name)
+                if not image_path:
+                    continue
+                if image_path and runtime_root is not None and not self._path_mentions_runtime(image_path, runtime_root):
+                    continue
+                if image_path and runtime_root is None and not self._path_mentions_runtime(
+                    image_path,
+                    self.storage.paths.install_root,
+                ):
+                    continue
+            self._run_quiet(["sc", "stop", service_name])
+            self._run_quiet(["sc", "delete", service_name])
+
+    def _driver_service_references_runtime(self, runtime_root: Path) -> bool:
+        for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
+            if not self._service_exists(service_name):
+                continue
+            image_path = self._service_image_path(service_name)
+            if image_path and self._path_mentions_runtime(image_path, runtime_root):
+                return True
+        return False
+
+    def _service_exists(self, service_name: str) -> bool:
+        proc = self._run_quiet(["sc", "query", service_name])
+        return proc.returncode == 0
+
+    def _service_image_path(self, service_name: str) -> str:
+        proc = self._run_quiet(["sc", "qc", service_name])
+        if proc.returncode != 0:
+            return ""
+        for line in (proc.stdout or "").splitlines():
+            if "BINARY_PATH_NAME" not in line:
+                continue
+            return line.split(":", 1)[-1].strip().strip('"')
+        return ""
+
+    def _path_mentions_runtime(self, image_path: str, runtime_root: Path) -> bool:
+        raw = image_path.strip().strip('"').lower()
+        if not raw:
+            return False
+        try:
+            runtime_text = str(runtime_root.resolve()).lower()
+        except Exception:
+            runtime_text = str(runtime_root).lower()
+        return runtime_text in raw
+
     def _run_quiet(self, command: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             command,
@@ -1940,6 +2974,23 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._log_streams[source] = handle
         return handle
 
+    def _recent_source_log_error(self, source: str) -> str:
+        path = Path(self.logging.source_log_path(source))
+        if not path.exists():
+            return ""
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            return ""
+        for line in reversed(lines[-80:]):
+            text = line.strip()
+            if not text or text.startswith("["):
+                continue
+            lowered = text.lower()
+            if "error" in lowered or "failed" in lowered or "windivert" in lowered:
+                return text
+        return ""
+
     def _close_source_log_stream(self, source: str) -> None:
         handle = self._log_streams.pop(source, None)
         if handle is None:
@@ -1956,15 +3007,35 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 return True
         return False
 
-    def _start_telegram_desktop(self) -> bool:
+    def _telegram_desktop_candidates(self) -> list[Path]:
         candidates = [
             Path(os.environ.get("APPDATA", "")) / "Telegram Desktop" / "Telegram.exe",
             Path(os.environ.get("LOCALAPPDATA", "")) / "Telegram Desktop" / "Telegram.exe",
             Path(os.environ.get("ProgramFiles", "")) / "Telegram Desktop" / "Telegram.exe",
             Path(os.environ.get("ProgramFiles(x86)", "")) / "Telegram Desktop" / "Telegram.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WindowsApps" / "Telegram.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WindowsApps" / "Telegram Desktop.exe",
         ]
+        for image_name in ("Telegram.exe", "telegram.exe", "Telegram Desktop.exe"):
+            resolved = shutil.which(image_name)
+            if resolved:
+                candidates.append(Path(resolved))
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate).strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique
+
+    def _start_telegram_desktop(self) -> tuple[bool, bool]:
+        candidates = self._telegram_desktop_candidates()
+        candidate_found = False
         for candidate in candidates:
             if candidate.exists():
+                candidate_found = True
                 try:
                     subprocess.Popen(
                         [str(candidate)],
@@ -1972,28 +3043,41 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                         startupinfo=self._startupinfo,
                     )
                     self.logging.log("info", "Telegram launch requested", path=str(candidate))
-                    return True
+                    return candidate_found, True
                 except Exception as error:
                     self.logging.log("warning", "Failed to start Telegram", path=str(candidate), error=str(error))
-        return False
+        return candidate_found, False
 
-    def _ensure_telegram_and_open_proxy_link(self, host: str, port: int, secret: str) -> None:
+    def _ensure_telegram_and_open_proxy_link(self, host: str, port: int, secret: str) -> dict[str, Any]:
         self.logging.log("info", "TG WS Proxy auto-connect requested", component_id="tg-ws-proxy", host=host, port=port)
-        if not self._is_telegram_running():
+        running_before = self._is_telegram_running()
+        candidate_found = False
+        launch_requested = False
+        if not running_before:
             self.logging.log("info", "Telegram Desktop is not running, attempting to launch it", component_id="tg-ws-proxy")
-            self._start_telegram_desktop()
+            candidate_found, launch_requested = self._start_telegram_desktop()
             for _ in range(40):
                 if self._is_telegram_running():
                     self.logging.log("info", "Telegram Desktop detected after launch", component_id="tg-ws-proxy")
                     break
                 time.sleep(0.25)
-        if not self._is_telegram_running():
-            self.logging.log("warning", "Telegram was not detected after proxy start", component_id="tg-ws-proxy")
-            return
+        running_after = self._is_telegram_running()
         self.logging.log("info", "Sending proxy link to Telegram", component_id="tg-ws-proxy")
-        self._open_telegram_proxy_link(host=host, port=port, secret=secret)
+        link_opened = self._open_telegram_proxy_link(host=host, port=port, secret=secret)
+        info = {
+            "running_before": running_before,
+            "running_after": running_after,
+            "desktop_candidate_found": candidate_found,
+            "launch_requested": launch_requested,
+            "link_opened": link_opened,
+            "missing": not running_after and not candidate_found and not link_opened,
+        }
+        self._telegram_proxy_launch_info = info
+        if not running_after and not link_opened:
+            self.logging.log("warning", "Telegram was not detected after proxy start", component_id="tg-ws-proxy")
+        return info
 
-    def _open_telegram_proxy_link(self, host: str, port: int, secret: str) -> None:
+    def _open_telegram_proxy_link(self, host: str, port: int, secret: str) -> bool:
         link = f"tg://proxy?server={host}&port={port}&secret=dd{secret}"
         try:
             if sys.platform.startswith("win"):
@@ -2001,5 +3085,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             else:
                 webbrowser.open(link)
             self.logging.log("info", "Telegram proxy link opened", link=link)
+            return True
         except Exception as error:
             self.logging.log("warning", "Failed to open Telegram proxy link", link=link, error=str(error))
+            return False
