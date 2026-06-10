@@ -34,13 +34,23 @@ class MergeEngine:
         active_layers = ["base"]
 
         installed = self.storage.read_json(self.storage.paths.data_dir / "installed_mods.json", default=[]) or []
+        if not isinstance(installed, list):
+            installed = []
         for mod in installed:
+            if not isinstance(mod, Mapping):
+                continue
             if not mod.get("enabled"):
                 continue
-            mod_config_path = Path(mod["path"]) / "payload.json"
+            mod_path = str(mod.get("path", "") or "").strip()
+            if not mod_path:
+                continue
+            mod_config_path = Path(mod_path) / "payload.json"
             payload = self.storage.read_json(mod_config_path, default={}) or {}
+            if not isinstance(payload, Mapping):
+                self.logging.log("warning", "Mod payload ignored because it is not a JSON object", mod_id=str(mod.get("id", "")), path=str(mod_config_path))
+                continue
             merged = self._merge_dicts(merged, payload)
-            active_layers.append(mod["id"])
+            active_layers.append(str(mod.get("id", mod_path)))
 
         merged_path = merged_dir / "config.json"
         self.storage.write_json(merged_path, merged)

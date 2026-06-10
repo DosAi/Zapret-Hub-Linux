@@ -76,7 +76,14 @@ class GitHubNetworkClient:
 
     def _request_json(self, url: str, *, timeout: int) -> object:
         payload = self._download_bytes_once(url, timeout=timeout)
-        return json.loads(payload.decode("utf-8"))
+        if not payload.strip():
+            raise RuntimeError("GitHub returned an empty response.")
+        text = payload.decode("utf-8", errors="replace").strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as error:
+            preview = text[:120].replace("\r", " ").replace("\n", " ")
+            raise RuntimeError(f"GitHub returned invalid JSON: {preview}") from error
 
     def _download_bytes_once(self, url: str, *, timeout: int) -> bytes:
         request = Request(url, headers={"User-Agent": f"ZapretHub/{__version__}"})

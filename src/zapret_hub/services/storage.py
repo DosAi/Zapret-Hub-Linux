@@ -390,14 +390,44 @@ class StorageManager:
     def read_json(self, path: Path, default: Any | None = None) -> Any:
         if not path.exists():
             return default
-        with path.open("r", encoding="utf-8-sig") as file:
-            return json.load(file)
+        try:
+            content = path.read_text(encoding="utf-8-sig")
+        except OSError:
+            return default
+        if not content.strip():
+            self._backup_invalid_json(path, "empty")
+            return default
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            self._backup_invalid_json(path, "invalid")
+            return default
 
     def write_json(self, path: Path, payload: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = asdict(payload) if is_dataclass(payload) else payload
-        with path.open("w", encoding="utf-8") as file:
-            json.dump(data, file, indent=2, ensure_ascii=False)
+        temp_path = path.with_name(f"{path.name}.tmp-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}")
+        try:
+            with temp_path.open("w", encoding="utf-8") as file:
+                json.dump(data, file, indent=2, ensure_ascii=False)
+                file.write("\n")
+            temp_path.replace(path)
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+
+    def _backup_invalid_json(self, path: Path, reason: str) -> None:
+        if not path.exists():
+            return
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
+        backup_path = path.with_name(f"{path.name}.{reason}-{stamp}.bak")
+        try:
+            shutil.copy2(path, backup_path)
+        except OSError:
+            pass
 
     def create_backup(self, source: Path, reason: str) -> Path:
         stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")

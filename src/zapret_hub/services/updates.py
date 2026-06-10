@@ -8,7 +8,7 @@ import sys
 import tempfile
 import textwrap
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from zapret_hub import __version__
@@ -86,16 +86,26 @@ class UpdatesManager:
         html_url = str(latest["html_url"]).strip() or (self.REPO_URL + "/releases")
         body = str(latest["body"]).strip()
         asset = self._pick_release_asset(release_payload.get("assets") or [])
-        status = "available" if self._version_key(latest_version) > self._version_key(__version__) else "up-to-date"
+        latest_release_stamp = self._release_timestamp(latest, asset)
+        installed_stamp = self._installed_build_timestamp()
+        is_newer_version = self._version_key(latest_version) > self._version_key(__version__)
+        is_same_version_hotfix = (
+            self._version_key(latest_version) == self._version_key(__version__)
+            and latest_release_stamp is not None
+            and installed_stamp is not None
+            and latest_release_stamp.timestamp() > installed_stamp.timestamp() + 300
+        )
+        status = "available" if is_newer_version or is_same_version_hotfix else "up-to-date"
         newer_releases = [
             {
                 "version": str(item["version"]),
                 "body": str(item["body"]),
                 "html_url": str(item["html_url"]),
                 "is_latest": bool(idx == 0),
+                "is_hotfix": bool(idx == 0 and is_same_version_hotfix),
             }
             for idx, item in enumerate(releases)
-            if self._version_key(str(item["version"])) > self._version_key(__version__)
+            if self._version_key(str(item["version"])) > self._version_key(__version__) or (idx == 0 and is_same_version_hotfix)
         ]
         return {
             "status": status,
@@ -105,6 +115,9 @@ class UpdatesManager:
             "body": body,
             "asset_name": str(asset.get("name", "")) if asset else "",
             "asset_url": str(asset.get("browser_download_url", "")) if asset else "",
+            "is_hotfix": bool(is_same_version_hotfix),
+            "release_updated_at": latest_release_stamp.isoformat() if latest_release_stamp else "",
+            "installed_build_at": installed_stamp.isoformat() if installed_stamp else "",
             "releases": newer_releases,
         }
 
@@ -134,11 +147,61 @@ class UpdatesManager:
                     "version": version,
                     "body": str(item.get("body") or ""),
                     "html_url": str(item.get("html_url") or self.REPO_URL + "/releases"),
+                    "published_at": str(item.get("published_at") or ""),
+                    "updated_at": str(item.get("updated_at") or ""),
                     "payload": item,
                 }
             )
         entries.sort(key=lambda item: self._version_key(str(item["version"])), reverse=True)
         return entries
+
+    def _release_timestamp(self, release: dict[str, object], asset: dict[str, object] | None) -> datetime | None:
+        candidates = [
+            self._parse_github_datetime(str(release.get("published_at") or "")),
+            self._parse_github_datetime(str(release.get("updated_at") or "")),
+        ]
+        if asset:
+            candidates.extend(
+                [
+                    self._parse_github_datetime(str(asset.get("created_at") or "")),
+                    self._parse_github_datetime(str(asset.get("updated_at") or "")),
+                ]
+            )
+        valid = [item for item in candidates if item is not None]
+        return max(valid) if valid else None
+
+    def _installed_build_timestamp(self) -> datetime | None:
+        candidates: list[Path] = []
+        try:
+            candidates.append(Path(sys.executable))
+        except Exception:
+            pass
+        try:
+            candidates.append(Path(__file__))
+        except Exception:
+            pass
+        stamps: list[datetime] = []
+        for path in candidates:
+            try:
+                if path.exists():
+                    stamps.append(datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc))
+            except OSError:
+                continue
+        return max(stamps) if stamps else None
+
+    def _parse_github_datetime(self, value: str) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def prepare_update(self, release_info: dict[str, str]) -> dict[str, str]:
         asset_url = str(release_info.get("asset_url") or "").strip()
