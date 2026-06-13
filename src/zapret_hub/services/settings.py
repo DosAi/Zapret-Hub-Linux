@@ -25,7 +25,7 @@ class SettingsManager:
         settings = AppSettings(**raw)
         changed = False
 
-        # One-time migration: preserve defaults from components.json on first load only.
+        # первый запуск берёт дефолты из components.json
         if not bool(raw.get("component_selection_initialized", False)):
             components_raw = self.storage.read_json(self.storage.paths.data_dir / "components.json", default=[]) or []
             if isinstance(components_raw, list):
@@ -93,8 +93,13 @@ class SettingsManager:
             settings.selected_service_ids = []
             changed = True
         else:
+            service_migrations = {
+                "steam": "clouds",
+                "twitch": "fortnite",
+                "roblox": "gaming",
+            }
             migrated_service_ids = [
-                "clouds" if str(item).strip() == "steam" else "fortnite" if str(item).strip() == "twitch" else str(item).strip()
+                service_migrations.get(str(item).strip(), str(item).strip())
                 for item in selected_service_ids
             ]
             normalized_service_ids = [item for item in migrated_service_ids if item in SERVICE_PRESET_IDS]

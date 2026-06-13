@@ -40,7 +40,7 @@ class StorageManager:
                 "id": "goshkow-vpn",
                 "name": "goshkow vpn",
                 "description": "Авторская VPN-подписка без ограничений по трафику и количеству устройств. Доступна на смартфонах, ПК, ноутбуках и других устройствах.",
-                "version": "2.0.0",
+                "version": "",
                 "source": "https://vpn.goshkow.ru",
                 "command": [],
                 "enabled": False,
@@ -54,6 +54,16 @@ class StorageManager:
                 "source": "https://github.com/Flowseal/tg-ws-proxy",
                 "command": ["TgWsProxy_windows.exe"],
                 "enabled": True,
+                "autostart": False,
+            },
+            {
+                "id": "xbox-dns",
+                "name": "XBox DNS",
+                "description": "DNS-серверы для доступа к нейросетям, играм и полезным инструментам без VPN.",
+                "version": "",
+                "source": "https://xbox-dns.ru/",
+                "command": [],
+                "enabled": False,
                 "autostart": False,
             },
         ]
@@ -156,7 +166,7 @@ class StorageManager:
             "name": "Hub",
             "description": "Позволяет обойти блокировки самых популярных сервисов, включая игровые сервисы, социальные сети и другие платформы.",
             "author": "goshkow",
-            "version": "1.9.9a-unified3",
+            "version": "1.9.9a-unified4",
             "source_url": "bundled://unified-by-goshkow",
             "category": "gaming",
             "tags": ["gaming", "social", "cloudflare", "ubisoft", "arc-raiders"],
@@ -177,7 +187,7 @@ class StorageManager:
             ),
             None,
         )
-        desired_version = str(default_mod_meta.get("version", "1.9.9a-unified2"))
+        desired_version = str(default_mod_meta.get("version", "1.9.9a-unified4"))
         default_bundle = self._ensure_default_bundled_mod(
             default_mod_id,
             default_mod_meta,
@@ -275,7 +285,7 @@ class StorageManager:
         )
         return {
             "id": mod_id,
-                "version": str(meta.get("version", "1.9.9a-unified2")),
+                "version": str(meta.get("version", "1.9.9a-unified4")),
             "path": str(target_dir),
             "enabled": False,
             "name": str(meta.get("name", "")),
@@ -355,7 +365,8 @@ class StorageManager:
             "home.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#7ea1cf" d="M3 10.5L12 3l9 7.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 19.5z"/><path fill="#d5e0f3" d="M9 21v-6h6v6"/></svg>',
             "components.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2" fill="#6fae9a"/><rect x="13" y="3" width="8" height="8" rx="2" fill="#5a9b87"/><rect x="3" y="13" width="8" height="8" rx="2" fill="#8abcae"/><rect x="13" y="13" width="8" height="8" rx="2" fill="#4f8777"/></svg>',
             "component_zapret.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#67b68f" d="M12 2l8 3v6c0 5-3.6 9.2-8 11c-4.4-1.8-8-6-8-11V5z"/></svg>',
-            "component_tg.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="5" fill="#60a5fa"/><path fill="#eaf5ff" d="M7.4 11.6l8.6-3.5c.4-.2.8.2.7.6l-1.3 6.4c-.1.5-.7.7-1 .4l-2.4-1.8l-1.4 1.3c-.2.2-.5.1-.5-.2v-1.7l3.9-3.5l-4.9 3.1l-1.6-.6c-.4-.1-.4-.6-.1-.9z"/></svg>',
+            "component_tg.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="#60a5fa" d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0z"/><path fill="#eef7ff" d="M8.287 5.906c-.778.324-2.334.994-4.666 2.01c-.378.15-.577.298-.595.442c-.03.243.275.339.69.47l.175.055c.408.133.958.288 1.243.294c.26.006.549-.1.868-.32c2.179-1.471 3.304-2.214 3.374-2.23c.05-.012.12-.026.166.016c.047.041.042.12.037.141c-.03.129-1.227 1.241-1.846 1.817c-.193.18-.33.307-.358.336a8.154 8.154 0 0 1-.188.186c-.38.366-.664.64.015 1.088c.327.216.589.393.85.571c.284.194.568.387.936.629c.093.06.183.125.27.187c.331.236.63.448.997.414c.214-.02.435-.22.547-.82c.265-1.417.786-4.486.906-5.751a1.426 1.426 0 0 0-.013-.315a.337.337 0 0 0-.114-.217a.526.526 0 0 0-.31-.093c-.3.005-.763.166-2.984 1.09z"/></svg>',
+            "component_xbox_dns.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#22c55e" d="M15 12h11l6.2 10.6L38.7 12H49L38.2 31.1L50 52H38.9L31.8 39.7L24.6 52H14l11.9-20.5z"/></svg>',
             "mods.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#8f7f60" d="M2.5 7.2L12 2.5l9.5 4.7v9.6L12 21.5l-9.5-4.7z"/><path fill="#a59270" d="M12 2.5v19M2.5 7.2L12 12l9.5-4.8"/><path fill="none" stroke="#d9ceb6" stroke-width="1.1" stroke-linejoin="round" d="M2.5 7.2L12 2.5l9.5 4.7v9.6L12 21.5l-9.5-4.7z"/><circle cx="12" cy="12" r="2.1" fill="#d7c7a2"/><path fill="#c6b18b" d="M10.8 9.2h2.4v1.4h-2.4zm0 4.2h2.4v1.4h-2.4zM9.2 10.8h1.4v2.4H9.2zm4.2 0h1.4v2.4h-1.4z"/></svg>',
             "files.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#7fa9c9" d="M4 3h9l5 5v13H4z"/><path fill="#c8d9ea" d="M13 3v5h5"/></svg>',
             "logs.svg": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2" fill="#9083bd"/><rect x="7" y="7" width="10" height="2" fill="#e1dbf3"/><rect x="7" y="11" width="10" height="2" fill="#e1dbf3"/><rect x="7" y="15" width="6" height="2" fill="#e1dbf3"/></svg>',

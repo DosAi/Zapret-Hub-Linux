@@ -45,12 +45,14 @@ class AppSettings:
     goshkow_vpn_pending_start: bool = False
     zapret_was_running_before_goshkow_vpn: bool = False
     zapret_was_enabled_before_goshkow_vpn: bool = False
+    xbox_dns_was_enabled_before_goshkow_vpn: bool = False
     goshkow_vpn_subscription_url: str = ""
     goshkow_vpn_tun_enabled: bool = True
     goshkow_vpn_routing_mode: str = "global"
     goshkow_vpn_rules_mode: str = "blacklist"
     goshkow_vpn_system_proxy_mode: str = "pac"
     goshkow_vpn_processes: str = ""
+    goshkow_vpn_processes_exclude_mode: bool = False
     apply_update_on_next_launch: bool = False
 
 

@@ -17,6 +17,15 @@ class ServiceRule:
     test_targets: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
+_GAMING_LIST_FILES: tuple[tuple[str, str], ...] = (
+    ("list-general.txt", "sample_data/default_services/gaming/lists/list-general.txt"),
+    ("list-google.txt", "sample_data/default_services/gaming/lists/list-google.txt"),
+    ("list-exclude.txt", "sample_data/default_services/gaming/lists/list-exclude.txt"),
+    ("ipset-all.txt", "sample_data/default_services/gaming/lists/ipset-all.txt"),
+    ("ipset-exclude.txt", "sample_data/default_services/gaming/lists/ipset-exclude.txt"),
+)
+
+
 SERVICE_RULES: dict[str, ServiceRule] = {
     "cloudflare": ServiceRule(
         list_general=(
@@ -110,25 +119,13 @@ SERVICE_RULES: dict[str, ServiceRule] = {
             ("OVHcloud", "https://www.ovhcloud.com"),
         ),
     ),
-    "roblox": ServiceRule(
-        list_general=(
-            "roblox.com",
-            "rbxcdn.com",
-            "robloxcdn.com",
-            "rblx.com",
-            "robloxapp.com",
-            "gamejoin.roblox.com",
-            "setup.rbxcdn.com",
-            "setup.roblox.com",
-            "contentdelivery.roblox.com",
+    "gaming": ServiceRule(
+        extra_list_files=_GAMING_LIST_FILES,
+        test_targets=(
+            ("Gaming", "https://store.steampowered.com"),
+            ("Epic Games", "https://www.epicgames.com"),
+            ("Roblox", "https://www.roblox.com"),
         ),
-        ipset_all=(
-            "103.140.28.0/23",
-            "128.116.0.0/17",
-            "141.193.3.0/24",
-            "205.201.62.0/24",
-        ),
-        test_targets=(("Roblox", "https://www.roblox.com"), ("Roblox CDN", "https://setup.rbxcdn.com")),
     ),
     "tiktok": ServiceRule(
         list_general=("tiktok.com", "tiktokcdn.com", "tiktokv.com", "byteoversea.com", "ibytedtos.com", "muscdn.com", "bytecdn.cn"),

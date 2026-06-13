@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import ipaddress
 import json
 import os
 import re
@@ -83,6 +84,10 @@ _TORRENT_PROCESS_NAMES = (
     "tixati.exe",
     "webtorrent.exe",
 )
+
+_XBOX_DNS_URL = "https://xbox-dns.ru/"
+_XBOX_DNS_FALLBACK_IPV4 = ("111.88.96.50", "111.88.96.51")
+_XBOX_DNS_FALLBACK_IPV6 = ("2a00:ab00:1233:26::50", "2a00:ab00:1233:26::51")
 
 
 class _WindowsJob:
@@ -278,6 +283,11 @@ class ProcessManager:
                 else:
                     state.status = "stopped"
                     state.pid = None
+            elif component.id == "xbox-dns":
+                dns_state = self._read_xbox_dns_state()
+                state.status = "running" if bool(dns_state.get("active", False)) else "stopped"
+                state.pid = None
+                state.last_error = str(dns_state.get("last_error", "") or "")
             else:
                 process = self._processes.get(component.id)
                 if process and process.poll() is None:
@@ -310,6 +320,10 @@ class ProcessManager:
             return state
         if component.id == "goshkow-vpn":
             state = self._start_goshkow_vpn(component_id)
+            self._invalidate_state_cache()
+            return state
+        if component.id == "xbox-dns":
+            state = self._start_xbox_dns(component_id)
             self._invalidate_state_cache()
             return state
         current = self._processes.get(component_id)
@@ -400,6 +414,10 @@ class ProcessManager:
             self.logging.log("info", "goshkow vpn stopped")
             self._invalidate_state_cache()
             return state
+        if component_id == "xbox-dns":
+            state = self._stop_xbox_dns(component_id)
+            self._invalidate_state_cache()
+            return state
         process = self._processes.get(component_id)
         if process and process.poll() is None:
             process.terminate()
@@ -466,11 +484,432 @@ class ProcessManager:
         target.enabled = not target.enabled
         enabled_ids = sorted(component.id for component in components if component.enabled)
         self.settings.update(enabled_component_ids=enabled_ids)
-        if not target.enabled:
+        if target.id == "xbox-dns":
+            if target.enabled:
+                if self._xbox_dns_should_apply_now():
+                    self.start_component(component_id)
+                else:
+                    self._prepare_xbox_dns(component_id)
+            else:
+                self.stop_component(component_id)
+        elif not target.enabled:
             self.stop_component(component_id)
         self.logging.log("info", "Component enabled state changed", component_id=component_id, enabled=target.enabled)
         self._invalidate_state_cache()
         return target
+
+    def _xbox_dns_state_path(self) -> Path:
+        return self.storage.paths.data_dir / "xbox_dns_state.json"
+
+    def _read_xbox_dns_state(self) -> dict[str, Any]:
+        raw = self.storage.read_json(self._xbox_dns_state_path(), default={}) or {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _write_xbox_dns_state(self, state: dict[str, Any]) -> None:
+        self.storage.write_json(self._xbox_dns_state_path(), state)
+
+    def _xbox_dns_should_apply_now(self) -> bool:
+        for state in self._compute_states():
+            if state.component_id == "xbox-dns":
+                continue
+            if state.status == "running":
+                return True
+        return False
+
+    def _parse_xbox_dns_servers(self, html: str) -> dict[str, list[str]]:
+        ipv4: list[str] = []
+        ipv6: list[str] = []
+        seen: set[str] = set()
+        for token in re.findall(r"[0-9A-Fa-f:.]{3,}", html or ""):
+            candidate = token.strip().strip(".,;:()[]{}<>`'\"")
+            if not candidate or candidate in seen:
+                continue
+            try:
+                parsed = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if parsed.is_loopback or parsed.is_unspecified:
+                continue
+            seen.add(candidate)
+            if parsed.version == 4:
+                ipv4.append(candidate)
+            elif parsed.version == 6:
+                ipv6.append(candidate)
+        return {"ipv4": ipv4[:2], "ipv6": ipv6[:2]}
+
+    def _fetch_xbox_dns_servers(self) -> dict[str, Any]:
+        try:
+            request = urllib.request.Request(
+                _XBOX_DNS_URL,
+                headers={"User-Agent": "Zapret-Hub/2.0 xbox-dns"},
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                html = response.read().decode("utf-8", errors="ignore")
+            parsed = self._parse_xbox_dns_servers(html)
+            if parsed["ipv4"] and parsed["ipv6"]:
+                return {**parsed, "source": "remote"}
+            raise ValueError("Xbox DNS page did not contain both IPv4 and IPv6 DNS addresses")
+        except Exception as error:
+            self.logging.log("warning", "Xbox DNS remote fetch failed, using fallback", component_id="xbox-dns", error=str(error))
+            return {
+                "ipv4": list(_XBOX_DNS_FALLBACK_IPV4),
+                "ipv6": list(_XBOX_DNS_FALLBACK_IPV6),
+                "source": "fallback",
+                "last_error": str(error),
+            }
+
+    def _snapshot_windows_dns(self) -> list[dict[str, Any]]:
+        script = r"""
+$rows = @()
+function Test-HubIgnoredAdapter($adapter) {
+  $name = (([string]$adapter.Name) + ' ' + ([string]$adapter.InterfaceDescription)).ToLowerInvariant()
+  if ($name.Contains('loopback')) { return $true }
+  if ($name.Contains('wintun')) { return $true }
+  if ($name.Contains('wireguard')) { return $true }
+  if ($name.Contains('openvpn')) { return $true }
+  if ($name.Contains('tap')) { return $true }
+  if ($name.Contains('vpn')) { return $true }
+  if ($name.Contains('v2ray')) { return $true }
+  if ($name.Contains('xray')) { return $true }
+  if ($name.Contains('sing-box')) { return $true }
+  if ($name.Contains('clash')) { return $true }
+  if ($name.Contains('tun')) { return $true }
+  return $false
+}
+function Get-HubRegistryDns($guid, $family) {
+  if (-not $guid) { return "" }
+  $root = if ($family -eq "ipv6") { "Tcpip6" } else { "Tcpip" }
+  $path = "HKLM:\SYSTEM\CurrentControlSet\Services\$root\Parameters\Interfaces\$guid"
+  try {
+    $value = (Get-ItemProperty -LiteralPath $path -Name NameServer -ErrorAction Stop).NameServer
+    return [string]$value
+  } catch {
+    return ""
+  }
+}
+function Split-HubDnsList($value) {
+  @([string]$value -split "[,\s]+" | Where-Object { [string]$_ -ne "" })
+}
+$adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface -and -not (Test-HubIgnoredAdapter $_) })
+if ($adapters.Count -eq 0) {
+  $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and -not (Test-HubIgnoredAdapter $_) })
+}
+$adapters | ForEach-Object {
+  $ifIndex = [int]$_.ifIndex
+  $alias = [string]$_.Name
+  $guid = [string]$_.InterfaceGuid
+  $v4 = Get-DnsClientServerAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+  $v6 = Get-DnsClientServerAddress -InterfaceIndex $ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue
+  $v4Manual = Get-HubRegistryDns $guid "ipv4"
+  $v6Manual = Get-HubRegistryDns $guid "ipv6"
+  $rows += [pscustomobject]@{
+    interface_index = $ifIndex
+    interface_alias = $alias
+    interface_guid = $guid
+    ipv4 = if ($v4Manual) { @(Split-HubDnsList $v4Manual) } else { @($v4.ServerAddresses) }
+    ipv6 = if ($v6Manual) { @(Split-HubDnsList $v6Manual) } else { @() }
+    ipv4_manual = [bool]$v4Manual
+    ipv6_manual = [bool]$v6Manual
+  }
+}
+if ($rows.Count -eq 0) {
+  $dnsRows = @(Get-DnsClientServerAddress -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses.Count -gt 0 })
+  $groups = @{}
+  foreach ($dns in $dnsRows) {
+    $ifIndex = [int]$dns.InterfaceIndex
+    $alias = [string]$dns.InterfaceAlias
+    $probe = [pscustomobject]@{ Name = $alias; InterfaceDescription = $alias }
+    if ($ifIndex -le 0 -or (Test-HubIgnoredAdapter $probe)) { continue }
+    if (-not $groups.ContainsKey($ifIndex)) {
+      $adapter = Get-NetAdapter -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue
+      $guid = if ($adapter) { [string]$adapter.InterfaceGuid } else { "" }
+      $v4Manual = Get-HubRegistryDns $guid "ipv4"
+      $v6Manual = Get-HubRegistryDns $guid "ipv6"
+      $groups[$ifIndex] = [pscustomobject]@{
+        interface_index = $ifIndex
+        interface_alias = $alias
+        interface_guid = $guid
+        ipv4 = @()
+        ipv6 = @()
+        ipv4_manual = [bool]$v4Manual
+        ipv6_manual = [bool]$v6Manual
+      }
+      if ($v4Manual) { $groups[$ifIndex].ipv4 = @(Split-HubDnsList $v4Manual) }
+      if ($v6Manual) { $groups[$ifIndex].ipv6 = @(Split-HubDnsList $v6Manual) }
+    }
+    if ([string]$dns.AddressFamily -eq 'IPv4' -and -not $groups[$ifIndex].ipv4_manual) {
+      $groups[$ifIndex].ipv4 = @($dns.ServerAddresses)
+    }
+  }
+  foreach ($entry in $groups.Values) {
+    $rows += $entry
+  }
+}
+@($rows) | ConvertTo-Json -Compress -Depth 4
+"""
+        raw = self._run_powershell_json(script)
+        if not raw:
+            return []
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(payload, dict):
+            payload = [payload]
+        if not isinstance(payload, list):
+            return []
+        adapters: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            alias = str(item.get("interface_alias", "") or "").strip()
+            if not alias:
+                continue
+            adapters.append(
+                {
+                    "interface_index": int(item.get("interface_index", 0) or 0),
+                    "interface_alias": alias,
+                    "interface_guid": str(item.get("interface_guid", "") or "").strip(),
+                    "ipv4": [str(value) for value in self._ensure_list(item.get("ipv4", [])) if str(value).strip()],
+                    "ipv6": [str(value) for value in self._ensure_list(item.get("ipv6", [])) if str(value).strip()],
+                    "ipv4_manual": bool(item.get("ipv4_manual", False)),
+                    "ipv6_manual": bool(item.get("ipv6_manual", False)),
+                }
+            )
+        return adapters
+
+    def _prepare_xbox_dns(self, component_id: str = "xbox-dns") -> ComponentState:
+        state_payload = self._read_xbox_dns_state()
+        previous_adapters = state_payload.get("previous_adapters", [])
+        if not bool(state_payload.get("active", False)):
+            previous_adapters = self._snapshot_windows_dns()
+        elif not isinstance(previous_adapters, list) or not previous_adapters:
+            previous_adapters = self._snapshot_windows_dns()
+        servers = state_payload.get("servers")
+        if not isinstance(servers, dict):
+            servers = self._fetch_xbox_dns_servers()
+        new_payload = dict(state_payload)
+        new_payload.update(
+            {
+                "active": False,
+                "previous_adapters": previous_adapters,
+                "servers": servers,
+                "last_error": "",
+                "prepared_at": datetime.utcnow().isoformat(),
+            }
+        )
+        self._write_xbox_dns_state(new_payload)
+        state = ComponentState(component_id=component_id, status="stopped", pid=None, last_error="")
+        self._states[component_id] = state
+        self._invalidate_state_cache()
+        return state
+
+    def _ensure_list(self, value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        if value in (None, ""):
+            return []
+        return [value]
+
+    def _apply_windows_dns(self, adapters: list[dict[str, Any]], ipv4: list[str], ipv6: list[str]) -> None:
+        payload = json.dumps({"adapters": adapters, "ipv4": ipv4, "ipv6": ipv6}, ensure_ascii=False)
+        script = """
+$payload = @'
+__PAYLOAD__
+'@ | ConvertFrom-Json
+function Set-HubDnsFamily($family, $alias, $servers) {
+  $serverList = @($servers | Where-Object { [string]$_ -ne '' })
+  if (-not $alias) { return }
+  if ($serverList.Count -gt 0) {
+    & netsh interface $family set dnsservers name="$alias" source=static address="$($serverList[0])" validate=no | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "netsh $family set dnsservers failed for $alias" }
+    for ($i = 1; $i -lt $serverList.Count; $i++) {
+      & netsh interface $family add dnsservers name="$alias" address="$($serverList[$i])" index=($i + 1) validate=no | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "netsh $family add dnsservers failed for $alias" }
+    }
+  } else {
+    & netsh interface $family delete dnsservers name="$alias" all | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      & netsh interface $family set dnsservers name="$alias" source=dhcp | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "netsh $family reset dnsservers failed for $alias" }
+    }
+  }
+}
+function Clear-HubRegistryDns($guid, $family) {
+  if (-not $guid) { return }
+  $root = if ($family -eq "ipv6") { "Tcpip6" } else { "Tcpip" }
+  $path = "HKLM:\SYSTEM\CurrentControlSet\Services\$root\Parameters\Interfaces\$guid"
+  if (Test-Path -LiteralPath $path) {
+    try { Set-ItemProperty -LiteralPath $path -Name NameServer -Value "" -ErrorAction Stop } catch {}
+  }
+}
+foreach ($adapter in @($payload.adapters)) {
+  $ifIndex = [int]$adapter.interface_index
+  if ($ifIndex -le 0) { continue }
+  $alias = [string]$adapter.interface_alias
+  Set-HubDnsFamily "ipv4" $alias @($payload.ipv4)
+  Set-HubDnsFamily "ipv6" $alias @($payload.ipv6)
+}
+""".replace("__PAYLOAD__", payload)
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            startupinfo=self._startupinfo,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout or "Failed to apply DNS.").strip())
+
+    def _restore_windows_dns(self, adapters: list[dict[str, Any]]) -> None:
+        payload = json.dumps({"adapters": adapters}, ensure_ascii=False)
+        script = """
+$payload = @'
+__PAYLOAD__
+'@ | ConvertFrom-Json
+function Set-HubDnsFamily($family, $alias, $servers) {
+  $serverList = @($servers | Where-Object { [string]$_ -ne '' })
+  if (-not $alias) { return }
+  if ($serverList.Count -gt 0) {
+    & netsh interface $family set dnsservers name="$alias" source=static address="$($serverList[0])" validate=no | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "netsh $family set dnsservers failed for $alias" }
+    for ($i = 1; $i -lt $serverList.Count; $i++) {
+      & netsh interface $family add dnsservers name="$alias" address="$($serverList[$i])" index=($i + 1) validate=no | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "netsh $family add dnsservers failed for $alias" }
+    }
+  } else {
+    & netsh interface $family delete dnsservers name="$alias" all | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      & netsh interface $family set dnsservers name="$alias" source=dhcp | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "netsh $family reset dnsservers failed for $alias" }
+    }
+  }
+}
+foreach ($adapter in @($payload.adapters)) {
+  $ifIndex = [int]$adapter.interface_index
+  if ($ifIndex -le 0) { continue }
+  $alias = [string]$adapter.interface_alias
+  $guid = [string]$adapter.interface_guid
+  $ipv4Manual = if ($null -ne $adapter.ipv4_manual) { [bool]$adapter.ipv4_manual } else { @($adapter.ipv4).Count -gt 0 }
+  $ipv6Manual = if ($null -ne $adapter.ipv6_manual) { [bool]$adapter.ipv6_manual } else { @($adapter.ipv6).Count -gt 0 }
+  & netsh interface ipv4 delete dnsservers name="$alias" all | Out-Null
+  & netsh interface ipv6 delete dnsservers name="$alias" all | Out-Null
+  Clear-HubRegistryDns $guid "ipv4"
+  Clear-HubRegistryDns $guid "ipv6"
+  if ($ipv4Manual) { Set-HubDnsFamily "ipv4" $alias @($adapter.ipv4) }
+  if ($ipv6Manual) { Set-HubDnsFamily "ipv6" $alias @($adapter.ipv6) }
+}
+""".replace("__PAYLOAD__", payload)
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            startupinfo=self._startupinfo,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout or "Failed to restore DNS.").strip())
+
+    def _start_xbox_dns(self, component_id: str = "xbox-dns") -> ComponentState:
+        state_payload = self._read_xbox_dns_state()
+        was_active = bool(state_payload.get("active", False))
+        previous_adapters = state_payload.get("previous_adapters", [])
+        if not was_active and not state_payload.get("prepared_at"):
+            previous_adapters = self._snapshot_windows_dns()
+        elif not isinstance(previous_adapters, list) or not previous_adapters:
+            previous_adapters = self._snapshot_windows_dns()
+        if not isinstance(previous_adapters, list):
+            previous_adapters = []
+        if not previous_adapters:
+            state = ComponentState(component_id=component_id, status="error", last_error="Failed to read current Windows DNS settings.")
+            self._states[component_id] = state
+            self._write_xbox_dns_state({"active": False, "last_error": state.last_error})
+            return state
+        servers = self._fetch_xbox_dns_servers()
+        try:
+            self._apply_windows_dns(previous_adapters, list(servers.get("ipv4", []) or []), list(servers.get("ipv6", []) or []))
+        except Exception as error:
+            if not was_active:
+                try:
+                    self._restore_windows_dns(previous_adapters)
+                except Exception:
+                    pass
+            message = str(error)
+            state = ComponentState(component_id=component_id, status="error", last_error=message)
+            self._states[component_id] = state
+            self._write_xbox_dns_state(
+                {
+                    "active": was_active,
+                    "previous_adapters": previous_adapters if was_active else [],
+                    "servers": servers,
+                    "last_error": message,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            )
+            self.logging.log("error", "Xbox DNS failed to apply", component_id=component_id, error=message)
+            return state
+        self._write_xbox_dns_state(
+            {
+                "active": True,
+                "previous_adapters": previous_adapters,
+                "servers": servers,
+                "last_error": "",
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        )
+        state = ComponentState(component_id=component_id, status="running", pid=None, last_error="")
+        self._states[component_id] = state
+        self.logging.log("info", "Xbox DNS applied", component_id=component_id, source=str(servers.get("source", "")))
+        return state
+
+    def _stop_xbox_dns(self, component_id: str = "xbox-dns") -> ComponentState:
+        state_payload = self._read_xbox_dns_state()
+        previous_adapters = state_payload.get("previous_adapters", [])
+        if not bool(state_payload.get("active", False)):
+            state = ComponentState(component_id=component_id, status="stopped", pid=None, last_error="")
+            self._states[component_id] = state
+            return state
+        if not isinstance(previous_adapters, list) or not previous_adapters:
+            message = "No saved DNS snapshot to restore."
+            state = ComponentState(component_id=component_id, status="error", last_error=message)
+            self._states[component_id] = state
+            self._write_xbox_dns_state({**state_payload, "active": True, "last_error": message})
+            return state
+        try:
+            self._restore_windows_dns(previous_adapters)
+        except Exception as error:
+            message = str(error)
+            state = ComponentState(component_id=component_id, status="error", last_error=message)
+            self._states[component_id] = state
+            self._write_xbox_dns_state({**state_payload, "active": True, "last_error": message})
+            self.logging.log("error", "Xbox DNS failed to restore", component_id=component_id, error=message)
+            return state
+        new_payload = dict(state_payload)
+        new_payload["active"] = False
+        new_payload["last_error"] = ""
+        new_payload["restored_at"] = datetime.utcnow().isoformat()
+        self._write_xbox_dns_state(new_payload)
+        state = ComponentState(component_id=component_id, status="stopped", pid=None, last_error="")
+        self._states[component_id] = state
+        self.logging.log("info", "Xbox DNS restored previous DNS settings", component_id=component_id)
+        return state
+
+    def refresh_xbox_dns(self) -> dict[str, Any]:
+        settings = self.settings.get()
+        enabled = "xbox-dns" in {str(item) for item in list(settings.enabled_component_ids or [])}
+        state_payload = self._read_xbox_dns_state()
+        servers = self._fetch_xbox_dns_servers()
+        if bool(state_payload.get("active", False)) or (enabled and self._xbox_dns_should_apply_now()):
+            state = self._start_xbox_dns("xbox-dns")
+            return {"status": state.status, "error": state.last_error, "servers": self._read_xbox_dns_state().get("servers", servers)}
+        if enabled:
+            self._prepare_xbox_dns("xbox-dns")
+            state_payload = self._read_xbox_dns_state()
+        state_payload.update({"servers": servers, "last_error": "", "updated_at": datetime.utcnow().isoformat()})
+        self._write_xbox_dns_state(state_payload)
+        return {"status": "stopped", "error": "", "servers": servers}
 
     def toggle_component_autostart(self, component_id: str) -> ComponentDefinition:
         components = self.list_components()
@@ -482,7 +921,7 @@ class ProcessManager:
         return target
 
     def _start_zapret(self, component_id: str) -> ComponentState:
-        # всегда перезапускаем, чтобы не было конфликтов со сторонними процессами
+        # перезапуск без споров со старыми процессами
         self.stop_component(component_id)
         selected_option = self._resolve_selected_general_option()
         if selected_option is None:
@@ -854,6 +1293,7 @@ class ProcessManager:
         if endpoint is None:
             raise ValueError("Формат выбранной локации пока не поддерживается во встроенном TUN-режиме.")
         processes = [item.strip() for item in str(vpn_state.get("processes", "") or "").split(",") if item.strip()]
+        processes_exclude_mode = bool(vpn_state.get("processes_exclude_mode", False))
         rules_mode = str(vpn_state.get("rules_mode", "blacklist") or "blacklist")
         routing_mode = str(vpn_state.get("routing_mode", "global") or "global")
         tun_enabled = bool(vpn_state.get("tun_enabled", True))
@@ -867,8 +1307,12 @@ class ProcessManager:
             {"action": "route", "ip_is_private": True, "outbound": "direct"},
         ]
         if processes:
-            route_rules.append({"action": "route", "process_name": processes, "outbound": "proxy"})
-            route_final = "direct"
+            if processes_exclude_mode:
+                route_rules.append({"action": "route", "process_name": processes, "outbound": "direct"})
+                route_final = "proxy"
+            else:
+                route_rules.append({"action": "route", "process_name": processes, "outbound": "proxy"})
+                route_final = "direct"
         inbound: dict[str, Any]
         if tun_enabled:
             inbound = {
@@ -1115,7 +1559,7 @@ class ProcessManager:
                 ).strip()
                 if not arg or arg == "^":
                     continue
-                # убираем лишние кавычки из bat-синтаксиса
+                # кавычки из bat тут только мешают
                 if arg.startswith('"') and arg.endswith('"') and len(arg) >= 2:
                     arg = arg[1:-1]
                 if '="' in arg and arg.endswith('"'):
@@ -1307,7 +1751,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             capture_output=True,
             text=True,
             check=False,
-            creationflags=self._creationflags,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             startupinfo=startup,
         )
         if proc.returncode != 0:
@@ -1430,7 +1874,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             game_flag.unlink(missing_ok=True)
 
     def _start_tg_ws_proxy(self, component_id: str) -> ComponentState:
-        # всегда перезапускаем, чтобы не было конфликтов со сторонними процессами
+        # перезапуск без споров со старыми процессами
         self.stop_component(component_id)
 
         settings = self.settings.get()
@@ -1441,7 +1885,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             secret = secrets.token_hex(16)
         if secret != settings.tg_proxy_secret:
             settings = self.settings.update(tg_proxy_secret=secret)
-        # подчищаем старый процесс, если он остался в трее
+        # старый процесс мог остаться в трее
         self._kill_image("TgWsProxy_windows.exe")
         try:
             (self.storage.paths.logs_dir / "tg_worker_error.log").unlink(missing_ok=True)
@@ -1536,8 +1980,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if item:
                 result.append(item)
         if not result:
-            # Upstream applies hard-coded defaults when --dc-ip is omitted.
-            # A worker-local sentinel asks it to keep the map truly empty.
+            # без этого tg-ws-proxy сам подставляет дефолтные dc
             return ["__empty__"]
         return result
 
@@ -2353,7 +2796,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "name": "Hub",
                 "author": "goshkow",
                 "description": "Bundled unified pack",
-                "version": "1.9.9a-unified3",
+                "version": "1.9.9a-unified4",
                 "source_url": "bundled://unified-by-goshkow",
             }, force_refresh=True)
             self.storage.ensure_layout()
@@ -3074,16 +3517,10 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def _ensure_telegram_and_open_proxy_link(self, host: str, port: int, secret: str) -> dict[str, Any]:
         self.logging.log("info", "TG WS Proxy auto-connect requested", component_id="tg-ws-proxy", host=host, port=port)
         running_before = self._is_telegram_running()
-        candidate_found = False
+        candidate_found = any(candidate.exists() for candidate in self._telegram_desktop_candidates())
         launch_requested = False
         if not running_before:
-            self.logging.log("info", "Telegram Desktop is not running, attempting to launch it", component_id="tg-ws-proxy")
-            candidate_found, launch_requested = self._start_telegram_desktop()
-            for _ in range(40):
-                if self._is_telegram_running():
-                    self.logging.log("info", "Telegram Desktop detected after launch", component_id="tg-ws-proxy")
-                    break
-                time.sleep(0.25)
+            self.logging.log("info", "Telegram Desktop is not running, opening proxy link without forced launch", component_id="tg-ws-proxy")
         running_after = self._is_telegram_running()
         self.logging.log("info", "Sending proxy link to Telegram", component_id="tg-ws-proxy")
         link_opened = self._open_telegram_proxy_link(host=host, port=port, secret=secret)
@@ -3093,7 +3530,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             "desktop_candidate_found": candidate_found,
             "launch_requested": launch_requested,
             "link_opened": link_opened,
-            "missing": not running_after and not candidate_found and not link_opened,
+            "missing": not running_after and not link_opened,
         }
         self._telegram_proxy_launch_info = info
         if not running_after and not link_opened:

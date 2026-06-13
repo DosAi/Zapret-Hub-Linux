@@ -13,8 +13,7 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
-# Force Nuitka to bundle the stdlib and crypto dependencies that are only
-# imported by the external tg-ws-proxy runtime package at worker startup.
+# эти импорты нужны nuitka, иначе tg-ws-proxy вспоминает о них только при запуске
 from cryptography.hazmat.primitives.ciphers import Cipher as _Cipher
 from cryptography.hazmat.primitives.ciphers import algorithms as _algorithms
 from cryptography.hazmat.primitives.ciphers import modes as _modes

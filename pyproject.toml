@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zapret-hub"
-version = "2.0.0"
+version = "2.0.1"
 description = "Windows desktop hub for managing external network utilities and configuration packs."
 readme = "README.md"
 requires-python = ">=3.11"

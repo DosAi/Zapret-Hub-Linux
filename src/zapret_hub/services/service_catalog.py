@@ -21,7 +21,7 @@ SERVICE_PRESETS: tuple[ServicePreset, ...] = (
     ServicePreset("discord", "Discord", "Discord", "Голосовой чат, сообщения и медиа Discord", "Voice chat, messaging, and Discord media", "discord.svg", "#5865f2", "Голосовой чат, сообщения и медиа", "Voice chat, messages, and media"),
     ServicePreset("youtube", "YouTube", "YouTube", "Видео, превью, Shorts и CDN Google", "Video playback, thumbnails, Shorts, and Google CDN", "youtube.svg", "#ff0033"),
     ServicePreset("telegram-desktop", "Telegram", "Telegram", "Десктопное приложение Telegram для ПК", "Telegram desktop app for PC", "telegram.svg", "#26a5e4", "Десктопное приложение Telegram", "Telegram desktop app"),
-    ServicePreset("roblox", "Roblox", "Roblox", "Игровая платформа и CDN Roblox", "Roblox platform and CDN", "roblox.svg", "#d8dde8"),
+    ServicePreset("gaming", "Gaming", "Gaming", "Разблокирует большинство игровых сервисов", "Unlocks most gaming services", "gaming.svg", "#64d488", "Большинство игровых сервисов", "Most gaming services"),
     ServicePreset("clouds", "Clouds", "Clouds", "Amazon CDN, CloudFront, BunnyCDN, OVH SAS и другие облачные CDN", "Amazon CDN, CloudFront, BunnyCDN, OVH SAS, and other cloud CDNs", "clouds.svg", "#66c0f4", "Amazon, Cloudfront, Bunny и другие", "Amazon, CloudFront, Bunny, and others"),
     ServicePreset("tiktok", "TikTok", "TikTok", "Лента, видео, авторизация и CDN TikTok", "Feed, video playback, auth, and TikTok CDN", "tiktok.svg", "#25f4ee", "Лента, видео, авторизация и CDN", "Feed, video, auth, and CDN"),
     ServicePreset("instagram", "Instagram", "Instagram", "Лента, фото, Reels и CDN Instagram", "Feed, photos, Reels, and Instagram CDN", "instagram.svg", "#e4405f"),
@@ -48,17 +48,27 @@ FORTNITE_GENERAL_PRIORITY = (
     "general (ALT9.1).bat",
 )
 
+GAMING_GENERAL_PRIORITY = (
+    "general (Gaming).bat",
+)
+
 
 def prioritize_generals_for_services(
     options: list[dict[str, str]],
     selected_service_ids: list[str] | tuple[str, ...] | set[str],
 ) -> list[dict[str, str]]:
-    if "fortnite" not in {str(item) for item in selected_service_ids}:
+    selected = {str(item) for item in selected_service_ids}
+    if "gaming" not in selected and "fortnite" not in selected:
         return list(options)
 
     prioritized: list[dict[str, str]] = []
     used: set[str] = set()
-    for wanted in FORTNITE_GENERAL_PRIORITY:
+    wanted_order: list[str] = []
+    if "gaming" in selected:
+        wanted_order.extend(GAMING_GENERAL_PRIORITY)
+    if "fortnite" in selected:
+        wanted_order.extend(FORTNITE_GENERAL_PRIORITY)
+    for wanted in wanted_order:
         for option in options:
             if str(option.get("name", "")).strip().lower() != wanted.lower():
                 continue
@@ -66,8 +76,9 @@ def prioritize_generals_for_services(
             if not option_id or option_id in used:
                 continue
             candidate = dict(option)
-            candidate["ipset_mode"] = "any"
-            candidate["game_mode"] = "tcpudp"
+            if wanted in FORTNITE_GENERAL_PRIORITY:
+                candidate["ipset_mode"] = "any"
+                candidate["game_mode"] = "tcpudp"
             prioritized.append(candidate)
             used.add(option_id)
             break
