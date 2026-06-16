@@ -29,7 +29,7 @@ class StorageManager:
             {
                 "id": "zapret",
                 "name": "Zapret",
-                "description": "РћСЃРЅРѕРІРЅРѕР№ РјРѕРґСѓР»СЊ РѕР±С…РѕРґР° Р±Р»РѕРєРёСЂРѕРІРѕРє РґР»СЏ СЃР°Р№С‚РѕРІ Рё СЃРµСЂРІРёСЃРѕРІ.",
+                "description": "Основной модуль обхода блокировок для сайтов и сервисов.",
                 "version": zapret_version,
                 "source": "https://github.com/Flowseal/zapret-discord-youtube",
                 "command": ["cmd.exe", "/c", "general.bat"],
@@ -49,7 +49,7 @@ class StorageManager:
             {
                 "id": "tg-ws-proxy",
                 "name": "Tg-Ws-Proxy",
-                "description": "РџСЂРѕРєСЃРё РґР»СЏ Telegram С‡РµСЂРµР· Р»РѕРєР°Р»СЊРЅС‹Р№ РїРѕСЂС‚.",
+                "description": "Прокси для Telegram через локальный порт.",
                 "version": tg_version,
                 "source": "https://github.com/Flowseal/tg-ws-proxy",
                 "command": ["TgWsProxy_windows.exe"],

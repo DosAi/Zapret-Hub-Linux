@@ -97,6 +97,7 @@ class SettingsManager:
                 "steam": "clouds",
                 "twitch": "fortnite",
                 "roblox": "gaming",
+                "tiktok": "ai",
             }
             migrated_service_ids = [
                 service_migrations.get(str(item).strip(), str(item).strip())
@@ -106,13 +107,6 @@ class SettingsManager:
             if normalized_service_ids != list(settings.selected_service_ids):
                 settings.selected_service_ids = normalized_service_ids
                 changed = True
-            if "fortnite" in normalized_service_ids:
-                if settings.zapret_ipset_mode != "any":
-                    settings.zapret_ipset_mode = "any"
-                    changed = True
-                if settings.zapret_game_filter_mode != "tcpudp":
-                    settings.zapret_game_filter_mode = "tcpudp"
-                    changed = True
 
         if changed:
             self.storage.write_json(self._settings_path, asdict(settings))

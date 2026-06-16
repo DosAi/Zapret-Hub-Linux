@@ -34,6 +34,10 @@ class NotificationManager:
     def unread_count(self) -> int:
         return sum(1 for item in self.list() if not item.read)
 
+    @staticmethod
+    def _now_local_iso() -> str:
+        return datetime.now().astimezone().isoformat()
+
     def add(
         self,
         level: str,
@@ -54,7 +58,7 @@ class NotificationManager:
                 existing.title = title.strip() or "Zapret Hub"
                 existing.message = message.strip()
                 existing.source = (source or "app").strip() or "app"
-                existing.created_at = datetime.now().isoformat()
+                existing.created_at = self._now_local_iso()
                 existing.read = False
                 existing.details.update(entry_details)
                 entries[index] = existing
@@ -66,7 +70,7 @@ class NotificationManager:
             title=title.strip() or "Zapret Hub",
             message=message.strip(),
             source=(source or "app").strip() or "app",
-            created_at=datetime.now().isoformat(),
+            created_at=self._now_local_iso(),
             read=False,
             details=entry_details,
         )

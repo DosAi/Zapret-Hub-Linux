@@ -16,7 +16,6 @@ from zapret_hub.services.merge import MergeEngine
 from zapret_hub.services.mods import ModsManager
 from zapret_hub.services.notifications import NotificationManager
 from zapret_hub.services.profiles import ProfilesManager
-from zapret_hub.services.service_catalog import FORTNITE_GENERAL_PRIORITY, GAMING_GENERAL_PRIORITY
 from zapret_hub.services.settings import SettingsManager
 from zapret_hub.services.storage import StorageManager
 from zapret_hub.services.updates import UpdatesManager
@@ -138,37 +137,6 @@ def _prime_first_run_state(settings: SettingsManager, processes: ProcessManager)
         changes["zapret_ipset_mode"] = "loaded"
     if str(current.zapret_game_filter_mode or "").strip() not in {"disabled", "tcp", "udp", "tcpudp"}:
         changes["zapret_game_filter_mode"] = "disabled"
-    selected_services = set(current.selected_service_ids or [])
-    if "gaming" in selected_services:
-        options = list(processes.list_zapret_generals())
-        for wanted in GAMING_GENERAL_PRIORITY:
-            match = next(
-                (
-                    option
-                    for option in options
-                    if str(option.get("name", "")).strip().lower() == wanted.lower()
-                ),
-                None,
-            )
-            if match is not None:
-                changes["selected_zapret_general"] = str(match.get("id", "") or "")
-                break
-    elif "fortnite" in selected_services:
-        changes["zapret_ipset_mode"] = "any"
-        changes["zapret_game_filter_mode"] = "tcpudp"
-        options = list(processes.list_zapret_generals())
-        for wanted in FORTNITE_GENERAL_PRIORITY:
-            match = next(
-                (
-                    option
-                    for option in options
-                    if str(option.get("name", "")).strip().lower() == wanted.lower()
-                ),
-                None,
-            )
-            if match is not None:
-                changes["selected_zapret_general"] = str(match.get("id", "") or "")
-                break
     if changes:
         settings.update(**changes)
 

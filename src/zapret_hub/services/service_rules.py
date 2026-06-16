@@ -127,10 +127,7 @@ SERVICE_RULES: dict[str, ServiceRule] = {
             ("Roblox", "https://www.roblox.com"),
         ),
     ),
-    "tiktok": ServiceRule(
-        list_general=("tiktok.com", "tiktokcdn.com", "tiktokv.com", "byteoversea.com", "ibytedtos.com", "muscdn.com", "bytecdn.cn"),
-        test_targets=(("TikTok", "https://www.tiktok.com"),),
-    ),
+    "ai": ServiceRule(),
     "instagram": ServiceRule(
         list_general=("instagram.com", "cdninstagram.com", "static.cdninstagram.com", "ig.me", "threads.net"),
         test_targets=(("Instagram", "https://www.instagram.com"),),

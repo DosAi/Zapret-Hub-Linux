@@ -327,7 +327,7 @@ def run(argv: list[str] | None = None) -> int:
             if known.autostart_launch and settings.auto_run_components:
                 def _start_after_backend() -> None:
                     if context.backend is not None:
-                        window.start_enabled_components_async(autostart_only=True)
+                        QTimer.singleShot(12000, lambda: window.start_enabled_components_async(autostart_only=False))
                 autostart_callback = _start_after_backend
             else:
                 autostart_callback = None

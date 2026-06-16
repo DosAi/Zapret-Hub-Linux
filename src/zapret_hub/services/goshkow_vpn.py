@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -184,7 +185,8 @@ class GoshkowVpnManager:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=14) as response:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=14) as response:
                 raw = response.read()
                 headers = {key.lower(): value for key, value in response.headers.items()}
         except Exception as error:
@@ -243,8 +245,8 @@ class GoshkowVpnManager:
 
     def _clean_server_name(self, value: str) -> str:
         text = str(value or "").strip()
-        for token in ("🇫🇮", "🇳🇱", "🇩🇪", "🇷🇺", "🇺🇸", "🇨🇦", "🇸🇪", "🇳🇴", "🇩🇰", "🇵🇱", "🇫🇷", "🇨🇿", "🇸🇰"):
-            text = text.replace(token, "")
+        text = re.sub(r"[\U0001F1E6-\U0001F1FF]{2}", "", text)
+        text = re.sub(r"[\U0001F300-\U0001FAFF]", " ", text)
         text = text.replace(" - ", " ").replace(" #", " ").replace("#", "")
         text = " ".join(text.split()).strip(" -–—")
         return text

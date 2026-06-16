@@ -171,7 +171,7 @@ class NotificationEntry:
     title: str
     message: str
     source: str = "app"
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now().astimezone().isoformat())
     read: bool = False
     details: dict[str, Any] = field(default_factory=dict)
 

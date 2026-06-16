@@ -223,11 +223,19 @@ class ProcessManager:
         if not secret:
             secret = secrets.token_hex(16)
             settings = self.settings.update(tg_proxy_secret=secret)
+        signature = (
+            f"{settings.tg_proxy_host}:{int(settings.tg_proxy_port)}:{secret}:"
+            f"{settings.tg_proxy_dc_ip}:{settings.tg_proxy_cfproxy_enabled}:"
+            f"{settings.tg_proxy_cfproxy_priority}:{settings.tg_proxy_cfproxy_domain}:"
+            f"{settings.tg_proxy_fake_tls_domain}:{settings.tg_proxy_buf_kb}:{settings.tg_proxy_pool_size}"
+        )
         self._ensure_telegram_and_open_proxy_link(
             host=settings.tg_proxy_host,
             port=int(settings.tg_proxy_port),
             secret=secret,
         )
+        if signature != str(settings.tg_proxy_link_prompt_signature or ""):
+            self.settings.update(tg_proxy_link_prompt_signature=signature)
 
     def consume_telegram_proxy_launch_info(self) -> dict[str, Any] | None:
         info = self._telegram_proxy_launch_info
@@ -640,6 +648,9 @@ if ($rows.Count -eq 0) {
     if ([string]$dns.AddressFamily -eq 'IPv4' -and -not $groups[$ifIndex].ipv4_manual) {
       $groups[$ifIndex].ipv4 = @($dns.ServerAddresses)
     }
+    if ([string]$dns.AddressFamily -eq 'IPv6' -and -not $groups[$ifIndex].ipv6_manual) {
+      $groups[$ifIndex].ipv6 = @($dns.ServerAddresses)
+    }
   }
   foreach ($entry in $groups.Values) {
     $rows += $entry
@@ -717,24 +728,6 @@ if ($rows.Count -eq 0) {
 $payload = @'
 __PAYLOAD__
 '@ | ConvertFrom-Json
-function Set-HubDnsFamily($family, $alias, $servers) {
-  $serverList = @($servers | Where-Object { [string]$_ -ne '' })
-  if (-not $alias) { return }
-  if ($serverList.Count -gt 0) {
-    & netsh interface $family set dnsservers name="$alias" source=static address="$($serverList[0])" validate=no | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "netsh $family set dnsservers failed for $alias" }
-    for ($i = 1; $i -lt $serverList.Count; $i++) {
-      & netsh interface $family add dnsservers name="$alias" address="$($serverList[$i])" index=($i + 1) validate=no | Out-Null
-      if ($LASTEXITCODE -ne 0) { throw "netsh $family add dnsservers failed for $alias" }
-    }
-  } else {
-    & netsh interface $family delete dnsservers name="$alias" all | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-      & netsh interface $family set dnsservers name="$alias" source=dhcp | Out-Null
-      if ($LASTEXITCODE -ne 0) { throw "netsh $family reset dnsservers failed for $alias" }
-    }
-  }
-}
 function Clear-HubRegistryDns($guid, $family) {
   if (-not $guid) { return }
   $root = if ($family -eq "ipv6") { "Tcpip6" } else { "Tcpip" }
@@ -743,12 +736,24 @@ function Clear-HubRegistryDns($guid, $family) {
     try { Set-ItemProperty -LiteralPath $path -Name NameServer -Value "" -ErrorAction Stop } catch {}
   }
 }
+function Set-HubDnsServers($ifIndex, $guid, $ipv4, $ipv6) {
+  $serverList = @(@($ipv4) + @($ipv6) | Where-Object { [string]$_ -ne '' })
+  if ($ifIndex -le 0) { return }
+  try {
+    if ($serverList.Count -gt 0) {
+      Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $serverList -ErrorAction Stop | Out-Null
+    } else {
+      Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses -ErrorAction Stop | Out-Null
+    }
+  } catch {
+    throw $_
+  }
+}
 foreach ($adapter in @($payload.adapters)) {
   $ifIndex = [int]$adapter.interface_index
   if ($ifIndex -le 0) { continue }
-  $alias = [string]$adapter.interface_alias
-  Set-HubDnsFamily "ipv4" $alias @($payload.ipv4)
-  Set-HubDnsFamily "ipv6" $alias @($payload.ipv6)
+  $guid = [string]$adapter.interface_guid
+  Set-HubDnsServers $ifIndex $guid @($payload.ipv4) @($payload.ipv6)
 }
 """.replace("__PAYLOAD__", payload)
         proc = subprocess.run(
@@ -768,37 +773,50 @@ foreach ($adapter in @($payload.adapters)) {
 $payload = @'
 __PAYLOAD__
 '@ | ConvertFrom-Json
-function Set-HubDnsFamily($family, $alias, $servers) {
-  $serverList = @($servers | Where-Object { [string]$_ -ne '' })
-  if (-not $alias) { return }
-  if ($serverList.Count -gt 0) {
-    & netsh interface $family set dnsservers name="$alias" source=static address="$($serverList[0])" validate=no | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "netsh $family set dnsservers failed for $alias" }
-    for ($i = 1; $i -lt $serverList.Count; $i++) {
-      & netsh interface $family add dnsservers name="$alias" address="$($serverList[$i])" index=($i + 1) validate=no | Out-Null
-      if ($LASTEXITCODE -ne 0) { throw "netsh $family add dnsservers failed for $alias" }
-    }
-  } else {
-    & netsh interface $family delete dnsservers name="$alias" all | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-      & netsh interface $family set dnsservers name="$alias" source=dhcp | Out-Null
-      if ($LASTEXITCODE -ne 0) { throw "netsh $family reset dnsservers failed for $alias" }
-    }
+function Clear-HubRegistryDns($guid, $family) {
+  if (-not $guid) { return }
+  $root = if ($family -eq "ipv6") { "Tcpip6" } else { "Tcpip" }
+  $path = "HKLM:\SYSTEM\CurrentControlSet\Services\$root\Parameters\Interfaces\$guid"
+  if (Test-Path -LiteralPath $path) {
+    try { Set-ItemProperty -LiteralPath $path -Name NameServer -Value "" -ErrorAction Stop } catch {}
+  }
+}
+function Reset-HubDnsServers($ifIndex, $guid) {
+  if ($ifIndex -le 0) { return }
+  try {
+    Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses -ErrorAction Stop | Out-Null
+  } catch {
+    throw $_
+  }
+  Clear-HubRegistryDns $guid "ipv4"
+  Clear-HubRegistryDns $guid "ipv6"
+}
+function Set-HubDnsServers($ifIndex, $guid, $ipv4, $ipv6) {
+  $serverList = @(@($ipv4) + @($ipv6) | Where-Object { [string]$_ -ne '' })
+  if ($ifIndex -le 0) { return }
+  if ($serverList.Count -eq 0) {
+    Reset-HubDnsServers $ifIndex $guid
+    return
+  }
+  try {
+    Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $serverList -ErrorAction Stop | Out-Null
+  } catch {
+    throw $_
   }
 }
 foreach ($adapter in @($payload.adapters)) {
   $ifIndex = [int]$adapter.interface_index
   if ($ifIndex -le 0) { continue }
-  $alias = [string]$adapter.interface_alias
   $guid = [string]$adapter.interface_guid
   $ipv4Manual = if ($null -ne $adapter.ipv4_manual) { [bool]$adapter.ipv4_manual } else { @($adapter.ipv4).Count -gt 0 }
   $ipv6Manual = if ($null -ne $adapter.ipv6_manual) { [bool]$adapter.ipv6_manual } else { @($adapter.ipv6).Count -gt 0 }
-  & netsh interface ipv4 delete dnsservers name="$alias" all | Out-Null
-  & netsh interface ipv6 delete dnsservers name="$alias" all | Out-Null
-  Clear-HubRegistryDns $guid "ipv4"
-  Clear-HubRegistryDns $guid "ipv6"
-  if ($ipv4Manual) { Set-HubDnsFamily "ipv4" $alias @($adapter.ipv4) }
-  if ($ipv6Manual) { Set-HubDnsFamily "ipv6" $alias @($adapter.ipv6) }
+  if (-not $ipv4Manual -and -not $ipv6Manual) {
+    Reset-HubDnsServers $ifIndex $guid
+    continue
+  }
+  $restoreV4 = if ($ipv4Manual) { @($adapter.ipv4) } else { @() }
+  $restoreV6 = if ($ipv6Manual) { @($adapter.ipv6) } else { @() }
+  Set-HubDnsServers $ifIndex $guid $restoreV4 $restoreV6
 }
 """.replace("__PAYLOAD__", payload)
         proc = subprocess.run(
@@ -931,6 +949,7 @@ foreach ($adapter in @($payload.adapters)) {
 
         selected_script = Path(selected_option["path"])
         selected_bundle_root = Path(selected_script).parent
+        self._repair_stale_zapret_driver_paths(selected_bundle_root)
         active_root: Path | None = None
         process: subprocess.Popen[Any] | None = None
         try:
@@ -1942,19 +1961,6 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._processes[component_id] = process
         self._states[component_id] = state
         self.logging.log("info", "TG WS Proxy worker started", pid=process.pid)
-        signature = (
-            f"{settings.tg_proxy_host}:{int(settings.tg_proxy_port)}:{secret}:"
-            f"{settings.tg_proxy_dc_ip}:{settings.tg_proxy_cfproxy_enabled}:"
-            f"{settings.tg_proxy_cfproxy_priority}:{settings.tg_proxy_cfproxy_domain}:"
-            f"{settings.tg_proxy_fake_tls_domain}:{settings.tg_proxy_buf_kb}:{settings.tg_proxy_pool_size}"
-        )
-        if settings.tg_proxy_link_prompt_signature != signature:
-            self._ensure_telegram_and_open_proxy_link(
-                host=settings.tg_proxy_host,
-                port=int(settings.tg_proxy_port),
-                secret=secret,
-            )
-            self.settings.update(tg_proxy_link_prompt_signature=signature)
         return state
 
     def _build_worker_command(self, worker: str, **kwargs: Any) -> list[str]:
@@ -3287,6 +3293,13 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def _kill_image(self, image_name: str) -> None:
         self._run_quiet(["taskkill", "/IM", image_name, "/F", "/T"])
 
+    def _wait_for_image_exit(self, image_name: str, *, attempts: int = 10, delay: float = 0.35) -> bool:
+        for _ in range(max(1, attempts)):
+            if not self._is_image_running(image_name):
+                return True
+            time.sleep(delay)
+        return not self._is_image_running(image_name)
+
     def _force_stop_zapret_runtime(self) -> None:
         process = self._processes.get("zapret")
         if process and process.poll() is None:
@@ -3300,10 +3313,14 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     pass
         if process and process.pid:
             self._run_quiet(["taskkill", "/PID", str(process.pid), "/F", "/T"])
-        self._cleanup_zapret_driver_services(self._current_zapret_runtime)
         for _ in range(8):
             self._kill_image("winws.exe")
-            if not self._is_image_running("winws.exe"):
+            if self._wait_for_image_exit("winws.exe", attempts=2, delay=0.25):
+                break
+        for _ in range(3):
+            self._cleanup_zapret_driver_services(self._current_zapret_runtime)
+            self._cleanup_orphaned_zapret_driver_services()
+            if not any(self._service_exists(name) for name in _ZAPRET_DRIVER_SERVICE_NAMES):
                 break
             time.sleep(0.35)
         self._processes.pop("zapret", None)
@@ -3311,7 +3328,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
     def _reset_active_runtime_dir(self, active_root: Path) -> None:
         driver_marker = active_root / ".driver_path_in_use"
-        if driver_marker.exists() and (active_root / "bin" / "WinDivert64.sys").exists():
+        driver_path = active_root / "bin" / "WinDivert64.sys"
+        if driver_marker.exists() or driver_path.exists():
             self._cleanup_zapret_driver_services(active_root)
             if self._driver_service_references_runtime(active_root):
                 self.logging.log(
@@ -3366,19 +3384,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
             if not self._service_exists(service_name):
                 continue
+            image_path = self._service_image_path(service_name)
             if service_name.lower() != "zapret":
-                image_path = self._service_image_path(service_name)
                 if not image_path:
                     continue
-                if image_path and runtime_root is not None and not self._path_mentions_runtime(image_path, runtime_root):
+                if runtime_root is not None and not self._path_mentions_runtime(image_path, runtime_root):
                     continue
-                if image_path and runtime_root is None and not self._path_mentions_runtime(
-                    image_path,
-                    self.storage.paths.install_root,
-                ):
+                if runtime_root is None and not self._is_managed_or_stale_zapret_service_path(image_path):
                     continue
-            self._run_quiet(["sc", "stop", service_name])
-            self._run_quiet(["sc", "delete", service_name])
+            self._delete_zapret_service(service_name, image_path=image_path)
 
     def _driver_service_references_runtime(self, runtime_root: Path) -> bool:
         for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
@@ -3402,6 +3416,87 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 continue
             return line.split(":", 1)[-1].strip().strip('"')
         return ""
+
+    def _repair_stale_zapret_driver_paths(self, selected_bundle_root: Path) -> None:
+        if not (selected_bundle_root / "bin" / "WinDivert64.sys").exists():
+            return
+        for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
+            if not self._service_exists(service_name):
+                continue
+            image_path = self._service_image_path(service_name)
+            if not image_path:
+                continue
+            raw_target = image_path.strip().strip('"')
+            if "windivert64.sys" not in raw_target.lower():
+                continue
+            target_path = Path(raw_target)
+            if target_path.exists():
+                continue
+            self.logging.log(
+                "warning",
+                "Removing stale WinDivert service with missing driver file",
+                service=service_name,
+                path=str(target_path),
+            )
+            self._delete_zapret_service(service_name, image_path=raw_target)
+
+    def _cleanup_orphaned_zapret_driver_services(self) -> None:
+        for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
+            if not self._service_exists(service_name):
+                continue
+            image_path = self._service_image_path(service_name)
+            if not image_path:
+                continue
+            if not self._is_managed_or_stale_zapret_service_path(image_path):
+                continue
+            self._delete_zapret_service(service_name, image_path=image_path)
+
+    def _delete_zapret_service(self, service_name: str, *, image_path: str = "") -> None:
+        self._run_quiet(["sc", "stop", service_name])
+        time.sleep(0.2)
+        self._run_quiet(["sc", "delete", service_name])
+        for _ in range(12):
+            if not self._service_exists(service_name):
+                return
+            time.sleep(0.35)
+        if image_path and self._is_managed_or_stale_zapret_service_path(image_path):
+            self._run_quiet(
+                [
+                    "reg",
+                    "delete",
+                    f"HKLM\\SYSTEM\\CurrentControlSet\\Services\\{service_name}",
+                    "/f",
+                ]
+            )
+            time.sleep(0.2)
+        if self._service_exists(service_name):
+            self.logging.log(
+                "warning",
+                "Zapret driver service still exists after cleanup attempt",
+                service=service_name,
+                path=image_path,
+            )
+
+    def _is_managed_or_stale_zapret_service_path(self, image_path: str) -> bool:
+        raw = str(image_path or "").strip().strip('"')
+        if not raw:
+            return False
+        lowered = raw.lower()
+        try:
+            target = Path(raw)
+            target_exists = target.exists()
+        except Exception:
+            target_exists = False
+        roots = [
+            self.storage.paths.install_root,
+            self.storage.paths.merged_runtime_dir,
+            Path(tempfile.gettempdir()) / "zapret_hub_runtime_cleanup",
+        ]
+        if any(self._path_mentions_runtime(raw, root) for root in roots):
+            return True
+        if "windivert64.sys" in lowered and not target_exists:
+            return True
+        return False
 
     def _path_mentions_runtime(self, image_path: str, runtime_root: Path) -> bool:
         raw = image_path.strip().strip('"').lower()
