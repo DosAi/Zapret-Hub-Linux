@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime
@@ -446,8 +447,32 @@ class StorageManager:
         backup_dir.mkdir(parents=True, exist_ok=True)
         destination = backup_dir / source.name
         if source.is_dir():
-            shutil.copytree(source, destination, dirs_exist_ok=True)
+            self._copytree_resilient(source, destination)
         elif source.exists():
-            shutil.copy2(source, destination)
+            try:
+                shutil.copy2(source, destination)
+            except OSError:
+                pass
         return backup_dir
+
+    def _copytree_resilient(self, source: Path, destination: Path) -> None:
+        destination.mkdir(parents=True, exist_ok=True)
+        for root, dirs, files in os.walk(source, topdown=True):
+            root_path = Path(root)
+            try:
+                relative = root_path.relative_to(source)
+            except ValueError:
+                relative = Path()
+            target_root = destination / relative
+            target_root.mkdir(parents=True, exist_ok=True)
+            dirs[:] = [item for item in dirs if item not in {".git", "__pycache__", ".mypy_cache", ".pytest_cache"}]
+            for name in files:
+                if Path(name).suffix.lower() in {".pyc", ".pyo"}:
+                    continue
+                src = root_path / name
+                dst = target_root / name
+                try:
+                    shutil.copy2(src, dst)
+                except OSError:
+                    continue
 

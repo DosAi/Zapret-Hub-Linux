@@ -1266,6 +1266,8 @@ foreach ($adapter in @($payload.adapters)) {
             state.last_error = ""
             self._states[component_id] = state
             self.logging.log("info", "goshkow vpn started", pid=process.pid, config=str(config_path))
+            if str(vpn_state.get("selected_server_id", "") or "") == "auto":
+                self._start_goshkow_vpn_auto_monitor(component_id, process, str(selected_server.get("id", "") or ""))
             return state
         except Exception as error:
             state.status = "error"
@@ -1276,10 +1278,93 @@ foreach ($adapter in @($payload.adapters)) {
 
     def _selected_goshkow_vpn_server(self, vpn_state: dict[str, Any]) -> dict[str, Any] | None:
         selected_id = str(vpn_state.get("selected_server_id", "") or "")
+        if selected_id == "auto":
+            excluded = {str(item) for item in list(vpn_state.get("auto_excluded_server_ids", []) or []) if str(item)}
+            return self._select_fastest_goshkow_vpn_server(vpn_state, excluded)
         for item in vpn_state.get("servers", []) or []:
             if isinstance(item, dict) and str(item.get("id", "")) == selected_id:
                 return dict(item)
         return None
+
+    def _select_fastest_goshkow_vpn_server(self, vpn_state: dict[str, Any], exclude_ids: set[str] | None = None) -> dict[str, Any] | None:
+        servers = [dict(item) for item in vpn_state.get("servers", []) or [] if isinstance(item, dict)]
+        blocked = set(exclude_ids or set())
+        candidates = [item for item in servers if str(item.get("id", "") or "") not in blocked] or servers
+        if not candidates:
+            return None
+        results: list[tuple[float, dict[str, Any]]] = []
+        with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
+            future_map = {executor.submit(self._probe_goshkow_vpn_server, item): item for item in candidates}
+            for future in as_completed(future_map):
+                server = future_map[future]
+                try:
+                    latency = float(future.result())
+                except Exception:
+                    latency = 999999.0
+                results.append((latency, server))
+        results.sort(key=lambda item: item[0])
+        selected = dict(results[0][1])
+        self._save_goshkow_vpn_runtime_choice(selected)
+        return selected
+
+    def _probe_goshkow_vpn_server(self, server: dict[str, Any]) -> float:
+        parsed = urllib.parse.urlparse(str(server.get("raw", "") or ""))
+        host = parsed.hostname or str(server.get("host", "") or "")
+        port = int(parsed.port or 443)
+        if not host:
+            return 999999.0
+        started = time.perf_counter()
+        try:
+            with socket.create_connection((host, port), timeout=1.2):
+                return max(0.001, time.perf_counter() - started)
+        except Exception:
+            return 999999.0
+
+    def _save_goshkow_vpn_runtime_choice(self, server: dict[str, Any]) -> None:
+        state_path = self.storage.paths.data_dir / "goshkow_vpn.json"
+        current = self.storage.read_json(state_path, default={}) or {}
+        if not isinstance(current, dict):
+            current = {}
+        current["last_auto_server_id"] = str(server.get("id", "") or "")
+        current["last_auto_server_name"] = str(server.get("name", "") or server.get("host", "") or "")
+        current["last_auto_selected_at"] = datetime.utcnow().isoformat()
+        self.storage.write_json(state_path, current)
+
+    def _start_goshkow_vpn_auto_monitor(self, component_id: str, process: subprocess.Popen[Any], server_id: str) -> None:
+        def _monitor() -> None:
+            try:
+                process.wait()
+            except Exception:
+                return
+            with self._process_lock:
+                if self._processes.get(component_id) is not process:
+                    return
+                self._processes.pop(component_id, None)
+                self._close_source_log_stream(component_id)
+                state = self._states.get(component_id, ComponentState(component_id=component_id))
+                state.status = "stopped"
+                state.pid = None
+                self._states[component_id] = state
+                vpn_state = self.storage.read_json(self.storage.paths.data_dir / "goshkow_vpn.json", default={}) or {}
+                if not isinstance(vpn_state, dict) or str(vpn_state.get("selected_server_id", "") or "") != "auto":
+                    self._invalidate_state_cache()
+                    return
+                replacement = self._select_fastest_goshkow_vpn_server(vpn_state, {server_id})
+                if replacement is None:
+                    self._invalidate_state_cache()
+                    return
+                vpn_state["auto_excluded_server_ids"] = sorted({server_id, *[str(item) for item in list(vpn_state.get("auto_excluded_server_ids", []) or []) if str(item)]})
+                self.storage.write_json(self.storage.paths.data_dir / "goshkow_vpn.json", vpn_state)
+                self.logging.log(
+                    "warning",
+                    "goshkow vpn auto location failed, trying another one",
+                    failed_server_id=server_id,
+                    next_server=str(replacement.get("name", "") or replacement.get("id", "")),
+                )
+                self._start_goshkow_vpn(component_id)
+                self._invalidate_state_cache()
+
+        threading.Thread(target=_monitor, daemon=True).start()
 
     def _goshkow_vpn_runtime_root(self) -> Path:
         return self.storage.paths.runtime_dir / "v2rayN"
@@ -2129,10 +2214,20 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     shutil.copy2(source, target_dir / source.name)
 
     def _materialize_visible_merged_runtime(self, active_root: Path) -> None:
-        target_root = self.storage.paths.merged_runtime_dir / "zapret"
+        merged_root = self.storage.paths.merged_runtime_dir
+        merged_root.mkdir(parents=True, exist_ok=True)
+        target_root = merged_root / "zapret"
+        temp_root = merged_root / f".zapret_sync_{int(time.time() * 1000)}"
+        old_root = merged_root / f".zapret_old_{int(time.time() * 1000)}"
+        shutil.rmtree(temp_root, ignore_errors=True)
+        shutil.copytree(active_root, temp_root, dirs_exist_ok=True, ignore=self._runtime_copy_ignore)
         if target_root.exists():
-            shutil.rmtree(target_root, ignore_errors=True)
-        shutil.copytree(active_root, target_root, dirs_exist_ok=True, ignore=self._runtime_copy_ignore)
+            try:
+                target_root.replace(old_root)
+            except Exception:
+                shutil.rmtree(target_root, ignore_errors=True)
+        temp_root.replace(target_root)
+        shutil.rmtree(old_root, ignore_errors=True)
 
     def _runtime_copy_ignore(self, directory: str, names: list[str]) -> set[str]:
         ignored_names = {".git", ".github", "__pycache__", ".mypy_cache", ".pytest_cache"}

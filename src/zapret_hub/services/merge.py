@@ -27,7 +27,12 @@ class MergeEngine:
         settings = self.settings.get()
         active_profile = settings.active_profile_id
         merged_dir = self.storage.paths.merged_runtime_dir
-        self.storage.create_backup(merged_dir, "pre-rebuild")
+        visible_runtime = merged_dir / "zapret"
+        if visible_runtime.exists():
+            self.storage.create_backup(visible_runtime, "pre-rebuild-visible-runtime")
+        merged_config = merged_dir / "config.json"
+        if merged_config.exists():
+            self.storage.create_backup(merged_config, "pre-rebuild-config")
 
         base_config = self.storage.read_json(self.storage.paths.default_packs_dir / "base_config.json", default={})
         merged = deepcopy(base_config)

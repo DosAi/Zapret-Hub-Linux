@@ -36,6 +36,8 @@ class GoshkowVpnManager:
             "subscription_state": subscription_state,
             "servers": list(raw.get("servers", []) or []),
             "selected_server_id": str(raw.get("selected_server_id", "") or ""),
+            "last_auto_server_id": str(raw.get("last_auto_server_id", "") or ""),
+            "last_auto_server_name": str(raw.get("last_auto_server_name", "") or ""),
             "days_remaining": raw.get("days_remaining", None),
             "used_traffic_bytes": int(raw.get("used_traffic_bytes", 0) or 0),
             "routing_mode": str(raw.get("routing_mode", "global") or "global"),
@@ -55,7 +57,7 @@ class GoshkowVpnManager:
             current["subscription_state"] == "valid"
             and current["subscription_url"]
             and current["servers"]
-            and current["selected_server_id"]
+            and (current["selected_server_id"] or current["selected_server_id"] == "auto")
         )
 
     def save(self, **changes: Any) -> dict[str, Any]:
@@ -89,6 +91,11 @@ class GoshkowVpnManager:
             changes["rules_mode"] = "blacklist"
         if "system_proxy_mode" in changes and changes["system_proxy_mode"] not in {"clear", "set", "unchanged", "pac"}:
             changes["system_proxy_mode"] = "pac"
+        if "selected_server_id" in changes:
+            changes["auto_excluded_server_ids"] = []
+            if str(changes.get("selected_server_id") or "") != "auto":
+                changes["last_auto_server_id"] = ""
+                changes["last_auto_server_name"] = ""
         return self.save(**changes)
 
     def import_subscription(self, url: str) -> dict[str, Any]:
@@ -139,15 +146,21 @@ class GoshkowVpnManager:
                 last_error="В подписке не найдено ни одной поддерживаемой локации.",
             )
         current = self.state()
-        selected = self._match_selected_server_id(str(current.get("selected_server_id") or ""), servers)
+        if str(current.get("selected_server_id") or "") == "auto":
+            selected = "auto"
+        else:
+            selected = self._match_selected_server_id(str(current.get("selected_server_id") or ""), servers)
         if not selected:
-            selected = str(servers[0]["id"])
+            selected = "auto"
         days_remaining = self._days_remaining_from_headers(headers)
         return self.save(
             subscription_url=normalized,
             subscription_state="valid",
             servers=servers,
             selected_server_id=selected,
+            auto_excluded_server_ids=[],
+            last_auto_server_id="" if selected == "auto" else current.get("last_auto_server_id", ""),
+            last_auto_server_name="" if selected == "auto" else current.get("last_auto_server_name", ""),
             days_remaining=days_remaining,
             last_updated_at=datetime.now(timezone.utc).isoformat(),
             last_error="",
@@ -162,6 +175,8 @@ class GoshkowVpnManager:
     def selected_server(self) -> dict[str, Any] | None:
         current = self.state()
         selected = current["selected_server_id"]
+        if selected == "auto":
+            selected = current.get("last_auto_server_id") or ""
         for server in current["servers"]:
             if isinstance(server, dict) and str(server.get("id", "")) == selected:
                 return dict(server)

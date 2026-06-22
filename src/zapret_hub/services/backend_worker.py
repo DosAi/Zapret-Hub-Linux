@@ -640,6 +640,39 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         result.update(_snapshot(context))
         return result
 
+    if action == "apply_deferred_changes":
+        service_ids = payload.get("service_ids", None)
+        settings_payload = payload.get("settings", {})
+        result: dict[str, Any] = {}
+        if isinstance(service_ids, list):
+            service_result = _run_action(
+                context,
+                "set_selected_services",
+                {
+                    "service_ids": service_ids,
+                    "client_revision": int(payload.get("service_client_revision", 0) or 0),
+                },
+                emit_progress,
+            )
+            result.update(service_result or {})
+        if isinstance(settings_payload, dict) and settings_payload:
+            settings_result = _run_action(
+                context,
+                "apply_settings",
+                {
+                    **settings_payload,
+                    "client_revision": int(payload.get("client_revision", 0) or 0),
+                },
+                emit_progress,
+            )
+            for key in ("zapret_restarted", "tg_proxy_restarted", "vpn_restarted", "theme_changed", "language_changed", "autostart_changed"):
+                if bool(settings_result.get(key)):
+                    result[key] = settings_result.get(key)
+        result["client_revision"] = int(payload.get("client_revision", 0) or 0)
+        result["service_client_revision"] = int(payload.get("service_client_revision", 0) or 0)
+        result.update(_snapshot(context))
+        return result
+
     if action == "prepare_general_autotest_runtime":
         restore = _prepare_general_autotest_runtime(context)
         result = {"restore_runtime": restore}
@@ -740,9 +773,11 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             current.selected_zapret_general,
         )
         states = {item.component_id: item for item in context.processes.list_states()}
+        tg_proxy_restarted = False
         if tg_before != tg_after and states.get("tg-ws-proxy") and states["tg-ws-proxy"].status == "running":
             context.processes.stop_component("tg-ws-proxy")
             context.processes.start_component("tg-ws-proxy")
+            tg_proxy_restarted = True
         zapret_restarted = False
         if zapret_before != zapret_after:
             zapret_restarted = _finish_zapret_reconfiguration(context, restart=zapret_was_running)
@@ -754,6 +789,7 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             "language_changed": language_before != context.settings.get().language,
             "autostart_changed": autostart_before != bool(context.settings.get().autostart_windows),
             "client_revision": client_revision,
+            "tg_proxy_restarted": tg_proxy_restarted,
             "zapret_restarted": zapret_restarted,
             "vpn_restarted": vpn_restarted,
         }
