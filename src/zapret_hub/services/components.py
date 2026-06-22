@@ -69,6 +69,21 @@ _VPN_ADAPTER_PATTERNS = (
     "tun",
 )
 
+_GOSHKOW_VPN_UNHEALTHY_LOG_MARKERS = (
+    "timeout",
+    "timed out",
+    "i/o timeout",
+    "deadline exceeded",
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "broken pipe",
+    "closed pipe",
+    "network is unreachable",
+    "no route to host",
+    "handshake failed",
+)
+
 _ZAPRET_DRIVER_SERVICE_NAMES = ("zapret", "WinDivert", "WinDivert14")
 _TORRENT_PROCESS_NAMES = (
     "qbittorrent.exe",
@@ -1331,40 +1346,124 @@ foreach ($adapter in @($payload.adapters)) {
         self.storage.write_json(state_path, current)
 
     def _start_goshkow_vpn_auto_monitor(self, component_id: str, process: subprocess.Popen[Any], server_id: str) -> None:
-        def _monitor() -> None:
+        def _process_monitor() -> None:
             try:
                 process.wait()
             except Exception:
                 return
-            with self._process_lock:
-                if self._processes.get(component_id) is not process:
-                    return
-                self._processes.pop(component_id, None)
-                self._close_source_log_stream(component_id)
-                state = self._states.get(component_id, ComponentState(component_id=component_id))
-                state.status = "stopped"
-                state.pid = None
-                self._states[component_id] = state
-                vpn_state = self.storage.read_json(self.storage.paths.data_dir / "goshkow_vpn.json", default={}) or {}
-                if not isinstance(vpn_state, dict) or str(vpn_state.get("selected_server_id", "") or "") != "auto":
-                    self._invalidate_state_cache()
-                    return
-                replacement = self._select_fastest_goshkow_vpn_server(vpn_state, {server_id})
-                if replacement is None:
-                    self._invalidate_state_cache()
-                    return
-                vpn_state["auto_excluded_server_ids"] = sorted({server_id, *[str(item) for item in list(vpn_state.get("auto_excluded_server_ids", []) or []) if str(item)]})
-                self.storage.write_json(self.storage.paths.data_dir / "goshkow_vpn.json", vpn_state)
-                self.logging.log(
-                    "warning",
-                    "goshkow vpn auto location failed, trying another one",
-                    failed_server_id=server_id,
-                    next_server=str(replacement.get("name", "") or replacement.get("id", "")),
-                )
-                self._start_goshkow_vpn(component_id)
-                self._invalidate_state_cache()
+            self._switch_goshkow_vpn_auto_location(component_id, process, server_id, reason="process-exited")
 
-        threading.Thread(target=_monitor, daemon=True).start()
+        def _health_monitor() -> None:
+            log_path = Path(self.logging.source_log_path(component_id))
+            log_position = 0
+            try:
+                if log_path.exists():
+                    log_position = log_path.stat().st_size
+            except Exception:
+                log_position = 0
+            unhealthy_hits: list[float] = []
+            failed_probes = 0
+            last_probe_at = 0.0
+            while process.poll() is None:
+                time.sleep(1.2)
+                with self._process_lock:
+                    if self._processes.get(component_id) is not process:
+                        return
+                now = time.monotonic()
+                if now - last_probe_at >= 8.0:
+                    last_probe_at = now
+                    vpn_state = self.storage.read_json(self.storage.paths.data_dir / "goshkow_vpn.json", default={}) or {}
+                    if not isinstance(vpn_state, dict) or str(vpn_state.get("selected_server_id", "") or "") != "auto":
+                        return
+                    current_server = None
+                    for item in list(vpn_state.get("servers", []) or []):
+                        if isinstance(item, dict) and str(item.get("id", "") or "") == server_id:
+                            current_server = dict(item)
+                            break
+                    if current_server is not None and self._probe_goshkow_vpn_server(current_server) >= 999999.0:
+                        failed_probes += 1
+                    else:
+                        failed_probes = 0
+                    if failed_probes >= 3:
+                        self._switch_goshkow_vpn_auto_location(component_id, process, server_id, reason="server-probe-timeouts")
+                        return
+                chunk = ""
+                try:
+                    if log_path.exists():
+                        with log_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                            handle.seek(log_position)
+                            chunk = handle.read()
+                            log_position = handle.tell()
+                except Exception:
+                    chunk = ""
+                if not chunk:
+                    continue
+                for raw_line in chunk.splitlines():
+                    if self._goshkow_vpn_log_line_is_unhealthy(raw_line):
+                        unhealthy_hits.append(now)
+                if unhealthy_hits:
+                    cutoff = now - 28.0
+                    unhealthy_hits = [item for item in unhealthy_hits if item >= cutoff]
+                if len(unhealthy_hits) >= 6:
+                    self._switch_goshkow_vpn_auto_location(component_id, process, server_id, reason="traffic-timeouts")
+                    return
+
+        threading.Thread(target=_process_monitor, daemon=True).start()
+        threading.Thread(target=_health_monitor, daemon=True).start()
+
+    def _goshkow_vpn_log_line_is_unhealthy(self, line: str) -> bool:
+        lowered = str(line or "").lower()
+        if not lowered or "bittorrent" in lowered:
+            return False
+        if "outbound/direct" in lowered and "dns:" not in lowered:
+            return False
+        return any(marker in lowered for marker in _GOSHKOW_VPN_UNHEALTHY_LOG_MARKERS)
+
+    def _switch_goshkow_vpn_auto_location(
+        self,
+        component_id: str,
+        process: subprocess.Popen[Any],
+        failed_server_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        with self._process_lock:
+            if self._processes.get(component_id) is not process:
+                return False
+            vpn_state = self.storage.read_json(self.storage.paths.data_dir / "goshkow_vpn.json", default={}) or {}
+            if not isinstance(vpn_state, dict) or str(vpn_state.get("selected_server_id", "") or "") != "auto":
+                self._invalidate_state_cache()
+                return False
+            excluded = {
+                failed_server_id,
+                *[str(item) for item in list(vpn_state.get("auto_excluded_server_ids", []) or []) if str(item)],
+            }
+        replacement = self._select_fastest_goshkow_vpn_server(vpn_state, excluded)
+        if replacement is None:
+            self._invalidate_state_cache()
+            return False
+        latest_state = self.storage.read_json(self.storage.paths.data_dir / "goshkow_vpn.json", default={}) or {}
+        if not isinstance(latest_state, dict):
+            latest_state = {}
+        latest_state["auto_excluded_server_ids"] = sorted(excluded)
+        latest_state["last_auto_server_id"] = str(replacement.get("id", "") or "")
+        latest_state["last_auto_server_name"] = str(replacement.get("name", "") or replacement.get("host", "") or "")
+        latest_state["last_auto_selected_at"] = datetime.utcnow().isoformat()
+        self.storage.write_json(self.storage.paths.data_dir / "goshkow_vpn.json", latest_state)
+        self.logging.log(
+            "warning",
+            "goshkow vpn auto location failed, trying another one",
+            failed_server_id=failed_server_id,
+            next_server=str(replacement.get("name", "") or replacement.get("id", "")),
+            reason=reason,
+        )
+        with self._process_lock:
+            if self._processes.get(component_id) is not process:
+                return False
+            self._stop_component_unlocked(component_id)
+            self._start_goshkow_vpn(component_id)
+            self._invalidate_state_cache()
+        return True
 
     def _goshkow_vpn_runtime_root(self) -> Path:
         return self.storage.paths.runtime_dir / "v2rayN"
