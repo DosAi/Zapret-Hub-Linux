@@ -81,10 +81,17 @@ def _host_file_records(context) -> list[FileRecord]:
 
 def _stop_zapret_for_reconfiguration(context) -> bool:
     states = {item.component_id: item for item in context.processes.list_states()}
-    was_running = bool(states.get("zapret") and states["zapret"].status == "running")
+    zapret_state = states.get("zapret")
+    status = str(getattr(zapret_state, "status", "") or "").strip().lower() if zapret_state else ""
+    was_running = status == "running"
     if was_running:
         context.processes.stop_component("zapret")
-    return was_running
+        return True
+    settings = context.settings.get()
+    enabled = {str(item) for item in list(settings.enabled_component_ids or [])}
+    selected_mode = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
+    should_recover = status in {"error", "partial"} and "zapret" in enabled and selected_mode != "goshkow-vpn"
+    return should_recover
 
 
 def _finish_zapret_reconfiguration(context, *, restart: bool) -> bool:
