@@ -120,6 +120,15 @@ SERVICE_RULES: dict[str, ServiceRule] = {
         ),
     ),
     "gaming": ServiceRule(
+        list_general=(
+            "ext-twitch.tv",
+            "jtvnw.net",
+            "live-video.net",
+            "ttvnw.net",
+            "twitch.tv",
+            "twitchcdn.net",
+            "twitchsvc.net",
+        ),
         extra_list_files=_GAMING_LIST_FILES,
         test_targets=(
             ("Gaming", "https://store.steampowered.com"),
