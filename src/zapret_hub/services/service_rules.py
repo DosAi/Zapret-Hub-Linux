@@ -13,6 +13,7 @@ class ServiceRule:
     hosts: tuple[str, ...] = field(default_factory=tuple)
     extra_lists: tuple[tuple[str, tuple[str, ...]], ...] = field(default_factory=tuple)
     extra_list_files: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    bin_overlay_dir: str = ""
     winws_args: tuple[str, ...] = field(default_factory=tuple)
     test_targets: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
@@ -21,8 +22,11 @@ _GAMING_LIST_FILES: tuple[tuple[str, str], ...] = (
     ("list-general.txt", "sample_data/default_services/gaming/lists/list-general.txt"),
     ("list-google.txt", "sample_data/default_services/gaming/lists/list-google.txt"),
     ("list-exclude.txt", "sample_data/default_services/gaming/lists/list-exclude.txt"),
+    ("list-exclude-user.txt", "sample_data/default_services/gaming/lists/list-exclude-user.txt"),
     ("ipset-all.txt", "sample_data/default_services/gaming/lists/ipset-all.txt"),
     ("ipset-exclude.txt", "sample_data/default_services/gaming/lists/ipset-exclude.txt"),
+    ("ipset-exclude-user.txt", "sample_data/default_services/gaming/lists/ipset-exclude-user.txt"),
+    ("list-general-user.txt", "sample_data/default_services/gaming/lists/list-general-user.txt"),
 )
 
 _UBISOFT_LIST_FILES: tuple[tuple[str, str], ...] = (
@@ -138,6 +142,7 @@ SERVICE_RULES: dict[str, ServiceRule] = {
             "twitchsvc.net",
         ),
         extra_list_files=_GAMING_LIST_FILES,
+        bin_overlay_dir="sample_data/default_services/gaming/bin",
         test_targets=(
             ("Gaming", "https://store.steampowered.com"),
             ("Epic Games", "https://www.epicgames.com"),

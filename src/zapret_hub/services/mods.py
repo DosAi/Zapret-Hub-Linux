@@ -23,6 +23,7 @@ class ModsManager:
     METADATA_FILENAME = "zapret-hub-mod.json"
     UNKNOWN_AUTHOR = "неизвестен"
     ALLOWED_MOD_SUFFIXES = {".txt", ".ps1", ".bat"}
+    BIN_SUFFIXES = {".bin"}
     _EMOJI_CHOICES = ["✨", "🪄", "🔥", "⚡", "🧩", "🎮", "🌐", "🛡️", "🚀", "💎", "📦", "🧪"]
     def __init__(
         self,
@@ -319,9 +320,11 @@ class ModsManager:
             source_url = str(metadata.get("source_url") or source_url)
         general_sources, list_sources, bin_sources, utils_sources = self._collect_import_candidates(staged_root)
         general_scripts = self._dedupe_general_names(sorted(general_sources))
-        if not general_scripts and not list_sources:
+        if bin_sources and not self._bin_sources_are_modified(bin_sources):
+            bin_sources = {}
+        if not general_scripts and not list_sources and not bin_sources:
             raise ValueError(
-                "Не найдено ни одного совместимого general-файла или списка. Добавьте .bat-конфиг или .txt-листы Zapret."
+                "Не найдено ни одного совместимого general-файла, списка или измененного bin. Добавьте .bat-конфиг, .txt-листы Zapret или модифицированный bin."
             )
 
         mod_id = self._unique_mod_id(suggested_name)
@@ -414,7 +417,7 @@ class ModsManager:
         root = self._editable_mod_root(mod_id).resolve()
         rel = str(relative_path or "").strip().replace("\\", "/")
         if not self._is_supported_mod_path(rel):
-            raise ValueError("Modification files can only be .txt, .ps1, or .bat.")
+            raise ValueError("Modification files can only be .txt, .ps1, .bat, or safe bin/*.bin files.")
         if not rel or rel.startswith("/") or ".." in Path(rel).parts:
             raise ValueError("Invalid modification file path.")
         target = (root / rel).resolve()
@@ -469,6 +472,12 @@ class ModsManager:
                     merged.append(line)
             (lists_target / name).write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
 
+        if bin_sources:
+            bin_target = target_dir / "bin"
+            bin_target.mkdir(parents=True, exist_ok=True)
+            for name, source in bin_sources.items():
+                shutil.copy2(source, bin_target / name)
+
     def _stage_source_for_import(self, source: Path, staged_root: Path) -> None:
         if source.is_dir():
             target = staged_root / source.name
@@ -501,6 +510,10 @@ class ModsManager:
             suffix = file_path.suffix.lower()
             parent_lower = file_path.parent.name.lower()
 
+            if parent_lower == "bin" and suffix in self.BIN_SUFFIXES:
+                bin_sources.setdefault(file_path.name, file_path)
+                continue
+
             if suffix == ".bat" and not lowered.startswith("service"):
                 if lowered not in general_sources:
                     general_sources[file_path.name] = file_path
@@ -524,11 +537,17 @@ class ModsManager:
     def _is_supported_mod_file(self, path: Path) -> bool:
         if path.name == self.METADATA_FILENAME:
             return True
+        if path.parent.name.lower() == "bin" and path.suffix.lower() in self.BIN_SUFFIXES:
+            return True
         return path.suffix.lower() in self.ALLOWED_MOD_SUFFIXES
 
     def _is_supported_mod_path(self, relative_path: str) -> bool:
         path = Path(str(relative_path or "").replace("\\", "/"))
-        return path.name != self.METADATA_FILENAME and path.suffix.lower() in self.ALLOWED_MOD_SUFFIXES
+        if path.name == self.METADATA_FILENAME:
+            return False
+        if "bin" in [part.lower() for part in path.parts] and path.suffix.lower() in self.BIN_SUFFIXES:
+            return True
+        return path.suffix.lower() in self.ALLOWED_MOD_SUFFIXES
 
     def _copy_tree_filtered(self, source: Path, target: Path) -> None:
         for file_path in source.rglob("*"):
@@ -564,6 +583,23 @@ class ModsManager:
         if not sample.strip():
             return False
         return any(marker in sample.lower() for marker in (".com", ".gg", ".ru", ".net", "/", ":"))
+
+    def _bin_sources_are_modified(self, bin_sources: dict[str, Path]) -> bool:
+        base_bin = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "bin"
+        if not base_bin.exists():
+            return bool(bin_sources)
+        for name, source in bin_sources.items():
+            base_file = base_bin / name
+            if not base_file.exists():
+                return True
+            try:
+                if source.stat().st_size != base_file.stat().st_size:
+                    return True
+                if source.read_bytes() != base_file.read_bytes():
+                    return True
+            except Exception:
+                return True
+        return False
 
     def _dedupe_general_names(self, names: list[str]) -> list[str]:
         result: list[str] = []

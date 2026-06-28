@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -278,6 +278,12 @@ class StorageManager:
         target_dir = self.paths.mods_dir / mod_id
         if force_refresh or not self._looks_like_materialized_mod_bundle(target_dir):
             self._copy_filtered_zapret_bundle(source_root, target_dir, skip_base_duplicates=source_root != sample_root)
+        legacy_gaming_general = target_dir / "general (Gaming).bat"
+        if legacy_gaming_general.exists():
+            try:
+                legacy_gaming_general.unlink()
+            except OSError:
+                pass
 
         general_scripts = sorted(
             script.name
@@ -305,7 +311,7 @@ class StorageManager:
             script.is_file() and not script.name.lower().startswith("service")
             for script in path.glob("*.bat")
         )
-        return has_general and (path / "bin").is_dir() and (path / "lists").is_dir()
+        return has_general and (path / "lists").is_dir()
 
     def _looks_like_zapret_bundle(self, path: Path) -> bool:
         return (path / "bin").is_dir() and (path / "lists").is_dir()
@@ -329,16 +335,17 @@ class StorageManager:
                 continue
             shutil.copy2(script, target_dir / script.name)
 
-        for folder in ("bin", "lists", "utils"):
+        for folder in ("lists", "utils"):
             (target_dir / folder).mkdir(parents=True, exist_ok=True)
 
-        bin_suffixes = {".exe", ".dll", ".bin", ".sys", ".cmd"}
-        for item in (source_root / "bin").glob("*"):
-            if not item.is_file():
-                continue
-            if item.suffix.lower() in bin_suffixes:
-                (target_dir / "bin").mkdir(parents=True, exist_ok=True)
-                shutil.copy2(item, target_dir / "bin" / item.name)
+        bin_suffixes = {".bin"}
+        if self._bin_dir_differs_from_base(source_root / "bin", suffixes=bin_suffixes):
+            for item in (source_root / "bin").glob("*"):
+                if not item.is_file():
+                    continue
+                if item.suffix.lower() in bin_suffixes:
+                    (target_dir / "bin").mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, target_dir / "bin" / item.name)
 
         for item in (source_root / "lists").glob("*.txt"):
             (target_dir / "lists").mkdir(parents=True, exist_ok=True)
@@ -357,6 +364,27 @@ class StorageManager:
                 if item.is_file():
                     (target_dir / "utils").mkdir(parents=True, exist_ok=True)
                     shutil.copy2(item, target_dir / "utils" / item.name)
+
+    def _bin_dir_differs_from_base(self, bin_dir: Path, *, suffixes: set[str]) -> bool:
+        if not bin_dir.exists() or not bin_dir.is_dir():
+            return False
+        base_bin = self.paths.runtime_dir / "zapret-discord-youtube" / "bin"
+        if not base_bin.exists():
+            return any(item.is_file() and item.suffix.lower() in suffixes for item in bin_dir.glob("*"))
+        for item in bin_dir.glob("*"):
+            if not item.is_file() or item.suffix.lower() not in suffixes:
+                continue
+            base_file = base_bin / item.name
+            if not base_file.exists():
+                return True
+            try:
+                if item.stat().st_size != base_file.stat().st_size:
+                    return True
+                if item.read_bytes() != base_file.read_bytes():
+                    return True
+            except Exception:
+                return True
+        return False
 
     def _ensure_icon_assets(self) -> None:
         icons_dir = self.paths.ui_assets_dir / "icons"

@@ -48,10 +48,6 @@ FORTNITE_GENERAL_PRIORITY = (
     "general (ALT9.1).bat",
 )
 
-GAMING_GENERAL_PRIORITY = (
-    "general (Gaming).bat",
-)
-
 UBISOFT_GENERAL_PRIORITY = (
     "general (Ubisoft).bat",
 )
@@ -62,14 +58,12 @@ def prioritize_generals_for_services(
     selected_service_ids: list[str] | tuple[str, ...] | set[str],
 ) -> list[dict[str, str]]:
     selected = {str(item) for item in selected_service_ids}
-    if "gaming" not in selected and "fortnite" not in selected and "ubisoft" not in selected:
+    if "fortnite" not in selected and "ubisoft" not in selected:
         return list(options)
 
     prioritized: list[dict[str, str]] = []
     used: set[str] = set()
     wanted_order: list[str] = []
-    if "gaming" in selected:
-        wanted_order.extend(GAMING_GENERAL_PRIORITY)
     if "ubisoft" in selected:
         wanted_order.extend(UBISOFT_GENERAL_PRIORITY)
     if "fortnite" in selected:

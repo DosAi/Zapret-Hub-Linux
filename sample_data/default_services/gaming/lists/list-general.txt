@@ -110564,3 +110564,5 @@ studio.youtube.com
 m.youtube.com
 s.ytimg.com
 i.ytimg.com
+klipy.com
+live-video.net

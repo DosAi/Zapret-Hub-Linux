@@ -2187,23 +2187,26 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         utils_target.mkdir(parents=True, exist_ok=True)
 
         layered_bundles = self._get_zapret_bundles(enabled_only=True)
+        bin_overlay_applied = False
         for bundle in layered_bundles:
             bundle_id = bundle["id"]
             bundle_root = Path(bundle["path"])
+            include_bin_overlay = not bin_overlay_applied and self._bundle_has_bin_overlay(bundle_root)
             if bundle_id != "base":
-                self._overlay_zapret_bundle_runtime(active_root, bundle_root)
+                self._overlay_zapret_bundle_runtime(active_root, bundle_root, include_bin_overlay=include_bin_overlay)
+                bin_overlay_applied = bin_overlay_applied or include_bin_overlay
             lists_source = bundle_root / "lists"
             if not lists_source.exists():
                 continue
             self._merge_lists_into_target(lists_target, lists_source)
 
-        self._apply_selected_service_rules(active_root)
+        self._apply_selected_service_rules(active_root, allow_bin_overlay=not bin_overlay_applied)
 
         selected_script = selected_bundle_root / selected_script_name
         if selected_script.exists():
             shutil.copy2(selected_script, active_root / selected_script.name)
         if selected_bundle_id == "unified-general":
-            self._overlay_zapret_bundle_runtime(active_root, selected_bundle_root)
+            self._overlay_zapret_bundle_runtime(active_root, selected_bundle_root, include_bin_overlay=False)
             if selected_script.exists():
                 shutil.copy2(selected_script, active_root / selected_script.name)
 
@@ -2211,13 +2214,17 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._materialize_visible_merged_runtime(active_root)
         return active_root
 
-    def _overlay_zapret_bundle_runtime(self, active_root: Path, bundle_root: Path) -> None:
+    def _overlay_zapret_bundle_runtime(self, active_root: Path, bundle_root: Path, *, include_bin_overlay: bool = True) -> None:
         for script in bundle_root.glob("*.bat"):
             if script.name.lower().startswith("service"):
                 continue
             shutil.copy2(script, active_root / script.name)
 
-        for folder_name in ("bin", "utils"):
+        bin_source = bundle_root / "bin"
+        if include_bin_overlay and bin_source.exists():
+            self._replace_runtime_bin_data(active_root / "bin", bin_source)
+
+        for folder_name in ("utils",):
             source_dir = bundle_root / folder_name
             target_dir = active_root / folder_name
             if not source_dir.exists():
@@ -2226,6 +2233,42 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             for source in source_dir.glob("*"):
                 if source.is_file():
                     shutil.copy2(source, target_dir / source.name)
+
+    def _replace_runtime_bin_data(self, target_dir: Path, source_dir: Path) -> None:
+        if not source_dir.exists() or not source_dir.is_dir():
+            return
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for existing in target_dir.glob("*.bin"):
+            try:
+                existing.unlink()
+            except OSError:
+                pass
+        for source in source_dir.glob("*.bin"):
+            if source.is_file():
+                shutil.copy2(source, target_dir / source.name)
+
+    def _bundle_has_bin_overlay(self, bundle_root: Path) -> bool:
+        bin_dir = bundle_root / "bin"
+        if not bin_dir.exists() or not bin_dir.is_dir():
+            return False
+        return self._bin_dir_has_modified_data(bin_dir)
+
+    def _bin_dir_has_modified_data(self, bin_dir: Path) -> bool:
+        base_bin = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "bin"
+        for item in bin_dir.glob("*.bin"):
+            if not item.is_file():
+                continue
+            base_file = base_bin / item.name
+            if not base_file.exists():
+                return True
+            try:
+                if item.stat().st_size != base_file.stat().st_size:
+                    return True
+                if item.read_bytes() != base_file.read_bytes():
+                    return True
+            except Exception:
+                return True
+        return False
 
     def _materialize_visible_merged_runtime(self, active_root: Path) -> None:
         merged_root = self.storage.paths.merged_runtime_dir
@@ -2313,7 +2356,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 result.append(item)
             target.write_text("\n".join(result) + ("\n" if result else ""), encoding="utf-8")
 
-    def _apply_selected_service_rules(self, active_root: Path) -> None:
+    def _apply_selected_service_rules(self, active_root: Path, *, allow_bin_overlay: bool = True) -> None:
         selected_ids = list(self.settings.get().selected_service_ids or [])
         if not selected_ids:
             return
@@ -2365,6 +2408,12 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 existing = self._read_list_lines(target)
                 merged = self._merge_with_conflict_resolution(lists_dir, safe_name.lower(), existing, incoming)
                 target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+            bin_overlay_dir = str(getattr(rule, "bin_overlay_dir", "") or "").strip()
+            if allow_bin_overlay and bin_overlay_dir:
+                source_dir = (self.storage.paths.install_root / bin_overlay_dir).resolve()
+                if source_dir.exists() and source_dir.is_dir() and self._bin_dir_has_modified_data(source_dir):
+                    self._replace_runtime_bin_data(active_root / "bin", source_dir)
+                    allow_bin_overlay = False
         self._merge_selected_service_hosts(active_root)
 
     def _merge_selected_service_hosts(self, active_root: Path) -> None:

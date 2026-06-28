@@ -15,7 +15,6 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from zapret_hub.domain import FileRecord
 from zapret_hub.services.service_catalog import (
     FORTNITE_GENERAL_PRIORITY,
-    GAMING_GENERAL_PRIORITY,
     SERVICE_PRESETS,
     SERVICE_PRESET_IDS,
     UBISOFT_GENERAL_PRIORITY,
@@ -352,15 +351,6 @@ def _preferred_fortnite_general_id(context) -> str:
     return ""
 
 
-def _preferred_gaming_general_id(context) -> str:
-    options = list(context.processes.list_zapret_generals())
-    for wanted in GAMING_GENERAL_PRIORITY:
-        for option in options:
-            if str(option.get("name", "")).strip().lower() == wanted.lower():
-                return str(option.get("id", "") or "")
-    return ""
-
-
 def _preferred_ubisoft_general_id(context) -> str:
     options = list(context.processes.list_zapret_generals())
     for wanted in UBISOFT_GENERAL_PRIORITY:
@@ -379,11 +369,6 @@ def _fortnite_zapret_settings(context) -> dict[str, str]:
     if general_id:
         changes["selected_zapret_general"] = general_id
     return changes
-
-
-def _gaming_zapret_settings(context) -> dict[str, str]:
-    general_id = _preferred_gaming_general_id(context)
-    return {"selected_zapret_general": general_id} if general_id else {}
 
 
 def _ubisoft_zapret_settings(context) -> dict[str, str]:
@@ -904,9 +889,7 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             "enabled_component_ids": sorted(enabled_components),
             "autostart_component_ids": sorted(autostart_components),
         }
-        if "gaming" in requested:
-            settings_changes.update(_gaming_zapret_settings(context))
-        elif "ubisoft" in requested:
+        if "ubisoft" in requested:
             settings_changes.update(_ubisoft_zapret_settings(context))
         elif "fortnite" in requested:
             settings_changes.update(_fortnite_zapret_settings(context))
@@ -956,6 +939,23 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
                     states = {item.component_id: item for item in context.processes.list_states()}
                     if states.get("tg-ws-proxy") and states["tg-ws-proxy"].status == "running":
                         context.processes.stop_component("tg-ws-proxy")
+                ordered = [preset.id for preset in SERVICE_PRESETS if preset.id in selected]
+                context.settings.update(
+                    selected_service_ids=ordered,
+                    autostart_component_ids=sorted(autostart),
+                )
+            if component_id == "xbox-dns":
+                settings = context.settings.get()
+                selected = {str(item) for item in list(settings.selected_service_ids or [])}
+                autostart = {str(item) for item in list(settings.autostart_component_ids or [])}
+                if component.enabled:
+                    selected.add("ai")
+                else:
+                    selected.discard("ai")
+                    autostart.discard("xbox-dns")
+                    states = {item.component_id: item for item in context.processes.list_states()}
+                    if states.get("xbox-dns") and states["xbox-dns"].status == "running":
+                        context.processes.stop_component("xbox-dns")
                 ordered = [preset.id for preset in SERVICE_PRESETS if preset.id in selected]
                 context.settings.update(
                     selected_service_ids=ordered,

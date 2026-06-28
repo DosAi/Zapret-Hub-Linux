@@ -40,3 +40,5 @@ googleads.g.doubleclick.net
 static.doubleclick.net
 stats.g.doubleclick.net
 pubads.g.doubleclick.net
+youtube.googleapis.com
+google.ru
