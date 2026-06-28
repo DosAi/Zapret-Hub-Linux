@@ -371,6 +371,10 @@ def _fortnite_zapret_settings(context) -> dict[str, str]:
     return changes
 
 
+def _gaming_zapret_settings(context) -> dict[str, str]:
+    return {"zapret_game_filter_mode": "tcpudp"}
+
+
 def _ubisoft_zapret_settings(context) -> dict[str, str]:
     general_id = _preferred_ubisoft_general_id(context)
     return {"selected_zapret_general": general_id} if general_id else {}
@@ -889,6 +893,8 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             "enabled_component_ids": sorted(enabled_components),
             "autostart_component_ids": sorted(autostart_components),
         }
+        if "gaming" in requested:
+            settings_changes.update(_gaming_zapret_settings(context))
         if "ubisoft" in requested:
             settings_changes.update(_ubisoft_zapret_settings(context))
         elif "fortnite" in requested:
