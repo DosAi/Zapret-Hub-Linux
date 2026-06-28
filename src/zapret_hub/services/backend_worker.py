@@ -649,7 +649,7 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
                 },
                 emit_progress,
             )
-            for key in ("zapret_restarted", "tg_proxy_restarted", "vpn_restarted", "theme_changed", "language_changed", "autostart_changed"):
+            for key in ("zapret_restarted", "tg_proxy_restarted", "vpn_restarted", "theme_changed", "language_changed", "experimental_appearance_changed", "autostart_changed"):
                 if bool(settings_result.get(key)):
                     result[key] = settings_result.get(key)
         if isinstance(mods_payload, dict) and mods_payload:
@@ -709,6 +709,7 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         )
         theme_before = before.theme
         language_before = before.language
+        experimental_before = bool(getattr(before, "experimental_appearance", False))
         autostart_before = bool(before.autostart_windows)
         requested_zapret = (
             str(effective_payload.get("zapret_ipset_mode", before.zapret_ipset_mode)),
@@ -782,6 +783,7 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         result = {
             "theme_changed": theme_before != context.settings.get().theme,
             "language_changed": language_before != context.settings.get().language,
+            "experimental_appearance_changed": experimental_before != bool(getattr(context.settings.get(), "experimental_appearance", False)),
             "autostart_changed": autostart_before != bool(context.settings.get().autostart_windows),
             "client_revision": client_revision,
             "tg_proxy_restarted": tg_proxy_restarted,

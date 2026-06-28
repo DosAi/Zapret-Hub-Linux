@@ -2460,6 +2460,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             return command
         selected_ids = list(self.settings.get().selected_service_ids or [])
         _game_filter, game_filter_tcp, game_filter_udp = self._get_game_filter_values(lists_dir.parent)
+        if "fortnite" in {str(item) for item in selected_ids}:
+            command = self._inject_fortnite_ping_ttl(command, game_filter_udp)
         extra_args: list[str] = []
         seen_segments: set[tuple[str, ...]] = set()
         for service_id in selected_ids:
@@ -2481,6 +2483,30 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         if not extra_args:
             return command
         return [*command, *extra_args]
+
+    def _inject_fortnite_ping_ttl(self, command: list[str], game_filter_udp: str) -> list[str]:
+        if "--dpi-desync-ttl=10" in command:
+            return command
+        udp_values = {game_filter_udp, "%GameFilter%", "%GameFilterUDP%"}
+        result = list(command)
+        segment_start = 0
+        for index, arg in enumerate(result):
+            if index == 0 or arg == "--new":
+                segment_start = index + (1 if arg == "--new" else 0)
+                continue
+            if not arg.startswith("--filter-udp="):
+                continue
+            ports = arg.split("=", 1)[1]
+            if ports not in udp_values and game_filter_udp not in {item.strip() for item in ports.split(",")}:
+                continue
+            segment_end = next((pos for pos in range(index + 1, len(result)) if result[pos] == "--new"), len(result))
+            segment = result[segment_start:segment_end]
+            if "--dpi-desync=fake" not in segment:
+                continue
+            insert_at = segment_start + segment.index("--dpi-desync=fake") + 1
+            result.insert(insert_at, "--dpi-desync-ttl=10")
+            return result
+        return result
 
     def _read_list_lines(self, path: Path) -> list[str]:
         if not path.exists():
