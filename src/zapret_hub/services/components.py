@@ -964,7 +964,13 @@ foreach ($adapter in @($payload.adapters)) {
 
         selected_script = Path(selected_option["path"])
         selected_bundle_root = Path(selected_script).parent
-        self._repair_stale_zapret_driver_paths(selected_bundle_root)
+        stable_driver_path: Path | None = None
+        try:
+            stable_driver_path = self._ensure_stable_windivert_driver(selected_bundle_root / "bin")
+        except Exception:
+            stable_driver_path = None
+        self._repair_windivert_image_paths(preferred_driver_path=stable_driver_path)
+        self._repair_stale_zapret_driver_paths(selected_bundle_root, preferred_driver_path=stable_driver_path)
         active_root: Path | None = None
         process: subprocess.Popen[Any] | None = None
         try:
@@ -984,6 +990,7 @@ foreach ($adapter in @($payload.adapters)) {
                 raise FileNotFoundError(f"Selected general was not materialized: {active_script}")
             if not (bin_dir / "winws.exe").exists():
                 raise FileNotFoundError(f"winws.exe was not materialized: {bin_dir / 'winws.exe'}")
+            stable_driver_path = self._ensure_stable_windivert_driver(bin_dir)
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
             winws_command = self._apply_selected_service_command_extensions(winws_command, lists_dir=lists_dir)
             winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
@@ -998,7 +1005,7 @@ foreach ($adapter in @($payload.adapters)) {
                 return state
             process = subprocess.Popen(
                 winws_command,
-                cwd=str(bin_dir),
+                cwd=str(stable_driver_path.parent),
                 creationflags=self._creationflags,
                 startupinfo=self._startupinfo,
                 stdout=self._open_source_log_stream("zapret"),
@@ -1014,6 +1021,7 @@ foreach ($adapter in @($payload.adapters)) {
                     break
                 time.sleep(0.25)
             if running:
+                self._repair_windivert_image_paths(active_root, preferred_driver_path=stable_driver_path)
                 try:
                     (active_root / ".driver_path_in_use").write_text(datetime.utcnow().isoformat(), encoding="utf-8")
                 except Exception:
@@ -1064,104 +1072,11 @@ foreach ($adapter in @($payload.adapters)) {
         self._states[component_id] = state
         return state
 
-    def _start_goshkow_vpn_legacy_gui_disabled(self, component_id: str) -> ComponentState:
-        state = ComponentState(component_id=component_id, status="error")
-        state.last_error = "Legacy goshkow vpn GUI startup path is disabled."
-        return state
-        current = self._processes.get(component_id)
-        if current and current.poll() is None:
-            existing = self._states.get(component_id, ComponentState(component_id=component_id, status="running", pid=current.pid))
-            existing.status = "running"
-            existing.pid = current.pid
-            return existing
-        state = ComponentState(component_id=component_id)
-        vpn_state = self.storage.read_json(self.storage.paths.data_dir / "goshkow_vpn.json", default={}) or {}
-        if not isinstance(vpn_state, dict) or not vpn_state.get("subscription_url") or not vpn_state.get("servers"):
-            state.status = "error"
-            state.last_error = "Сначала добавьте подписку goshkow vpn."
-            self._states[component_id] = state
-            return state
-        zapret_running = bool(self._is_image_running("winws.exe"))
-        if sys.platform.startswith("win") and not self._is_admin_windows():
-            self.settings.update(
-                selected_runtime_mode="goshkow-vpn",
-                zapret_was_running_before_goshkow_vpn=zapret_running,
-            )
-            self.settings.update(goshkow_vpn_pending_start=True)
-            state.status = "error"
-            state.last_error = "Для запуска TUN-режима нужны права администратора. Перезапустите приложение от имени администратора."
-            self._states[component_id] = state
-            return state
-        try:
-            self.settings.update(
-                selected_runtime_mode="goshkow-vpn",
-                zapret_was_running_before_goshkow_vpn=zapret_running,
-                goshkow_vpn_pending_start=False,
-            )
-            if zapret_running:
-                self.stop_component("zapret")
-            exe = self._ensure_v2rayn_runtime()
-            self._write_goshkow_vpn_subscription_hint(vpn_state)
-            process = subprocess.Popen(
-                [str(exe)],
-                cwd=str(exe.parent),
-                creationflags=self._creationflags,
-                startupinfo=self._startupinfo,
-                stdout=self._open_source_log_stream(component_id),
-                stderr=subprocess.STDOUT,
-            )
-            if self._job:
-                self._job.assign_pid(process.pid)
-            state.status = "running"
-            state.pid = process.pid
-            state.last_error = ""
-            self._processes[component_id] = process
-            self._states[component_id] = state
-            self.logging.log("info", "goshkow vpn started", pid=process.pid)
-            return state
-        except Exception as error:
-            state.status = "error"
-            state.last_error = str(error)
-            self._states[component_id] = state
-            self.logging.log("error", "goshkow vpn failed to start", error=str(error))
-            return state
-
     def _is_admin_windows(self) -> bool:
         try:
             return bool(ctypes.windll.shell32.IsUserAnAdmin())
         except Exception:
             return False
-
-    def _write_goshkow_vpn_subscription_hint(self, vpn_state: dict[str, Any]) -> None:
-        target = self.storage.paths.runtime_dir / "v2rayN" / "goshkow-vpn-subscription.txt"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        selected_id = str(vpn_state.get("selected_server_id", "") or "")
-        selected = None
-        for item in vpn_state.get("servers", []) or []:
-            if isinstance(item, dict) and str(item.get("id", "")) == selected_id:
-                selected = item
-                break
-        lines = [
-            "goshkow vpn",
-            f"subscription={vpn_state.get('subscription_url', '')}",
-            f"selected={selected.get('name', '') if isinstance(selected, dict) else ''}",
-            "Этот файл создан Zapret Hub для интеграции подписки vpn.goshkow.ru с v2rayN.",
-        ]
-        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    def _ensure_v2rayn_runtime(self) -> Path:
-        runtime_root = self.storage.paths.runtime_dir / "v2rayN"
-        for candidate in runtime_root.rglob("sing-box.exe"):
-            if candidate.name.lower() == "sing-box.exe":
-                return candidate
-        runtime_root.mkdir(parents=True, exist_ok=True)
-        archive = self._download_latest_v2rayn_archive()
-        with zipfile.ZipFile(archive) as bundle:
-            bundle.extractall(runtime_root)
-        for candidate in runtime_root.rglob("sing-box.exe"):
-            if candidate.name.lower() == "sing-box.exe":
-                return candidate
-        raise FileNotFoundError("v2rayN был загружен, но исполняемый файл не найден.")
 
     def _download_latest_v2rayn_archive(self) -> Path:
         api_url = "https://api.github.com/repos/2dust/v2rayN/releases/latest"
@@ -2515,37 +2430,6 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             lines.append(line)
         return lines
 
-    def auto_select_working_general(self) -> dict[str, object] | None:
-        options = self.list_zapret_generals()
-        if not options:
-            return None
-        original = self.settings.get().selected_zapret_general
-        best_result: dict[str, object] | None = None
-        for option in options:
-            outcome = self._run_general_connectivity_check(option["id"])
-            if best_result is None or int(outcome.get("passed_targets", 0)) > int(best_result.get("passed_targets", 0)):
-                best_result = {
-                    "id": option["id"],
-                    "status": outcome["status"],
-                    "passed_targets": outcome.get("passed_targets", 0),
-                    "total_targets": outcome.get("total_targets", 0),
-                }
-            if outcome["status"] == "ok":
-                self.stop_component("zapret")
-                self.logging.log("info", "Auto-selected zapret general", general=option["id"])
-                return {
-                    "id": option["id"],
-                    "status": "ok",
-                    "passed_targets": outcome.get("passed_targets", 0),
-                    "total_targets": outcome.get("total_targets", 0),
-                }
-            self.stop_component("zapret")
-        if best_result is not None and best_result.get("id"):
-            self.settings.update(selected_zapret_general=str(best_result["id"]))
-            return best_result
-        self.settings.update(selected_zapret_general=original)
-        return None
-
     def _capture_diagnostic_settings(self) -> dict[str, object]:
         settings = self.settings.get()
         return {
@@ -3354,112 +3238,6 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         proc = self._run_quiet(["ping", "-n", "1", "-w", "1200", host])
         return proc.returncode == 0
 
-    def _build_zapret_args(self, bin_dir: Path, lists_dir: Path) -> list[str]:
-        tls_google = str(bin_dir / "tls_clienthello_www_google_com.bin")
-        tls_4pda = str(bin_dir / "tls_clienthello_4pda_to.bin")
-        quic_google = str(bin_dir / "quic_initial_www_google_com.bin")
-        list_general = str(lists_dir / "list-general.txt")
-        list_general_user = str(lists_dir / "list-general-user.txt")
-        list_exclude = str(lists_dir / "list-exclude.txt")
-        list_exclude_user = str(lists_dir / "list-exclude-user.txt")
-        ipset_all = str(lists_dir / "ipset-all.txt")
-        ipset_all_user = str(lists_dir / "ipset-all-user.txt")
-        ipset_exclude = str(lists_dir / "ipset-exclude.txt")
-        ipset_exclude_user = str(lists_dir / "ipset-exclude-user.txt")
-
-        return [
-            "--wf-tcp=80,443,2053,2083,2087,2096,8443",
-            "--wf-udp=443,19294-19344,50000-50100",
-            "--filter-udp=443",
-            f"--hostlist={list_general}",
-            f"--hostlist={list_general_user}",
-            f"--hostlist-exclude={list_exclude}",
-            f"--hostlist-exclude={list_exclude_user}",
-            f"--ipset-exclude={ipset_exclude}",
-            f"--ipset-exclude={ipset_exclude_user}",
-            "--dpi-desync=fake",
-            "--dpi-desync-repeats=6",
-            f"--dpi-desync-fake-quic={quic_google}",
-            "--new",
-            "--filter-udp=19294-19344,50000-50100",
-            "--filter-l7=discord,stun",
-            "--dpi-desync=fake",
-            "--dpi-desync-repeats=6",
-            "--new",
-            "--filter-tcp=2053,2083,2087,2096,8443",
-            "--hostlist-domains=discord.media",
-            "--dpi-desync=multisplit",
-            "--dpi-desync-split-seqovl=681",
-            "--dpi-desync-split-pos=1",
-            f"--dpi-desync-split-seqovl-pattern={tls_google}",
-            "--new",
-            "--filter-tcp=443",
-            f"--hostlist={str(lists_dir / 'list-google.txt')}",
-            "--ip-id=zero",
-            "--dpi-desync=multisplit",
-            "--dpi-desync-split-seqovl=681",
-            "--dpi-desync-split-pos=1",
-            f"--dpi-desync-split-seqovl-pattern={tls_google}",
-            "--new",
-            "--filter-tcp=80,443",
-            f"--hostlist={list_general}",
-            f"--hostlist={list_general_user}",
-            f"--hostlist-exclude={list_exclude}",
-            f"--hostlist-exclude={list_exclude_user}",
-            f"--ipset-exclude={ipset_exclude}",
-            f"--ipset-exclude={ipset_exclude_user}",
-            "--dpi-desync=multisplit",
-            "--dpi-desync-split-seqovl=568",
-            "--dpi-desync-split-pos=1",
-            f"--dpi-desync-split-seqovl-pattern={tls_4pda}",
-            "--new",
-            "--filter-udp=443",
-            f"--ipset={ipset_all}",
-            f"--ipset={ipset_all_user}",
-            f"--hostlist-exclude={list_exclude}",
-            f"--hostlist-exclude={list_exclude_user}",
-            f"--ipset-exclude={ipset_exclude}",
-            f"--ipset-exclude={ipset_exclude_user}",
-            "--dpi-desync=fake",
-            "--dpi-desync-repeats=6",
-            f"--dpi-desync-fake-quic={quic_google}",
-            "--new",
-            "--filter-tcp=80,443,8443",
-            f"--ipset={ipset_all}",
-            f"--ipset={ipset_all_user}",
-            f"--hostlist-exclude={list_exclude}",
-            f"--hostlist-exclude={list_exclude_user}",
-            f"--ipset-exclude={ipset_exclude}",
-            f"--ipset-exclude={ipset_exclude_user}",
-            "--dpi-desync=multisplit",
-            "--dpi-desync-split-seqovl=568",
-            "--dpi-desync-split-pos=1",
-            f"--dpi-desync-split-seqovl-pattern={tls_4pda}",
-            "--new",
-            "--filter-tcp=1024-65535",
-            f"--ipset={ipset_all}",
-            f"--ipset={ipset_all_user}",
-            f"--ipset-exclude={ipset_exclude}",
-            f"--ipset-exclude={ipset_exclude_user}",
-            "--dpi-desync=multisplit",
-            "--dpi-desync-any-protocol=1",
-            "--dpi-desync-cutoff=n3",
-            "--dpi-desync-split-seqovl=568",
-            "--dpi-desync-split-pos=1",
-            f"--dpi-desync-split-seqovl-pattern={tls_4pda}",
-            "--new",
-            "--filter-udp=1024-65535",
-            f"--ipset={ipset_all}",
-            f"--ipset={ipset_all_user}",
-            f"--ipset-exclude={ipset_exclude}",
-            f"--ipset-exclude={ipset_exclude_user}",
-            "--dpi-desync=fake",
-            "--dpi-desync-repeats=12",
-            "--dpi-desync-any-protocol=1",
-            f"--dpi-desync-fake-unknown-udp={quic_google}",
-            "--dpi-desync-cutoff=n2",
-        ]
-
     def _ensure_zapret_user_lists(self, lists_dir: Path) -> None:
         defaults = {
             "ipset-all-user.txt": "",
@@ -3570,9 +3348,26 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 pass
             self._reset_active_runtime_dir(candidate)
 
-    def _zapret_service_exists(self) -> bool:
-        proc = self._run_quiet(["sc", "query", "zapret"])
-        return proc.returncode == 0
+    def _stable_windivert_dir(self) -> Path:
+        return self.storage.paths.merged_runtime_dir / "drivers" / "windivert"
+
+    def _ensure_stable_windivert_driver(self, bin_dir: Path) -> Path:
+        source_path = bin_dir / "WinDivert64.sys"
+        if not source_path.exists():
+            raise FileNotFoundError(f"WinDivert64.sys was not materialized: {source_path}")
+        target_dir = self._stable_windivert_dir()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("WinDivert64.sys", "WinDivert32.sys", "WinDivert.dll"):
+            source = bin_dir / name
+            if not source.exists():
+                continue
+            target = target_dir / name
+            try:
+                if not target.exists() or source.stat().st_size != target.stat().st_size:
+                    shutil.copy2(source, target)
+            except Exception:
+                shutil.copy2(source, target)
+        return target_dir / "WinDivert64.sys"
 
     def _cleanup_zapret_driver_services(self, runtime_root: Path | None = None) -> None:
         for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
@@ -3602,6 +3397,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return proc.returncode == 0
 
     def _service_image_path(self, service_name: str) -> str:
+        return self._normalize_driver_image_path(self._service_image_path_raw(service_name))
+
+    def _service_image_path_raw(self, service_name: str) -> str:
         proc = self._run_quiet(["sc", "qc", service_name])
         if proc.returncode != 0:
             return ""
@@ -3611,7 +3409,81 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             return line.split(":", 1)[-1].strip().strip('"')
         return ""
 
-    def _repair_stale_zapret_driver_paths(self, selected_bundle_root: Path) -> None:
+    def _normalize_driver_image_path(self, image_path: str) -> str:
+        raw = str(image_path or "").strip().strip('"')
+        for prefix in ("\\??\\", "??\\", "\\\\?\\"):
+            if raw.startswith(prefix):
+                raw = raw[len(prefix):]
+                break
+        return raw.strip().strip('"')
+
+    def _repair_windivert_image_paths(self, runtime_root: Path | None = None, preferred_driver_path: Path | None = None) -> None:
+        for service_name in ("WinDivert", "WinDivert14"):
+            if not self._service_exists(service_name):
+                continue
+            raw_path = self._service_image_path_raw(service_name)
+            normalized_path = self._normalize_driver_image_path(raw_path)
+            if not raw_path or not normalized_path:
+                continue
+            if "windivert64.sys" not in normalized_path.lower():
+                continue
+            repair_target = normalized_path
+            preferred_text = ""
+            if preferred_driver_path is not None:
+                try:
+                    preferred_text = str(preferred_driver_path.resolve())
+                except Exception:
+                    preferred_text = str(preferred_driver_path)
+                if preferred_driver_path.exists():
+                    repair_target = preferred_text
+            should_repair = raw_path.strip().strip('"') != normalized_path
+            if preferred_text and normalized_path.lower() != preferred_text.lower():
+                should_repair = True
+            managed_current_path = self._is_managed_or_stale_zapret_service_path(normalized_path)
+            if runtime_root is not None and not self._path_mentions_runtime(normalized_path, runtime_root) and not managed_current_path:
+                should_repair = False
+            elif runtime_root is None and not managed_current_path:
+                should_repair = False
+            if not should_repair:
+                continue
+            if not Path(repair_target).exists():
+                continue
+            if self._set_service_image_path(service_name, repair_target):
+                self.logging.log(
+                    "info",
+                    "WinDivert service ImagePath normalized",
+                    service=service_name,
+                    old_path=raw_path,
+                    new_path=repair_target,
+                )
+
+    def _set_service_image_path(self, service_name: str, image_path: str) -> bool:
+        updated = False
+        keys = [
+            f"HKLM\\SYSTEM\\CurrentControlSet\\Services\\{service_name}",
+            f"HKLM\\SYSTEM\\ControlSet001\\Services\\{service_name}",
+        ]
+        for key in keys:
+            if self._run_quiet(["reg", "query", key]).returncode != 0:
+                continue
+            proc = self._run_quiet(
+                [
+                    "reg",
+                    "add",
+                    key,
+                    "/v",
+                    "ImagePath",
+                    "/t",
+                    "REG_EXPAND_SZ",
+                    "/d",
+                    image_path,
+                    "/f",
+                ]
+            )
+            updated = updated or proc.returncode == 0
+        return updated
+
+    def _repair_stale_zapret_driver_paths(self, selected_bundle_root: Path, preferred_driver_path: Path | None = None) -> None:
         if not (selected_bundle_root / "bin" / "WinDivert64.sys").exists():
             return
         for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
@@ -3626,6 +3498,16 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             target_path = Path(raw_target)
             if target_path.exists():
                 continue
+            if service_name.lower() in {"windivert", "windivert14"} and preferred_driver_path is not None and preferred_driver_path.exists():
+                if self._set_service_image_path(service_name, str(preferred_driver_path)):
+                    self.logging.log(
+                        "info",
+                        "Repaired stale WinDivert service path",
+                        service=service_name,
+                        old_path=raw_target,
+                        new_path=str(preferred_driver_path),
+                    )
+                    continue
             self.logging.log(
                 "warning",
                 "Removing stale WinDivert service with missing driver file",
@@ -3672,7 +3554,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             )
 
     def _is_managed_or_stale_zapret_service_path(self, image_path: str) -> bool:
-        raw = str(image_path or "").strip().strip('"')
+        raw = self._normalize_driver_image_path(str(image_path or ""))
         if not raw:
             return False
         lowered = raw.lower()
@@ -3693,7 +3575,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return False
 
     def _path_mentions_runtime(self, image_path: str, runtime_root: Path) -> bool:
-        raw = image_path.strip().strip('"').lower()
+        raw = self._normalize_driver_image_path(image_path).lower()
         if not raw:
             return False
         try:

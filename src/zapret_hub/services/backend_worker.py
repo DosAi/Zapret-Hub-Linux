@@ -18,6 +18,7 @@ from zapret_hub.services.service_catalog import (
     GAMING_GENERAL_PRIORITY,
     SERVICE_PRESETS,
     SERVICE_PRESET_IDS,
+    UBISOFT_GENERAL_PRIORITY,
 )
 
 
@@ -360,6 +361,15 @@ def _preferred_gaming_general_id(context) -> str:
     return ""
 
 
+def _preferred_ubisoft_general_id(context) -> str:
+    options = list(context.processes.list_zapret_generals())
+    for wanted in UBISOFT_GENERAL_PRIORITY:
+        for option in options:
+            if str(option.get("name", "")).strip().lower() == wanted.lower():
+                return str(option.get("id", "") or "")
+    return ""
+
+
 def _fortnite_zapret_settings(context) -> dict[str, str]:
     changes = {
         "zapret_ipset_mode": "any",
@@ -373,6 +383,11 @@ def _fortnite_zapret_settings(context) -> dict[str, str]:
 
 def _gaming_zapret_settings(context) -> dict[str, str]:
     general_id = _preferred_gaming_general_id(context)
+    return {"selected_zapret_general": general_id} if general_id else {}
+
+
+def _ubisoft_zapret_settings(context) -> dict[str, str]:
+    general_id = _preferred_ubisoft_general_id(context)
     return {"selected_zapret_general": general_id} if general_id else {}
 
 
@@ -650,6 +665,7 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
     if action == "apply_deferred_changes":
         service_ids = payload.get("service_ids", None)
         settings_payload = payload.get("settings", {})
+        mods_payload = payload.get("mods", {})
         result: dict[str, Any] = {}
         if isinstance(service_ids, list):
             service_result = _run_action(
@@ -675,9 +691,20 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             for key in ("zapret_restarted", "tg_proxy_restarted", "vpn_restarted", "theme_changed", "language_changed", "autostart_changed"):
                 if bool(settings_result.get(key)):
                     result[key] = settings_result.get(key)
+        if isinstance(mods_payload, dict) and mods_payload:
+            mods_result = _run_action(
+                context,
+                "set_mod_enabled_states",
+                {"mods": mods_payload},
+                emit_progress,
+            )
+            if bool(mods_result.get("zapret_restarted")):
+                result["zapret_restarted"] = True
+            result.update({key: value for key, value in (mods_result or {}).items() if key in {"mods_changed"}})
         result["client_revision"] = int(payload.get("client_revision", 0) or 0)
         result["service_client_revision"] = int(payload.get("service_client_revision", 0) or 0)
         result.update(_snapshot(context))
+        result.update(_mods_payload(context))
         return result
 
     if action == "prepare_general_autotest_runtime":
@@ -879,6 +906,8 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         }
         if "gaming" in requested:
             settings_changes.update(_gaming_zapret_settings(context))
+        elif "ubisoft" in requested:
+            settings_changes.update(_ubisoft_zapret_settings(context))
         elif "fortnite" in requested:
             settings_changes.update(_fortnite_zapret_settings(context))
         context.settings.update(**settings_changes)
@@ -959,6 +988,30 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             context.mods.set_enabled(mod_id, not installed[mod_id].enabled)
         zapret_restarted = _finish_zapret_reconfiguration(context, restart=zapret_was_running)
         result = {"mod_id": mod_id, "zapret_restarted": zapret_restarted}
+        result.update(_snapshot(context))
+        result.update(_mods_payload(context))
+        return result
+
+    if action == "set_mod_enabled_states":
+        raw_mods = payload.get("mods", {})
+        if not isinstance(raw_mods, dict):
+            raw_mods = {}
+        desired = {str(key).strip(): bool(value) for key, value in raw_mods.items() if str(key).strip()}
+        zapret_was_running = _stop_zapret_for_reconfiguration(context) if desired else False
+        changed = False
+        installed = {item.id: item for item in context.mods.list_installed()}
+        for mod_id, enabled in desired.items():
+            if mod_id not in installed and enabled:
+                context.mods.install(mod_id)
+                installed = {item.id: item for item in context.mods.list_installed()}
+            entry = installed.get(mod_id)
+            if entry is None:
+                continue
+            if bool(entry.enabled) != enabled:
+                context.mods.set_enabled(mod_id, enabled)
+                changed = True
+        zapret_restarted = _finish_zapret_reconfiguration(context, restart=zapret_was_running) if changed else False
+        result = {"mods_changed": changed, "zapret_restarted": zapret_restarted}
         result.update(_snapshot(context))
         result.update(_mods_payload(context))
         return result
@@ -1301,10 +1354,10 @@ class BackendWorkerClient(QObject):
         self._process = ctx.Process(target=_worker_main, args=(self._task_queue, self._result_queue), daemon=True)
         self._process.start()
         self._cancel_paths: dict[str, str] = {}
+        self._pending_tasks: set[str] = set()
         self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(40)
+        self._poll_timer.setInterval(80)
         self._poll_timer.timeout.connect(self._poll_results)
-        self._poll_timer.start()
 
     def submit(self, action: str, payload: dict[str, Any] | None = None) -> str:
         task_id = uuid.uuid4().hex
@@ -1318,6 +1371,9 @@ class BackendWorkerClient(QObject):
                 pass
             self._cancel_paths[task_id] = cancel_path
             task_payload["cancel_path"] = cancel_path
+        self._pending_tasks.add(task_id)
+        if not self._poll_timer.isActive():
+            self._poll_timer.start()
         self._task_queue.put({"id": task_id, "action": action, "payload": task_payload})
         return task_id
 
@@ -1341,6 +1397,8 @@ class BackendWorkerClient(QObject):
                 self.task_progress.emit(message)
                 continue
             task_id = str(message.get("id", ""))
+            if task_id:
+                self._pending_tasks.discard(task_id)
             cancel_path = self._cancel_paths.pop(task_id, None)
             if cancel_path:
                 try:
@@ -1352,6 +1410,8 @@ class BackendWorkerClient(QObject):
                 self.task_finished.emit(message)
             else:
                 self.task_failed.emit(message)
+        if not self._pending_tasks and self._poll_timer.isActive():
+            self._poll_timer.stop()
 
     def stop(self) -> None:
         try:

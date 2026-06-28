@@ -24,7 +24,7 @@ SERVICE_PRESETS: tuple[ServicePreset, ...] = (
     ServicePreset("gaming", "Gaming", "Gaming", "Разблокирует большинство игровых сервисов", "Unlocks most gaming services", "gaming.svg", "#64d488", "Большинство игровых сервисов", "Most gaming services"),
     ServicePreset("clouds", "Clouds", "Clouds", "Amazon CDN, CloudFront, BunnyCDN, OVH SAS и другие облачные CDN", "Amazon CDN, CloudFront, BunnyCDN, OVH SAS, and other cloud CDNs", "clouds.svg", "#66c0f4", "Amazon, Cloudfront, Bunny и другие", "Amazon, CloudFront, Bunny, and others"),
     ServicePreset("ai", "Нейросети", "Neural Networks", "ChatGPT, Claude, Gemini и Copilot", "ChatGPT, Claude, Gemini, and Copilot", "ai.svg", "#10a37f", "ChatGPT, Claude, Gemini, Copilot", "ChatGPT, Claude, Gemini, Copilot"),
-    ServicePreset("instagram", "Instagram", "Instagram", "Лента, фото, Reels и CDN Instagram", "Feed, photos, Reels, and Instagram CDN", "instagram.svg", "#e4405f"),
+    ServicePreset("ubisoft", "Ubisoft", "Ubisoft", "Ubisoft Connect, магазин, авторизация, загрузки и игровые сервисы", "Ubisoft Connect, store, auth, downloads, and game services", "ubisoft.svg", "#7a7dff", "Ubisoft Connect, магазин и игры", "Ubisoft Connect, store, and games"),
     ServicePreset("epic-games", "Epic Games", "Epic Games", "Магазин, лаунчер, загрузки и сервисы Epic", "Store, launcher, downloads, and Epic services", "epicgames.svg", "#eef2f8", "Магазин, лаунчер, загрузки и сервисы", "Store, launcher, downloads, and services"),
     ServicePreset("battle-net", "Battle.net", "Battle.net", "Лаунчер, игры Blizzard и загрузка контента", "Launcher, Blizzard games, and content delivery", "battledotnet.svg", "#148eff"),
     ServicePreset("fortnite", "Fortnite", "Fortnite", "Матчмейкинг, лаунчер, загрузки и сервисы Epic", "Matchmaking, launcher, downloads, and Epic services", "fortnite.svg", "#7c5cff", "Матчмейкинг, лаунчер, загрузки и сервисы", "Matchmaking, launcher, downloads, and services"),
@@ -52,13 +52,17 @@ GAMING_GENERAL_PRIORITY = (
     "general (Gaming).bat",
 )
 
+UBISOFT_GENERAL_PRIORITY = (
+    "general (Ubisoft).bat",
+)
+
 
 def prioritize_generals_for_services(
     options: list[dict[str, str]],
     selected_service_ids: list[str] | tuple[str, ...] | set[str],
 ) -> list[dict[str, str]]:
     selected = {str(item) for item in selected_service_ids}
-    if "gaming" not in selected and "fortnite" not in selected:
+    if "gaming" not in selected and "fortnite" not in selected and "ubisoft" not in selected:
         return list(options)
 
     prioritized: list[dict[str, str]] = []
@@ -66,6 +70,8 @@ def prioritize_generals_for_services(
     wanted_order: list[str] = []
     if "gaming" in selected:
         wanted_order.extend(GAMING_GENERAL_PRIORITY)
+    if "ubisoft" in selected:
+        wanted_order.extend(UBISOFT_GENERAL_PRIORITY)
     if "fortnite" in selected:
         wanted_order.extend(FORTNITE_GENERAL_PRIORITY)
     for wanted in wanted_order:

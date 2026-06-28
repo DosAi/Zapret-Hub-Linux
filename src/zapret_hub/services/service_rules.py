@@ -25,6 +25,14 @@ _GAMING_LIST_FILES: tuple[tuple[str, str], ...] = (
     ("ipset-exclude.txt", "sample_data/default_services/gaming/lists/ipset-exclude.txt"),
 )
 
+_UBISOFT_LIST_FILES: tuple[tuple[str, str], ...] = (
+    ("list-general.txt", "sample_data/default_services/ubisoft/lists/list-general.txt"),
+    ("list-google.txt", "sample_data/default_services/ubisoft/lists/list-google.txt"),
+    ("list-exclude.txt", "sample_data/default_services/ubisoft/lists/list-exclude.txt"),
+    ("ipset-all.txt", "sample_data/default_services/ubisoft/lists/ipset-all.txt"),
+    ("ipset-exclude.txt", "sample_data/default_services/ubisoft/lists/ipset-exclude.txt"),
+)
+
 
 SERVICE_RULES: dict[str, ServiceRule] = {
     "cloudflare": ServiceRule(
@@ -137,9 +145,10 @@ SERVICE_RULES: dict[str, ServiceRule] = {
         ),
     ),
     "ai": ServiceRule(),
-    "instagram": ServiceRule(
-        list_general=("instagram.com", "cdninstagram.com", "static.cdninstagram.com", "ig.me", "threads.net"),
-        test_targets=(("Instagram", "https://www.instagram.com"),),
+    "ubisoft": ServiceRule(
+        list_general=("ubisoft.com", "ubi.com", "uplay.com", "ubisoftconnect.com"),
+        extra_list_files=_UBISOFT_LIST_FILES,
+        test_targets=(("Ubisoft", "https://www.ubisoft.com"), ("Ubisoft Connect", "https://connect.ubisoft.com")),
     ),
     "epic-games": ServiceRule(
         list_general=("epicgames.com", "epicgames.dev", "epicgamescdn.com", "unrealengine.com", "akamaized.net", "cloudfront.net"),

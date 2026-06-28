@@ -98,6 +98,7 @@ class SettingsManager:
                 "twitch": "fortnite",
                 "roblox": "gaming",
                 "tiktok": "ai",
+                "instagram": "ubisoft",
             }
             migrated_service_ids = [
                 service_migrations.get(str(item).strip(), str(item).strip())
