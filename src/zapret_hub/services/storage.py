@@ -284,6 +284,15 @@ class StorageManager:
                 legacy_gaming_general.unlink()
             except OSError:
                 pass
+        allowed_hidden_generals = {"general (ubisoft).bat"}
+        for legacy_general in target_dir.glob("*.bat"):
+            lowered_name = legacy_general.name.lower()
+            if lowered_name.startswith("service") or lowered_name in allowed_hidden_generals:
+                continue
+            try:
+                legacy_general.unlink()
+            except OSError:
+                pass
 
         general_scripts = sorted(
             script.name
@@ -503,4 +512,3 @@ class StorageManager:
                     shutil.copy2(src, dst)
                 except OSError:
                     continue
-

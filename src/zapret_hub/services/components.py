@@ -211,6 +211,7 @@ class ProcessManager:
     def list_zapret_generals(self) -> list[dict[str, str]]:
         options: list[dict[str, str]] = []
         bundles = self._get_zapret_bundles(enabled_only=True, include_hidden_generals=True)
+        selected_services = {str(item) for item in list(self.settings.get().selected_service_ids or [])}
         for bundle in bundles:
             bundle_id = bundle["id"]
             bundle_title = bundle["title"]
@@ -218,6 +219,8 @@ class ProcessManager:
             for script in sorted(root.glob("*.bat")):
                 name = script.name.lower()
                 if name.startswith("service"):
+                    continue
+                if bundle_id == "unified-general" and name == "general (ubisoft).bat" and "ubisoft" not in selected_services:
                     continue
                 option_id = f"{bundle_id}|{script.name}"
                 options.append(
