@@ -64,8 +64,6 @@ def prioritize_generals_for_services(
     prioritized: list[dict[str, str]] = []
     used: set[str] = set()
     wanted_order: list[str] = []
-    if "ubisoft" in selected:
-        wanted_order.extend(UBISOFT_GENERAL_PRIORITY)
     if "fortnite" in selected:
         wanted_order.extend(FORTNITE_GENERAL_PRIORITY)
     for wanted in wanted_order:
@@ -83,9 +81,26 @@ def prioritize_generals_for_services(
             used.add(option_id)
             break
 
+    remaining: list[dict[str, str]] = []
+    ubisoft_candidates: list[dict[str, str]] = []
     for option in options:
         option_id = str(option.get("id", "") or "")
-        if option_id and option_id not in used:
-            prioritized.append(dict(option))
-            used.add(option_id)
+        if not option_id or option_id in used:
+            continue
+        candidate = dict(option)
+        if (
+            "ubisoft" in selected
+            and str(candidate.get("name", "")).strip().lower() in {item.lower() for item in UBISOFT_GENERAL_PRIORITY}
+        ):
+            ubisoft_candidates.append(candidate)
+        else:
+            remaining.append(candidate)
+        used.add(option_id)
+    if ubisoft_candidates:
+        insert_at = max(1, len(remaining) // 2)
+        prioritized.extend(remaining[:insert_at])
+        prioritized.extend(ubisoft_candidates)
+        prioritized.extend(remaining[insert_at:])
+        return prioritized
+    prioritized.extend(remaining)
     return prioritized

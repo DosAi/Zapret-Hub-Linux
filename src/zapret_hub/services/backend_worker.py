@@ -13,12 +13,7 @@ from typing import Any
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from zapret_hub.domain import FileRecord
-from zapret_hub.services.service_catalog import (
-    FORTNITE_GENERAL_PRIORITY,
-    SERVICE_PRESETS,
-    SERVICE_PRESET_IDS,
-    UBISOFT_GENERAL_PRIORITY,
-)
+from zapret_hub.services.service_catalog import SERVICE_PRESETS, SERVICE_PRESET_IDS
 
 
 def _snapshot(context) -> dict[str, Any]:
@@ -342,42 +337,19 @@ def _set_zapret_enabled_from_components(context, enabled_target: bool) -> dict[s
     return _snapshot(context)
 
 
-def _preferred_fortnite_general_id(context) -> str:
-    options = list(context.processes.list_zapret_generals())
-    for wanted in FORTNITE_GENERAL_PRIORITY:
-        for option in options:
-            if str(option.get("name", "")).strip().lower() == wanted.lower():
-                return str(option.get("id", "") or "")
-    return ""
-
-
-def _preferred_ubisoft_general_id(context) -> str:
-    options = list(context.processes.list_zapret_generals())
-    for wanted in UBISOFT_GENERAL_PRIORITY:
-        for option in options:
-            if str(option.get("name", "")).strip().lower() == wanted.lower():
-                return str(option.get("id", "") or "")
-    return ""
-
-
 def _fortnite_zapret_settings(context) -> dict[str, str]:
-    changes = {
+    return {
         "zapret_ipset_mode": "any",
         "zapret_game_filter_mode": "tcpudp",
     }
-    general_id = _preferred_fortnite_general_id(context)
-    if general_id:
-        changes["selected_zapret_general"] = general_id
-    return changes
 
 
 def _gaming_zapret_settings(context) -> dict[str, str]:
-    return {"zapret_game_filter_mode": "tcpudp"}
+    return {"zapret_game_filter_mode": "tcpudp", "zapret_ipset_mode": "loaded"}
 
 
 def _ubisoft_zapret_settings(context) -> dict[str, str]:
-    general_id = _preferred_ubisoft_general_id(context)
-    return {"selected_zapret_general": general_id} if general_id else {}
+    return {}
 
 
 def _attach_telegram_proxy_info(context, result: dict[str, Any]) -> None:
@@ -842,9 +814,11 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         ordered = [preset.id for preset in SERVICE_PRESETS if preset.id in requested]
         settings = context.settings.get()
         before_services = set(settings.selected_service_ids or [])
+        before_zapret_services = before_services - {"telegram-desktop", "ai"}
+        requested_zapret_services = requested - {"telegram-desktop", "ai"}
         enabled_components = set(settings.enabled_component_ids or [])
         autostart_components = set(settings.autostart_component_ids or [])
-        has_zapret_services = bool(requested - {"telegram-desktop", "ai"})
+        has_zapret_services = bool(requested_zapret_services)
         if has_zapret_services:
             enabled_components.add("zapret")
         else:
@@ -887,7 +861,8 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             states = {item.component_id: item for item in context.processes.list_states()}
             if states.get("zapret") and states["zapret"].status == "running":
                 context.processes.stop_component("zapret")
-        zapret_was_running = _stop_zapret_for_reconfiguration(context)
+        zapret_services_changed = before_zapret_services != requested_zapret_services
+        zapret_was_running = _stop_zapret_for_reconfiguration(context) if zapret_services_changed else False
         settings_changes = {
             "selected_service_ids": ordered,
             "enabled_component_ids": sorted(enabled_components),
@@ -897,10 +872,10 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             settings_changes.update(_gaming_zapret_settings(context))
         if "ubisoft" in requested:
             settings_changes.update(_ubisoft_zapret_settings(context))
-        elif "fortnite" in requested:
+        if "fortnite" in requested:
             settings_changes.update(_fortnite_zapret_settings(context))
         context.settings.update(**settings_changes)
-        zapret_restarted = _finish_zapret_reconfiguration(context, restart=zapret_was_running)
+        zapret_restarted = _finish_zapret_reconfiguration(context, restart=zapret_was_running) if zapret_services_changed else False
         result = {"selected_service_ids": ordered, "client_revision": client_revision, "zapret_restarted": zapret_restarted}
         result.update(_snapshot(context))
         result.update(_mods_payload(context))

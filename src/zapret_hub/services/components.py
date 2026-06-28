@@ -2160,7 +2160,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             number = int(match.group(1))
         elif lowered == "general.bat":
             number = 0
-        modified_rank = 0 if bundle_id == "unified-general" else 1 if bundle_id != "base" else 2
+        modified_rank = 1 if bundle_id == "unified-general" else 2 if bundle_id != "base" else 0
         return (modified_rank, -number, lowered)
 
     def _resolve_selected_general_option(self) -> dict[str, str] | None:
