@@ -998,7 +998,13 @@ foreach ($adapter in @($payload.adapters)) {
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
             if winws_command:
                 winws_command[0] = str(stable_driver_path.parent / "winws.exe")
-            winws_command = self._apply_selected_service_command_extensions(winws_command, lists_dir=lists_dir, bin_dir=bin_dir)
+            allow_service_command_extensions = str(selected_option.get("bundle_id", "")) == "base"
+            winws_command = self._apply_selected_service_command_extensions(
+                winws_command,
+                lists_dir=lists_dir,
+                bin_dir=bin_dir,
+                enabled=allow_service_command_extensions,
+            )
             winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
             if not winws_command:
                 state = ComponentState(
@@ -2455,8 +2461,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             return []
         return [raw.rstrip() for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines()]
 
-    def _apply_selected_service_command_extensions(self, command: list[str], *, lists_dir: Path, bin_dir: Path) -> list[str]:
-        if not command:
+    def _apply_selected_service_command_extensions(
+        self,
+        command: list[str],
+        *,
+        lists_dir: Path,
+        bin_dir: Path,
+        enabled: bool = True,
+    ) -> list[str]:
+        if not command or not enabled:
             return command
         selected_ids = list(self.settings.get().selected_service_ids or [])
         _game_filter, game_filter_tcp, game_filter_udp = self._get_game_filter_values(lists_dir.parent)

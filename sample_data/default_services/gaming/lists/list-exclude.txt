@@ -83,7 +83,7 @@ epicgames-download1.akamaized.net
 statsigapi.net
 sentry.io
 config.psynet.gg
-; Р°РЅС‚РёС‡РёС‚С‹ Рё Р°СЃСЃРµС‚С‹
+; античиты и ассеты
 eac-cdn.com
 epicgamescdn.com
 gryphline.com
@@ -110,8 +110,3 @@ turbopages.org
 webvisor.com
 webvisor.org
 t-bank-app.ru
-wparty.net
-live-video.net
-ttvnw.net
-microsoft.com
-akamaitechnologies.com
