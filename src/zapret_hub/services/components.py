@@ -197,6 +197,7 @@ class ProcessManager:
             startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startup.wShowWindow = 0
             self._startupinfo = startup
+            self._repair_zapret_driver_paths_on_startup()
 
     def list_components(self) -> list[ComponentDefinition]:
         raw_items = self.storage.read_json(self.storage.paths.data_dir / "components.json", default=[])
@@ -992,6 +993,8 @@ foreach ($adapter in @($payload.adapters)) {
                 raise FileNotFoundError(f"winws.exe was not materialized: {bin_dir / 'winws.exe'}")
             stable_driver_path = self._ensure_stable_windivert_driver(bin_dir)
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
+            if winws_command:
+                winws_command[0] = str(stable_driver_path.parent / "winws.exe")
             winws_command = self._apply_selected_service_command_extensions(winws_command, lists_dir=lists_dir)
             winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
             if not winws_command:
@@ -1003,6 +1006,7 @@ foreach ($adapter in @($payload.adapters)) {
                 self._states[component_id] = state
                 self.logging.log("error", "Zapret command parse failed", script=str(active_script))
                 return state
+            self._repair_windivert_image_paths(active_root, preferred_driver_path=stable_driver_path)
             process = subprocess.Popen(
                 winws_command,
                 cwd=str(stable_driver_path.parent),
@@ -3400,13 +3404,22 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def _stable_windivert_dir(self) -> Path:
         return self.storage.paths.merged_runtime_dir / "drivers" / "windivert"
 
+    def _repair_zapret_driver_paths_on_startup(self) -> None:
+        try:
+            base_bin = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "bin"
+            stable_driver_path = self._ensure_stable_windivert_driver(base_bin) if base_bin.exists() else None
+            self._repair_windivert_image_paths(preferred_driver_path=stable_driver_path)
+            self._repair_stale_zapret_driver_paths(self.storage.paths.merged_runtime_dir, preferred_driver_path=stable_driver_path)
+        except Exception as error:
+            self.logging.log("warning", "Failed to repair WinDivert paths on startup", error=str(error))
+
     def _ensure_stable_windivert_driver(self, bin_dir: Path) -> Path:
         source_path = bin_dir / "WinDivert64.sys"
         if not source_path.exists():
             raise FileNotFoundError(f"WinDivert64.sys was not materialized: {source_path}")
         target_dir = self._stable_windivert_dir()
         target_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("WinDivert64.sys", "WinDivert32.sys", "WinDivert.dll"):
+        for name in ("WinDivert64.sys", "WinDivert32.sys", "WinDivert.dll", "winws.exe"):
             source = bin_dir / name
             if not source.exists():
                 continue
@@ -3533,8 +3546,6 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return updated
 
     def _repair_stale_zapret_driver_paths(self, selected_bundle_root: Path, preferred_driver_path: Path | None = None) -> None:
-        if not (selected_bundle_root / "bin" / "WinDivert64.sys").exists():
-            return
         for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
             if not self._service_exists(service_name):
                 continue
@@ -3548,6 +3559,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if target_path.exists():
                 continue
             if service_name.lower() in {"windivert", "windivert14"} and preferred_driver_path is not None and preferred_driver_path.exists():
+                if not self._is_image_running("winws.exe"):
+                    self._run_quiet(["sc", "stop", service_name])
+                    time.sleep(0.25)
                 if self._set_service_image_path(service_name, str(preferred_driver_path)):
                     self.logging.log(
                         "info",
@@ -3585,14 +3599,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 return
             time.sleep(0.35)
         if image_path and self._is_managed_or_stale_zapret_service_path(image_path):
-            self._run_quiet(
-                [
-                    "reg",
-                    "delete",
-                    f"HKLM\\SYSTEM\\CurrentControlSet\\Services\\{service_name}",
-                    "/f",
-                ]
-            )
+            for control_set in ("CurrentControlSet", "ControlSet001"):
+                self._run_quiet(
+                    [
+                        "reg",
+                        "delete",
+                        f"HKLM\\SYSTEM\\{control_set}\\Services\\{service_name}",
+                        "/f",
+                    ]
+                )
             time.sleep(0.2)
         if self._service_exists(service_name):
             self.logging.log(
