@@ -13,7 +13,7 @@ from pathlib import Path
 
 from zapret_hub import __version__
 from zapret_hub.domain import UpdateInfo
-from zapret_hub.services.github_network import GitHubNetworkClient
+from zapret_hub.services.github_network import GitHubNetworkClient, is_github_rate_limit_error
 from zapret_hub.services.logging_service import LoggingManager
 from zapret_hub.services.storage import StorageManager
 
@@ -55,21 +55,49 @@ class UpdatesManager:
         return updates
 
     def fetch_latest_application_release(self) -> dict[str, str]:
-        try:
-            payload = self._request_json(self.API_RELEASES, timeout=10)
-        except Exception as error:
-            self.logging.log("warning", "Failed to fetch latest app release", error=str(error))
-            friendly_error = str(error)
-            if self._is_certificate_error(error):
-                friendly_error = "Unable to verify GitHub certificates on this system. Please try again later."
+        payload = self._read_release_cache(max_age_seconds=600)
+        using_fresh_cache = payload is not None
+        cache_warning = ""
+        if payload is None:
+            try:
+                payload = self._request_json(self.API_RELEASES, timeout=10)
+                self._write_release_cache(payload)
+            except Exception as error:
+                cached_payload = self._read_release_cache(max_age_seconds=None)
+                if cached_payload is not None:
+                    payload = cached_payload
+                    cache_warning = self._friendly_github_error(error)
+                    self.logging.log("warning", "Using cached app release metadata", error=str(error))
+                else:
+                    self.logging.log("warning", "Failed to fetch latest app release", error=str(error))
+                    return {
+                        "status": "error",
+                        "current_version": __version__,
+                        "latest_version": __version__,
+                        "error": self._friendly_github_error(error),
+                        "html_url": self.REPO_URL + "/releases",
+                    }
+        else:
+            self.logging.log("info", "Using fresh app release metadata cache")
+
+        if payload is None:
             return {
                 "status": "error",
                 "current_version": __version__,
                 "latest_version": __version__,
-                "error": friendly_error,
+                "error": "No GitHub release metadata is available.",
                 "html_url": self.REPO_URL + "/releases",
             }
 
+        return self._build_application_release_status(payload, using_cache=using_fresh_cache or bool(cache_warning), cache_warning=cache_warning)
+
+    def _build_application_release_status(
+        self,
+        payload: object,
+        *,
+        using_cache: bool = False,
+        cache_warning: str = "",
+    ) -> dict[str, str]:
         releases = self._normalize_release_entries(payload)
         if not releases:
             return {
@@ -119,6 +147,8 @@ class UpdatesManager:
             "release_updated_at": latest_release_stamp.isoformat() if latest_release_stamp else "",
             "installed_build_at": installed_stamp.isoformat() if installed_stamp else "",
             "releases": newer_releases,
+            "using_cache": "1" if using_cache else "",
+            "cache_warning": cache_warning,
         }
 
     def _request_json(self, url: str, *, timeout: int) -> object:
@@ -129,6 +159,47 @@ class UpdatesManager:
 
     def _is_certificate_error(self, error: Exception) -> bool:
         return "CERTIFICATE_VERIFY_FAILED" in str(error).upper()
+
+    def _friendly_github_error(self, error: BaseException) -> str:
+        if is_github_rate_limit_error(error):
+            return "GitHub temporarily limited update checks. Please try again later."
+        if self._is_certificate_error(error):
+            return "Unable to verify GitHub certificates on this system. Please try again later."
+        return str(error)
+
+    def _release_cache_path(self) -> Path:
+        return self.storage.paths.cache_dir / "app_releases_cache.json"
+
+    def _read_release_cache(self, *, max_age_seconds: int | None) -> object | None:
+        path = self._release_cache_path()
+        try:
+            raw = self.storage.read_json(path, default=None)
+        except Exception as error:
+            self.logging.log("warning", "Failed to read app release cache", error=str(error))
+            return None
+        if not isinstance(raw, dict):
+            return None
+        fetched_at = self._parse_github_datetime(str(raw.get("fetched_at") or ""))
+        if max_age_seconds is not None:
+            if fetched_at is None:
+                return None
+            age = (datetime.now(timezone.utc) - fetched_at).total_seconds()
+            if age > max_age_seconds:
+                return None
+        payload = raw.get("payload")
+        return payload if payload is not None else None
+
+    def _write_release_cache(self, payload: object) -> None:
+        try:
+            self.storage.write_json(
+                self._release_cache_path(),
+                {
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "payload": payload,
+                },
+            )
+        except Exception as error:
+            self.logging.log("warning", "Failed to write app release cache", error=str(error))
 
     def _normalize_release_entries(self, payload: object) -> list[dict[str, object]]:
         if not isinstance(payload, list):

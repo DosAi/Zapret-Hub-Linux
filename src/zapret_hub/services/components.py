@@ -187,6 +187,7 @@ class ProcessManager:
         self._log_streams: dict[str, Any] = {}
         self._telegram_proxy_launch_info: dict[str, Any] | None = None
         self._diagnostic_runtime_override = False
+        self._github_recovery_profile: dict[str, str] | None = None
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
         self.github = GitHubNetworkClient(logging, recovery_runner=self.with_github_connectivity_recovery)
         self._creationflags = 0
@@ -2909,6 +2910,22 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 if result[0]:
                     return result[1]
 
+            cached_profile = self._github_recovery_profile
+            if cached_profile is not None:
+                self.stop_component("zapret")
+                self._apply_github_recovery_settings(
+                    selected_zapret_general=str(cached_profile["general_id"]),
+                    zapret_ipset_mode=str(cached_profile["ipset_mode"]),
+                    zapret_game_filter_mode=str(cached_profile["game_mode"]),
+                    zapret_udp_exclude_ports=str(snapshot["zapret_udp_exclude_ports"]),
+                )
+                state = self.start_component("zapret")
+                if state.status == "running":
+                    time.sleep(1.0)
+                    result = self._try_github_operation(operation, errors, f"{purpose}: cached-stable")
+                    if result[0]:
+                        return result[1]
+
             for candidate in self._github_recovery_candidates(snapshot):
                 self.stop_component("zapret")
                 self._apply_github_recovery_settings(
@@ -2924,6 +2941,11 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 time.sleep(1.0)
                 result = self._try_github_operation(operation, errors, f"{purpose}: {candidate['label']}")
                 if result[0]:
+                    self._github_recovery_profile = {
+                        "general_id": str(candidate["general_id"]),
+                        "ipset_mode": str(candidate["ipset_mode"]),
+                        "game_mode": str(candidate["game_mode"]),
+                    }
                     return result[1]
         finally:
             self._restore_github_recovery_snapshot(snapshot, restart=bool(snapshot["was_running"]))

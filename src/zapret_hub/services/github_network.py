@@ -16,13 +16,33 @@ from zapret_hub.services.logging_service import LoggingManager
 T = TypeVar("T")
 
 
-def is_recoverable_github_error(error: BaseException) -> bool:
+class GitHubRateLimitError(RuntimeError):
+    pass
+
+
+def is_github_rate_limit_error(error: BaseException) -> bool:
+    if isinstance(error, GitHubRateLimitError):
+        return True
     if isinstance(error, HTTPError):
-        return error.code in {403, 429, 500, 502, 503, 504}
+        if error.code == 429:
+            return True
+        if error.code == 403:
+            remaining = str(error.headers.get("X-RateLimit-Remaining", "") or "").strip()
+            if remaining == "0":
+                return True
+    text = str(error).lower()
+    return "rate limit" in text or "api rate limit exceeded" in text
+
+
+def is_recoverable_github_error(error: BaseException) -> bool:
+    if is_github_rate_limit_error(error):
+        return False
+    if isinstance(error, HTTPError):
+        return error.code in {500, 502, 503, 504}
     if isinstance(error, (URLError, TimeoutError, OSError, ssl.SSLError)):
         return True
     text = str(error).lower()
-    return any(marker in text for marker in ("rate limit", "timed out", "timeout", "temporary failure", "certificate"))
+    return any(marker in text for marker in ("timed out", "timeout", "temporary failure", "certificate"))
 
 
 class GitHubNetworkClient:
@@ -62,6 +82,8 @@ class GitHubNetworkClient:
                 return operation()
             except Exception as error:
                 errors.append(str(error))
+                if is_github_rate_limit_error(error):
+                    raise
                 if not is_recoverable_github_error(error):
                     raise
                 self.logging.log("warning", "GitHub request retry", purpose=purpose, attempt=attempt + 1, error=str(error))
@@ -93,6 +115,10 @@ class GitHubNetworkClient:
                 with urlopen(request, timeout=timeout, context=context) as response:
                     self.logging.log("info", "GitHub request succeeded", url=url, ssl_path=label)
                     return response.read()
+            except HTTPError as error:
+                if self._is_rate_limit_response(error):
+                    raise GitHubRateLimitError(self._format_rate_limit_error(error)) from error
+                raise
             except Exception as error:
                 errors.append(f"{label}: {error}")
                 if not self._is_certificate_error(error):
@@ -116,3 +142,29 @@ class GitHubNetworkClient:
             if isinstance(reason, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(reason).upper():
                 return True
         return "CERTIFICATE_VERIFY_FAILED" in str(error).upper()
+
+    def _is_rate_limit_response(self, error: HTTPError) -> bool:
+        if error.code == 429:
+            return True
+        if error.code != 403:
+            return False
+        remaining = str(error.headers.get("X-RateLimit-Remaining", "") or "").strip()
+        if remaining == "0":
+            return True
+        text = ""
+        try:
+            text = error.read(4096).decode("utf-8", errors="replace").lower()
+        except Exception:
+            text = ""
+        return "rate limit" in text or "api rate limit exceeded" in text
+
+    def _format_rate_limit_error(self, error: HTTPError) -> str:
+        reset = str(error.headers.get("X-RateLimit-Reset", "") or "").strip()
+        if reset.isdigit():
+            try:
+                wait_seconds = max(0, int(reset) - int(time.time()))
+                minutes = max(1, int((wait_seconds + 59) / 60))
+                return f"GitHub API rate limit exceeded. Try again in about {minutes} min."
+            except ValueError:
+                pass
+        return "GitHub API rate limit exceeded. Please try again later."
