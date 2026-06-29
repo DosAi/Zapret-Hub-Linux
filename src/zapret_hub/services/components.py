@@ -396,6 +396,7 @@ class ProcessManager:
             return state
 
         if component_id == "tg-ws-proxy":
+            settings = self.settings.get()
             process = self._processes.get(component_id)
             if process and process.poll() is None:
                 process.terminate()
@@ -412,8 +413,10 @@ class ProcessManager:
             self._processes.pop(component_id, None)
             self._kill_image("TgWsProxy_windows.exe")
             self._close_source_log_stream("tg-ws-proxy")
-            state.status = "stopped"
+            still_listening = self._is_port_listening(settings.tg_proxy_host, int(settings.tg_proxy_port))
+            state.status = "running" if still_listening else "stopped"
             state.pid = None
+            state.last_error = "TG WS Proxy port is still busy." if still_listening else ""
             self._states[component_id] = state
             self.logging.log("info", "TG WS Proxy stopped")
             self._invalidate_state_cache()
@@ -1006,6 +1009,7 @@ foreach ($adapter in @($payload.adapters)) {
                 enabled=allow_service_command_extensions,
             )
             winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
+            winws_command = self._apply_udp_port_exclusions_to_command(winws_command)
             if not winws_command:
                 state = ComponentState(
                     component_id=component_id,
@@ -1042,15 +1046,20 @@ foreach ($adapter in @($payload.adapters)) {
                 state = ComponentState(component_id=component_id, status="running", pid=process.pid)
                 self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0])
             else:
-                self._close_source_log_stream("zapret")
                 log_hint = self._recent_source_log_error("zapret")
-                error_message = log_hint or "winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert."
-                state = ComponentState(
-                    component_id=component_id,
-                    status="error",
-                    last_error=error_message,
-                )
-                self.logging.log("error", "Zapret failed to start", script=str(active_script), error=error_message)
+                if process.poll() is None and self._zapret_log_indicates_capture_started(log_hint):
+                    self._repair_windivert_image_paths(active_root, preferred_driver_path=stable_driver_path)
+                    state = ComponentState(component_id=component_id, status="running", pid=process.pid)
+                    self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0], detected_by_log=True)
+                else:
+                    self._close_source_log_stream("zapret")
+                    error_message = log_hint or "winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert."
+                    state = ComponentState(
+                        component_id=component_id,
+                        status="error",
+                        last_error=error_message,
+                    )
+                    self.logging.log("error", "Zapret failed to start", script=str(active_script), error=error_message)
         except OSError as error:
             if getattr(error, "winerror", 0) == 740:
                 state = ComponentState(
@@ -1084,6 +1093,10 @@ foreach ($adapter in @($payload.adapters)) {
             self._current_zapret_runtime = None
         self._states[component_id] = state
         return state
+
+    def _zapret_log_indicates_capture_started(self, text: str | None) -> bool:
+        normalized = str(text or "").lower()
+        return "capture is started" in normalized or "windivert initialized" in normalized
 
     def _is_admin_windows(self) -> bool:
         try:
@@ -1711,9 +1724,6 @@ foreach ($adapter in @($payload.adapters)) {
 
         adapter_indexes = [int(item) for item in vpn_data.get("adapter_indexes", []) if str(item).isdigit()]
         remote_ips = [str(item).strip() for item in vpn_data.get("remote_ips", []) if str(item).strip()]
-        excluded_udp_ports = self._parse_port_ranges(self.settings.get().zapret_udp_exclude_ports)
-        if excluded_udp_ports:
-            command = self._exclude_udp_ports_from_command(command, excluded_udp_ports)
         if not adapter_indexes and not remote_ips:
             return command
 
@@ -1737,22 +1747,88 @@ foreach ($adapter in @($payload.adapters)) {
             "Applied VPN priority safeguards to zapret",
             adapter_indexes=sorted(set(adapter_indexes)),
             remote_ips=sorted(set(remote_ips)),
-            excluded_udp_ports=self.settings.get().zapret_udp_exclude_ports,
+        )
+        return updated
+
+    def _apply_udp_port_exclusions_to_command(self, command: list[str]) -> list[str]:
+        excluded_udp_ports = self._parse_port_ranges(self.settings.get().zapret_udp_exclude_ports)
+        if not excluded_udp_ports:
+            return command
+        updated = self._exclude_udp_ports_from_command(command, excluded_udp_ports)
+        self.logging.log(
+            "info",
+            "Applied UDP port exclusions to zapret",
+            excluded_udp_ports=self._format_port_ranges(excluded_udp_ports),
         )
         return updated
 
     def _exclude_udp_ports_from_command(self, command: list[str], excluded_ranges: list[tuple[int, int]]) -> list[str]:
+        if not command:
+            return command
+        executable = command[0]
+        prefix: list[str] = []
+        segments: list[list[str]] = []
+        current: list[str] = []
+        in_segments = False
+        for arg in command[1:]:
+            if arg == "--new":
+                in_segments = True
+                if current:
+                    segments.append(current)
+                current = []
+                continue
+            if in_segments:
+                current.append(arg)
+            else:
+                prefix.append(arg)
+        if current:
+            segments.append(current)
+
+        filtered_prefix, _drop_prefix = self._filter_udp_args_in_segment(
+            prefix,
+            excluded_ranges,
+            drop_empty_filter_segment=True,
+        )
+        filtered_segments: list[list[str]] = []
+        for segment in segments:
+            filtered_segment, drop_segment = self._filter_udp_args_in_segment(
+                segment,
+                excluded_ranges,
+                drop_empty_filter_segment=True,
+            )
+            if drop_segment or not filtered_segment:
+                continue
+            filtered_segments.append(filtered_segment)
+
+        updated = [executable, *filtered_prefix]
+        for segment in filtered_segments:
+            updated.append("--new")
+            updated.extend(segment)
+        return updated
+
+    def _filter_udp_args_in_segment(
+        self,
+        args: list[str],
+        excluded_ranges: list[tuple[int, int]],
+        *,
+        drop_empty_filter_segment: bool,
+    ) -> tuple[list[str], bool]:
         updated: list[str] = []
-        for arg in command:
+        for arg in args:
             if arg.startswith("--wf-udp=") or arg.startswith("--filter-udp="):
                 key, value = arg.split("=", 1)
                 ranges = self._parse_port_ranges(value)
                 if ranges:
                     filtered = self._subtract_port_ranges(ranges, excluded_ranges)
-                    value = self._format_port_ranges(filtered) or "12"
+                    value = self._format_port_ranges(filtered)
+                    if not value:
+                        if key == "--filter-udp" and drop_empty_filter_segment:
+                            preserved_globals = [item for item in updated if item.startswith("--wf-") or item.startswith("--wf-raw")]
+                            return preserved_globals, True
+                        continue
                     arg = f"{key}={value}"
             updated.append(arg)
-        return updated
+        return updated, False
 
     def _subtract_port_ranges(
         self,
@@ -2018,6 +2094,13 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             settings = self.settings.update(tg_proxy_secret=secret)
         # старый процесс мог остаться в трее
         self._kill_image("TgWsProxy_windows.exe")
+        listen_host = settings.tg_proxy_host
+        listen_port = int(settings.tg_proxy_port)
+        if self._is_port_listening(listen_host, listen_port):
+            state = ComponentState(component_id=component_id, status="running", pid=None, last_error="")
+            self._states[component_id] = state
+            self.logging.log("info", "TG WS Proxy already listening", host=listen_host, port=listen_port)
+            return state
         try:
             (self.storage.paths.logs_dir / "tg_worker_error.log").unlink(missing_ok=True)
         except Exception:
@@ -2044,8 +2127,6 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             stdout=self._open_source_log_stream("tg-ws-proxy"),
             stderr=subprocess.STDOUT,
         )
-        listen_host = settings.tg_proxy_host
-        listen_port = int(settings.tg_proxy_port)
         ready = False
         for _ in range(16):
             if process.poll() is not None:
@@ -2421,6 +2502,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 existing = self._read_list_lines(target)
                 merged = self._merge_with_conflict_resolution(lists_dir, safe_name.lower(), existing, incoming)
                 target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+            if str(service_id) == "gaming":
+                self._apply_gaming_set_list_overlays(lists_dir)
             bin_overlay_dir = str(getattr(rule, "bin_overlay_dir", "") or "").strip()
             if allow_bin_overlay and bin_overlay_dir:
                 source_dir = (self.storage.paths.install_root / bin_overlay_dir).resolve()
@@ -2428,6 +2511,25 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     self._replace_runtime_bin_data(active_root / "bin", source_dir)
                     allow_bin_overlay = False
         self._merge_selected_service_hosts(active_root)
+
+    def _apply_gaming_set_list_overlays(self, lists_dir: Path) -> None:
+        variant = str(getattr(self.settings.get(), "zapret_gaming_set", "stun-wide-base") or "stun-wide-base")
+        if variant != "stun-wide-base-local-exclude":
+            return
+        source = self.storage.paths.install_root / "sample_data" / "default_services" / "gaming" / "lists" / "ipset-local-exclude.txt"
+        if not source.exists():
+            return
+        target = lists_dir / "ipset-exclude.txt"
+        existing = self._read_list_lines(target)
+        incoming = self._read_list_lines(source)
+        merged: list[str] = []
+        seen: set[str] = set()
+        for line in [*existing, *incoming]:
+            if not line or line in seen:
+                continue
+            seen.add(line)
+            merged.append(line)
+        target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
 
     def _merge_selected_service_hosts(self, active_root: Path) -> None:
         selected_ids = list(self.settings.get().selected_service_ids or [])
@@ -2481,7 +2583,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             rule = SERVICE_RULES.get(str(service_id))
             if rule is None or not rule.winws_args:
                 continue
-            segment = tuple(rule.winws_args)
+            segment = tuple(self._gaming_set_args() if str(service_id) == "gaming" else rule.winws_args)
             if segment in seen_segments:
                 continue
             seen_segments.add(segment)
@@ -2496,6 +2598,53 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         if not extra_args:
             return command
         return [*command, *extra_args]
+
+    def _gaming_set_args(self) -> tuple[str, ...]:
+        rule = SERVICE_RULES.get("gaming")
+        if rule is None:
+            return ()
+        segments = self._split_winws_arg_segments(rule.winws_args)
+        if len(segments) < 6:
+            return tuple(rule.winws_args)
+        base_tcp, base_udp, wide_udp, wide_tcp, stun_udp, stun_tcp = segments[:6]
+        variants: dict[str, list[list[str]]] = {
+            "base": [base_tcp, base_udp],
+            "base-wide-stun": [base_tcp, base_udp, wide_udp, wide_tcp, stun_udp, stun_tcp],
+            "wide-stun-base": [wide_udp, wide_tcp, stun_udp, stun_tcp, base_tcp, base_udp],
+            "stun-wide-base": [stun_udp, stun_tcp, wide_udp, wide_tcp, base_tcp, base_udp],
+            "stun-wide-base-local-exclude": [stun_udp, stun_tcp, wide_udp, wide_tcp, base_tcp, base_udp],
+            "udp-first": [base_udp, wide_udp, stun_udp, base_tcp, wide_tcp, stun_tcp],
+            "tcp-first": [base_tcp, wide_tcp, stun_tcp, base_udp, wide_udp, stun_udp],
+            "stun-between": [base_tcp, stun_tcp, wide_tcp, base_udp, stun_udp, wide_udp],
+        }
+        variant = str(getattr(self.settings.get(), "zapret_gaming_set", "stun-wide-base") or "stun-wide-base")
+        ordered = variants.get(variant)
+        if not ordered:
+            ordered = variants["stun-wide-base"]
+        return self._join_winws_arg_segments(ordered)
+
+    def _split_winws_arg_segments(self, args: tuple[str, ...]) -> list[list[str]]:
+        segments: list[list[str]] = []
+        current: list[str] = []
+        for arg in args:
+            if arg == "--new":
+                if current:
+                    segments.append(current)
+                current = []
+                continue
+            current.append(arg)
+        if current:
+            segments.append(current)
+        return segments
+
+    def _join_winws_arg_segments(self, segments: list[list[str]]) -> tuple[str, ...]:
+        result: list[str] = []
+        for segment in segments:
+            if not segment:
+                continue
+            result.append("--new")
+            result.extend(segment)
+        return tuple(result)
 
     def _inject_fortnite_ping_ttl(self, command: list[str], game_filter_udp: str) -> list[str]:
         if "--dpi-desync-ttl=10" in command:
@@ -2546,7 +2695,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             selected_zapret_general=str(snapshot.get("selected_zapret_general", "") or ""),
             zapret_ipset_mode=str(snapshot.get("zapret_ipset_mode", "loaded") or "loaded"),
             zapret_game_filter_mode=str(snapshot.get("zapret_game_filter_mode", "disabled") or "disabled"),
-            zapret_udp_exclude_ports=str(snapshot.get("zapret_udp_exclude_ports", "51820") or "51820"),
+            zapret_udp_exclude_ports=str(snapshot.get("zapret_udp_exclude_ports", "")),
         )
 
     def _prepare_diagnostic_runtime(self, *, general_id: str, ipset_mode: str, game_mode: str) -> bool:
@@ -2807,7 +2956,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             selected_zapret_general=str(snapshot.get("selected_zapret_general", "") or ""),
             zapret_ipset_mode=str(snapshot.get("zapret_ipset_mode", "loaded") or "loaded"),
             zapret_game_filter_mode=str(snapshot.get("zapret_game_filter_mode", "disabled") or "disabled"),
-            zapret_udp_exclude_ports=str(snapshot.get("zapret_udp_exclude_ports", "51820") or "51820"),
+            zapret_udp_exclude_ports=str(snapshot.get("zapret_udp_exclude_ports", "")),
         )
         if restart:
             try:

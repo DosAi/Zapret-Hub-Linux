@@ -28,6 +28,7 @@ def _snapshot(context) -> dict[str, Any]:
             "selected_service_ids": list(settings.selected_service_ids or []),
             "zapret_ipset_mode": settings.zapret_ipset_mode,
             "zapret_game_filter_mode": settings.zapret_game_filter_mode,
+            "zapret_gaming_set": getattr(settings, "zapret_gaming_set", "stun-wide-base"),
             "zapret_udp_exclude_ports": settings.zapret_udp_exclude_ports,
             "selected_runtime_mode": getattr(settings, "selected_runtime_mode", "zapret"),
             "autostart_windows": bool(settings.autostart_windows),
@@ -111,8 +112,13 @@ def _sync_telegram_component_from_services(context) -> None:
     enabled = {str(item) for item in list(settings.enabled_component_ids or [])}
     autostart = {str(item) for item in list(settings.autostart_component_ids or [])}
     vpn_enabled = "goshkow-vpn" in enabled
+    restore_zapret_after_vpn = bool(getattr(settings, "zapret_was_enabled_before_goshkow_vpn", False))
+    restore_xbox_dns_after_vpn = bool(getattr(settings, "xbox_dns_was_enabled_before_goshkow_vpn", False))
     if vpn_enabled:
+        restore_zapret_after_vpn = restore_zapret_after_vpn or ("zapret" in enabled)
+        restore_xbox_dns_after_vpn = restore_xbox_dns_after_vpn or ("xbox-dns" in enabled)
         enabled.discard("zapret")
+        enabled.discard("xbox-dns")
         autostart.discard("zapret")
     if "telegram-desktop" in selected:
         enabled.add("tg-ws-proxy")
@@ -124,11 +130,19 @@ def _sync_telegram_component_from_services(context) -> None:
         enabled.add("xbox-dns")
     else:
         enabled.discard("xbox-dns")
+    changes: dict[str, Any] = {}
     if enabled != set(settings.enabled_component_ids or []) or autostart != set(settings.autostart_component_ids or []):
-        context.settings.update(
+        changes.update(
             enabled_component_ids=sorted(enabled),
             autostart_component_ids=sorted(autostart),
         )
+    if vpn_enabled:
+        if restore_zapret_after_vpn != bool(getattr(settings, "zapret_was_enabled_before_goshkow_vpn", False)):
+            changes["zapret_was_enabled_before_goshkow_vpn"] = restore_zapret_after_vpn
+        if restore_xbox_dns_after_vpn != bool(getattr(settings, "xbox_dns_was_enabled_before_goshkow_vpn", False)):
+            changes["xbox_dns_was_enabled_before_goshkow_vpn"] = restore_xbox_dns_after_vpn
+    if changes:
+        context.settings.update(**changes)
 
 
 def _runtime_running_states(context) -> tuple[dict[str, Any], bool, bool, bool]:
@@ -649,7 +663,7 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
                 },
                 emit_progress,
             )
-            for key in ("zapret_restarted", "tg_proxy_restarted", "vpn_restarted", "theme_changed", "language_changed", "experimental_appearance_changed", "autostart_changed"):
+            for key in ("zapret_restarted", "tg_proxy_restarted", "vpn_restarted", "theme_changed", "language_changed", "autostart_changed"):
                 if bool(settings_result.get(key)):
                     result[key] = settings_result.get(key)
         if isinstance(mods_payload, dict) and mods_payload:
@@ -704,16 +718,17 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         zapret_before = (
             before.zapret_ipset_mode,
             before.zapret_game_filter_mode,
+            getattr(before, "zapret_gaming_set", "stun-wide-base"),
             before.zapret_udp_exclude_ports,
             before.selected_zapret_general,
         )
         theme_before = before.theme
         language_before = before.language
-        experimental_before = bool(getattr(before, "experimental_appearance", False))
         autostart_before = bool(before.autostart_windows)
         requested_zapret = (
             str(effective_payload.get("zapret_ipset_mode", before.zapret_ipset_mode)),
             str(effective_payload.get("zapret_game_filter_mode", before.zapret_game_filter_mode)),
+            str(effective_payload.get("zapret_gaming_set", getattr(before, "zapret_gaming_set", "stun-wide-base"))),
             str(effective_payload.get("zapret_udp_exclude_ports", before.zapret_udp_exclude_ports)),
             str(effective_payload.get("selected_zapret_general", before.selected_zapret_general)),
         )
@@ -783,7 +798,6 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         result = {
             "theme_changed": theme_before != context.settings.get().theme,
             "language_changed": language_before != context.settings.get().language,
-            "experimental_appearance_changed": experimental_before != bool(getattr(context.settings.get(), "experimental_appearance", False)),
             "autostart_changed": autostart_before != bool(context.settings.get().autostart_windows),
             "client_revision": client_revision,
             "tg_proxy_restarted": tg_proxy_restarted,
@@ -820,6 +834,9 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         requested_zapret_services = requested - {"telegram-desktop", "ai"}
         enabled_components = set(settings.enabled_component_ids or [])
         autostart_components = set(settings.autostart_component_ids or [])
+        vpn_enabled = "goshkow-vpn" in enabled_components
+        restore_zapret_after_vpn = bool(getattr(settings, "zapret_was_enabled_before_goshkow_vpn", False))
+        restore_xbox_dns_after_vpn = bool(getattr(settings, "xbox_dns_was_enabled_before_goshkow_vpn", False))
         has_zapret_services = bool(requested_zapret_services)
         if has_zapret_services:
             enabled_components.add("zapret")
@@ -837,6 +854,11 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         else:
             enabled_components.discard("xbox-dns")
             autostart_components.discard("xbox-dns")
+        if vpn_enabled:
+            restore_zapret_after_vpn = has_zapret_services
+            restore_xbox_dns_after_vpn = "ai" in requested
+            enabled_components.discard("zapret")
+            enabled_components.discard("xbox-dns")
         if "telegram-desktop" in before_services and "telegram-desktop" not in requested:
             states = {item.component_id: item for item in context.processes.list_states()}
             if states.get("tg-ws-proxy") and states["tg-ws-proxy"].status == "running":
@@ -870,6 +892,9 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             "enabled_component_ids": sorted(enabled_components),
             "autostart_component_ids": sorted(autostart_components),
         }
+        if vpn_enabled:
+            settings_changes["zapret_was_enabled_before_goshkow_vpn"] = restore_zapret_after_vpn
+            settings_changes["xbox_dns_was_enabled_before_goshkow_vpn"] = restore_xbox_dns_after_vpn
         if "gaming" in requested:
             settings_changes.update(_gaming_zapret_settings(context))
         if "ubisoft" in requested:

@@ -137,6 +137,17 @@ def _prime_first_run_state(settings: SettingsManager, processes: ProcessManager)
         changes["zapret_ipset_mode"] = "loaded"
     if str(current.zapret_game_filter_mode or "").strip() not in {"disabled", "tcp", "udp", "tcpudp"}:
         changes["zapret_game_filter_mode"] = "disabled"
+    if str(getattr(current, "zapret_gaming_set", "") or "").strip() not in {
+        "base",
+        "base-wide-stun",
+        "wide-stun-base",
+        "stun-wide-base",
+        "stun-wide-base-local-exclude",
+        "udp-first",
+        "tcp-first",
+        "stun-between",
+    }:
+        changes["zapret_gaming_set"] = "stun-wide-base"
     if changes:
         settings.update(**changes)
 

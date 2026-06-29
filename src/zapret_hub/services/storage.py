@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -437,6 +438,7 @@ class StorageManager:
             icon_path.write_text(content, encoding="utf-8")
 
     def read_json(self, path: Path, default: Any | None = None) -> Any:
+        self._promote_pending_json(path)
         if not path.exists():
             return default
         try:
@@ -460,7 +462,30 @@ class StorageManager:
             with temp_path.open("w", encoding="utf-8") as file:
                 json.dump(data, file, indent=2, ensure_ascii=False)
                 file.write("\n")
-            temp_path.replace(path)
+            last_error: OSError | None = None
+            for attempt in range(12):
+                try:
+                    os.replace(temp_path, path)
+                    return
+                except PermissionError as error:
+                    last_error = error
+                    time.sleep(0.05 + attempt * 0.04)
+                except OSError as error:
+                    last_error = error
+                    time.sleep(0.05 + attempt * 0.04)
+            fallback_path = path.with_name(f"{path.name}.pending-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}")
+            try:
+                shutil.copy2(temp_path, fallback_path)
+            except OSError:
+                fallback_path = None
+            try:
+                path.write_text(temp_path.read_text(encoding="utf-8"), encoding="utf-8")
+                return
+            except OSError:
+                if fallback_path is not None:
+                    return
+            if last_error is not None:
+                raise last_error
         finally:
             if temp_path.exists():
                 try:
@@ -491,6 +516,41 @@ class StorageManager:
             except OSError:
                 pass
         return backup_dir
+
+    def _promote_pending_json(self, path: Path) -> None:
+        try:
+            candidates = sorted(
+                path.parent.glob(f"{path.name}.pending-*"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return
+        for candidate in candidates[:3]:
+            try:
+                content = candidate.read_text(encoding="utf-8-sig")
+                if not content.strip():
+                    continue
+                json.loads(content)
+                for attempt in range(6):
+                    try:
+                        os.replace(candidate, path)
+                        return
+                    except OSError:
+                        time.sleep(0.04 + attempt * 0.04)
+                try:
+                    path.write_text(content, encoding="utf-8")
+                    candidate.unlink(missing_ok=True)
+                    return
+                except OSError:
+                    return
+            except OSError:
+                return
+            except json.JSONDecodeError:
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _copytree_resilient(self, source: Path, destination: Path) -> None:
         destination.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import locale
+import re
 import sys
 from dataclasses import asdict
 
@@ -72,6 +73,24 @@ class SettingsManager:
             settings.zapret_game_filter_mode = "disabled"
             changed = True
 
+        normalized_udp_exclude = self._normalize_port_ranges(raw.get("zapret_udp_exclude_ports", settings.zapret_udp_exclude_ports))
+        if normalized_udp_exclude != str(settings.zapret_udp_exclude_ports or ""):
+            settings.zapret_udp_exclude_ports = normalized_udp_exclude
+            changed = True
+
+        if raw.get("zapret_gaming_set") not in {
+            "base",
+            "base-wide-stun",
+            "wide-stun-base",
+            "stun-wide-base",
+            "stun-wide-base-local-exclude",
+            "udp-first",
+            "tcp-first",
+            "stun-between",
+        }:
+            settings.zapret_gaming_set = "stun-wide-base"
+            changed = True
+
         if raw.get("selected_runtime_mode") not in {"zapret", "goshkow-vpn"}:
             settings.selected_runtime_mode = "zapret"
             changed = True
@@ -121,6 +140,8 @@ class SettingsManager:
         return self._settings
 
     def update(self, **changes: object) -> AppSettings:
+        if "zapret_udp_exclude_ports" in changes:
+            changes["zapret_udp_exclude_ports"] = self._normalize_port_ranges(changes.get("zapret_udp_exclude_ports", ""))
         for key, value in changes.items():
             setattr(self._settings, key, value)
         self.save()
@@ -135,6 +156,33 @@ class SettingsManager:
         except Exception:
             locale_name = ""
         return "ru" if locale_name.startswith("ru") else "en"
+
+    def _normalize_port_ranges(self, value: object) -> str:
+        ranges: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for raw in re.split(r"[\s,;]+", str(value or "")):
+            token = raw.strip()
+            if not token:
+                continue
+            if "-" in token:
+                left, right = token.split("-", 1)
+            else:
+                left = right = token
+            try:
+                start = int(left)
+                end = int(right)
+            except ValueError:
+                continue
+            if start > end:
+                start, end = end, start
+            if start < 1 or end > 65535:
+                continue
+            item = (start, end)
+            if item in seen:
+                continue
+            seen.add(item)
+            ranges.append(item)
+        return ",".join(str(start) if start == end else f"{start}-{end}" for start, end in ranges)
 
     def _detect_system_theme(self) -> str:
         if not sys.platform.startswith("win"):

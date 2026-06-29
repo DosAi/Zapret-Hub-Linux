@@ -9,6 +9,22 @@ from zapret_hub.services.settings import SettingsManager
 from zapret_hub.services.storage import StorageManager
 
 
+def validate_general_script_content(path: Path, content: str) -> None:
+    if not path.name.lower().startswith("general") or path.suffix.lower() != ".bat":
+        return
+    text = str(content or "")
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError("General-файл пустой. Сохранение отменено, чтобы не сломать запуск Zapret.")
+    lowered = stripped.lower()
+    if "<html" in lowered or "<!doctype" in lowered or "</span>" in lowered or "font-family:" in lowered:
+        raise ValueError("General-файл похож на HTML/форматированный текст. Вставьте обычный текст без форматирования.")
+    if "winws.exe" not in lowered:
+        raise ValueError("General-файл не содержит запуск winws.exe. Сохранение отменено.")
+    if "--filter-" not in lowered or "--dpi-desync" not in lowered:
+        raise ValueError("General-файл не похож на рабочую конфигурацию Zapret. Проверьте синтаксис перед сохранением.")
+
+
 class FilesManager:
     def __init__(self, storage: StorageManager, settings: SettingsManager | None = None) -> None:
         self.storage = storage
@@ -176,6 +192,7 @@ class FilesManager:
     def write_text(self, path: str, content: str) -> None:
         target = Path(path)
         self._guard(target)
+        validate_general_script_content(target, content)
         target.write_text(content, encoding="utf-8")
 
     def _guard(self, path: Path) -> None:

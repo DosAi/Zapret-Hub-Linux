@@ -17,6 +17,7 @@ from zapret_hub.services.logging_service import LoggingManager
 from zapret_hub.services.merge import MergeEngine
 from zapret_hub.services.settings import SettingsManager
 from zapret_hub.services.storage import StorageManager
+from zapret_hub.services.files import validate_general_script_content
 
 
 class ModsManager:
@@ -147,6 +148,7 @@ class ModsManager:
 
     def write_file(self, mod_id: str, relative_path: str, content: str) -> None:
         target = self._safe_mod_file(mod_id, relative_path, must_exist=False)
+        validate_general_script_content(target, content)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         self._refresh_general_scripts(mod_id)

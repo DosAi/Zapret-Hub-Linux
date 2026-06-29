@@ -14,7 +14,6 @@ class AppSettings:
     autostart_windows: bool = False
     auto_run_components: bool = False
     check_updates_on_start: bool = True
-    experimental_appearance: bool = False
     notifications_enabled: bool = True
     work_root: str = ""
     active_profile_id: str = "default"
@@ -42,6 +41,7 @@ class AppSettings:
     selected_runtime_mode: str = "zapret"
     zapret_ipset_mode: str = "loaded"
     zapret_game_filter_mode: str = "disabled"
+    zapret_gaming_set: str = "stun-wide-base"
     zapret_udp_exclude_ports: str = "51820"
     goshkow_vpn_pending_start: bool = False
     zapret_was_running_before_goshkow_vpn: bool = False
