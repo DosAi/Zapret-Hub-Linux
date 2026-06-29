@@ -383,16 +383,6 @@ class UpdatesManager:
             function Overlay-Tree([string]$sourceDir, [string]$targetDir, [string[]]$preserveNames) {{
               New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
               $sourceItems = Get-ChildItem -LiteralPath $sourceDir -Force -ErrorAction SilentlyContinue
-              $sourceNames = @{{}}
-              foreach ($item in $sourceItems) {{
-                $sourceNames[$item.Name] = $true
-              }}
-              Get-ChildItem -LiteralPath $targetDir -Force -ErrorAction SilentlyContinue | ForEach-Object {{
-                if ($preserveNames -contains $_.Name) {{ return }}
-                if (-not $sourceNames.ContainsKey($_.Name)) {{
-                  [void](Remove-PathRobust $_.FullName)
-                }}
-              }}
               foreach ($item in $sourceItems) {{
                 if ($preserveNames -contains $item.Name) {{ continue }}
                 $dest = Join-Path $targetDir $item.Name
