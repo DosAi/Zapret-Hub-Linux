@@ -2305,6 +2305,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 shutil.copy2(selected_script, active_root / selected_script.name)
 
         self._apply_user_collection_overrides(lists_target)
+        self._apply_gaming_set_list_overlays(lists_target)
         self._materialize_visible_merged_runtime(active_root)
         return active_root
 
@@ -2502,8 +2503,6 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 existing = self._read_list_lines(target)
                 merged = self._merge_with_conflict_resolution(lists_dir, safe_name.lower(), existing, incoming)
                 target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
-            if str(service_id) == "gaming":
-                self._apply_gaming_set_list_overlays(lists_dir)
             bin_overlay_dir = str(getattr(rule, "bin_overlay_dir", "") or "").strip()
             if allow_bin_overlay and bin_overlay_dir:
                 source_dir = (self.storage.paths.install_root / bin_overlay_dir).resolve()

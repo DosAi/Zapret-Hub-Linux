@@ -42,7 +42,7 @@ class AppSettings:
     zapret_ipset_mode: str = "loaded"
     zapret_game_filter_mode: str = "disabled"
     zapret_gaming_set: str = "stun-wide-base"
-    zapret_udp_exclude_ports: str = "51820"
+    zapret_udp_exclude_ports: str = ""
     goshkow_vpn_pending_start: bool = False
     zapret_was_running_before_goshkow_vpn: bool = False
     zapret_was_enabled_before_goshkow_vpn: bool = False
