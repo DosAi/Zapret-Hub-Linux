@@ -1,5 +1,17 @@
 <div align="center">
 
+
+Сохраните сайт, на случай бана гитхаба в РФ - там всегда будет самая последняя версия.  
+👇👇👇  
+
+
+<a href="https://goshkow.ru/zapret-hub">
+  <img src="https://img.shields.io/badge/Официальный%20сайт%20Zapret%20Hub-purple?style=for-the-badge" alt="Официальный сайт Zapret Hub">
+</a>
+
+
+👆👆👆
+<br><br>
 ⭐️ Пожалуйста, поставьте звезду этому репозиторию, чтобы бесплатно поддержать меня.
 
 **Это - версия для Windows**
