@@ -348,7 +348,7 @@ def detect_payload_name() -> str:
     return "win_x64.zip"
 
 
-UPDATE_URL = "https://goshkow.ru/zapret-hub/update"
+UPDATE_URL = "https://goshkow.com/zapret-hub/update"
 METADATA_TIMEOUT_SEC = 10.0
 DOWNLOAD_CONNECT_TIMEOUT_SEC = 12.0
 DOWNLOAD_STALL_TIMEOUT_SEC = 45.0
@@ -396,7 +396,7 @@ def _run_with_deadline(func, *, timeout: float, cancel_event: threading.Event | 
         _check_cancel(cancel_event)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError(tr("goshkow.ru не отвечает (таймаут)", "goshkow.ru is not responding (timeout)"))
+            raise TimeoutError(tr("goshkow.com не отвечает (таймаут)", "goshkow.com is not responding (timeout)"))
         if done.wait(timeout=min(0.25, remaining)):
             break
     if errors:
@@ -404,7 +404,7 @@ def _run_with_deadline(func, *, timeout: float, cancel_event: threading.Event | 
     return box.get("value")
 
 
-def _friendly_network_error(error: BaseException, *, context: str = "goshkow.ru") -> str:
+def _friendly_network_error(error: BaseException, *, context: str = "goshkow.com") -> str:
     if isinstance(error, InstallAbort):
         return str(error)
     if isinstance(error, HTTPError):
@@ -490,7 +490,7 @@ def _fetch_mirror_release(*, timeout: float = METADATA_TIMEOUT_SEC, cancel_event
         _ensure_host_resolvable(UPDATE_URL, timeout=min(timeout, 8.0), cancel_event=cancel_event)
         return _urlopen_json(UPDATE_URL, timeout=timeout, cancel_event=cancel_event)
     except Exception as error:
-        raise RuntimeError(_friendly_network_error(error, context="goshkow.ru")) from error
+        raise RuntimeError(_friendly_network_error(error, context="goshkow.com")) from error
 
 
 def _remote_release_version(release: dict[str, object] | None = None, *, timeout: float = REMOTE_VERSION_TIMEOUT_SEC) -> str:
@@ -531,7 +531,7 @@ def _download_payload_from_mirror(
             return
 
     _installer_log("download_begin", update_url=UPDATE_URL)
-    report(2, tr("Запрос метаданных goshkow.ru…", "Requesting goshkow.ru metadata…"))
+    report(2, tr("Запрос метаданных goshkow.com…", "Requesting goshkow.com metadata…"))
     temp_root = Path(tempfile.mkdtemp(prefix="zapret_hub_installer_download_"))
     try:
         _installer_log("download_dns_metadata")
@@ -543,7 +543,7 @@ def _download_payload_from_mirror(
         asset = dict((release.get("assets") or {}).get(asset_key) or {})
         download_url = str(asset.get("download_url") or "").strip()
         if not download_url:
-            download_url = f"https://goshkow.ru/zapret-hub/{asset_key}"
+            download_url = f"https://goshkow.com/zapret-hub/{asset_key}"
         archive_path = temp_root / detect_payload_name()
         digest = hashlib.sha256()
         downloaded = 0
@@ -563,14 +563,14 @@ def _download_payload_from_mirror(
             )
         except Exception as error:
             _installer_log("download_connect_failed", error=str(error))
-            raise RuntimeError(_friendly_network_error(error, context="goshkow.ru")) from error
+            raise RuntimeError(_friendly_network_error(error, context="goshkow.com")) from error
         download_started = time.monotonic()
         last_chunk_at = download_started
         first_byte_logged = False
         with response, archive_path.open("wb") as stream:
             status = int(getattr(response, "status", 0) or response.getcode() or 0)
             if status and status >= 400:
-                raise RuntimeError(_friendly_network_error(HTTPError(download_url, status, f"HTTP {status}", hdrs=None, fp=None), context="goshkow.ru"))  # type: ignore[arg-type]
+                raise RuntimeError(_friendly_network_error(HTTPError(download_url, status, f"HTTP {status}", hdrs=None, fp=None), context="goshkow.com"))  # type: ignore[arg-type]
             total = expected_size or int(response.headers.get("Content-Length") or 0)
             report(6, tr("Скачивание сборки…", "Downloading build…"))
             while True:
@@ -582,7 +582,7 @@ def _download_payload_from_mirror(
                 try:
                     chunk = response.read(256 * 1024)
                 except Exception as error:
-                    raise RuntimeError(_friendly_network_error(error, context="goshkow.ru")) from error
+                    raise RuntimeError(_friendly_network_error(error, context="goshkow.com")) from error
                 if not chunk:
                     break
                 if not first_byte_logged:
@@ -1034,7 +1034,7 @@ class InstallerWorker(QThread):
             payload_zip: Path | None = None
             remote_version = ""
             release_identity: dict[str, str] = {}
-            self._emit(1, tr("Запуск загрузки с goshkow.ru…", "Starting download from goshkow.ru…"))
+            self._emit(1, tr("Запуск загрузки с goshkow.com…", "Starting download from goshkow.com…"))
             try:
                 payload_zip, downloaded_payload_root, remote_version, release_identity = _download_payload_from_mirror(
                     self._emit,
@@ -1045,7 +1045,7 @@ class InstallerWorker(QThread):
             except InstallAbort:
                 raise
             except Exception as download_error:
-                friendly = _friendly_network_error(download_error, context="goshkow.ru")
+                friendly = _friendly_network_error(download_error, context="goshkow.com")
                 _installer_log("payload_download_failed", error=friendly, local_payload=str(local_payload))
                 if local_payload.exists():
                     payload_zip = local_payload
@@ -1115,9 +1115,9 @@ class InstallerWorker(QThread):
             self._cleanup_temps()
             self.done.emit(False, str(error))
         except Exception as error:
-            friendly = _friendly_network_error(error, context="goshkow.ru") if not str(error) else str(error)
+            friendly = _friendly_network_error(error, context="goshkow.com") if not str(error) else str(error)
             if "goshkow" in str(error).lower() or isinstance(error, (URLError, HTTPError, TimeoutError, socket.timeout)):
-                friendly = _friendly_network_error(error, context="goshkow.ru")
+                friendly = _friendly_network_error(error, context="goshkow.com")
             _installer_log("install_failed", error=friendly)
             self._cleanup_temps()
             self.done.emit(False, friendly)
@@ -1380,7 +1380,7 @@ class WebInstallerBridge(QObject):
         if self.worker is not None and self.worker.isRunning():
             self.abort_all()
             self._aborting = False
-        status = tr("Запуск загрузки с goshkow.ru…", "Starting download from goshkow.ru…")
+        status = tr("Запуск загрузки с goshkow.com…", "Starting download from goshkow.com…")
         now = time.monotonic()
         self._install_started_at = now
         self._last_progress_at = now
@@ -1445,8 +1445,8 @@ class WebInstallerBridge(QObject):
         idle_for = time.monotonic() - self._install_started_at
         if idle_for >= CONNECT_WATCHDOG_SEC:
             message = tr(
-                "Не удалось подключиться к goshkow.ru за 15 секунд. Проверьте сеть и попробуйте снова.",
-                "Could not connect to goshkow.ru within 15 seconds. Check the network and try again.",
+                "Не удалось подключиться к goshkow.com за 15 секунд. Проверьте сеть и попробуйте снова.",
+                "Could not connect to goshkow.com within 15 seconds. Check the network and try again.",
             )
             _installer_log(
                 "install_watchdog_timeout",

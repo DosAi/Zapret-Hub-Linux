@@ -65,7 +65,7 @@ ManifestVersion: {MANIFEST_VERSION}
         f"{PACKAGE_IDENTIFIER}.locale.en-US.yaml": f"""# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.{MANIFEST_VERSION}.schema.json
 {common}PackageLocale: en-US
 Publisher: goshkow
-PublisherUrl: https://goshkow.ru/
+PublisherUrl: https://goshkow.com/
 PublisherSupportUrl: https://github.com/goshkow/Zapret-Hub/issues
 PackageName: Zapret Hub
 PackageUrl: https://github.com/goshkow/Zapret-Hub

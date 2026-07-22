@@ -3,7 +3,7 @@
 Официальный сайт проекта и дополнительный источник актуальных сборок:
 👇👇👇
 
-<a href="https://goshkow.ru/zapret-hub">
+<a href="https://goshkow.com/zapret-hub">
   <img src="https://img.shields.io/badge/Официальный%20сайт%20Zapret%20Hub-purple?style=for-the-badge" alt="Официальный сайт Zapret Hub">
 </a>
 
@@ -34,7 +34,7 @@
 <a href="https://github.com/goshkow/Zapret-Hub/releases/latest">
   <img src="https://img.shields.io/badge/Скачать-последнюю%20версию-blue?style=for-the-badge&logo=github" alt="Скачать последнюю версию">
 </a>
-<a href="https://goshkow.ru/zapret-hub/marketplace">
+<a href="https://goshkow.com/zapret-hub/marketplace">
   <img src="https://img.shields.io/badge/Открыть-Zapret%20Marketplace-e83e75?style=for-the-badge" alt="Открыть Zapret Marketplace">
 </a>
 <br><br>
@@ -84,7 +84,7 @@ Zapret Hub подходит и опытным пользователям, и т�
 
 ### Если выбран goshkow VPN
 
-Потребуется ключ подписки `vpn.goshkow.ru`. Его можно вставить из буфера обмена прямо в приложении. Для новых пользователей доступен бесплатный пробный период.
+Потребуется ключ подписки `vpn.goshkow.com`. Его можно вставить из буфера обмена прямо в приложении. Для новых пользователей доступен бесплатный пробный период.
 
 ### Если выбран режим «Без основного компонента»
 
@@ -123,7 +123,7 @@ Zapret, Zapret 2 и VPN запускаться не будут. При этом 
 
 <div align="center">
 
-<a href="https://goshkow.ru/zapret-hub/marketplace">
+<a href="https://goshkow.com/zapret-hub/marketplace">
   <img src="https://img.shields.io/badge/Перейти-в%20Marketplace-e83e75?style=for-the-badge" alt="Перейти в Zapret Marketplace">
 </a>
 
@@ -159,7 +159,7 @@ Marketplace имеет открытый API и не привязан исклю�
 
 ## 🛡️ goshkow VPN
 
-`goshkow VPN` — встроенный VPN-режим, работающий с подпиской `vpn.goshkow.ru`.
+`goshkow VPN` — встроенный VPN-режим, работающий с подпиской `vpn.goshkow.com`.
 
 Он поддерживает:
 

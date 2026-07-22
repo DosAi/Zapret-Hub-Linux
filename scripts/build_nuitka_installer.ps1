@@ -17,7 +17,7 @@ param(
 )
 
 # Slim installer: embeds uninstallers (+ UI assets) only; compressed onefile.
-# It does NOT include installer_payload/*.zip - runtime download is from goshkow.ru.
+# It does NOT include installer_payload/*.zip - runtime download is from goshkow.com.
 # Prefer exit-code checks over treating Nuitka stderr progress as terminating errors.
 $ErrorActionPreference = "Continue"
 if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {

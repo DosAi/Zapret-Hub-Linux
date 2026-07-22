@@ -44,7 +44,7 @@ class StorageManager:
                 "name": "goshkow vpn",
                 "description": "Авторская VPN-подписка без ограничений по трафику и количеству устройств. Доступна на смартфонах, ПК, ноутбуках и других устройствах.",
                 "version": "",
-                "source": "https://vpn.goshkow.ru",
+                "source": "https://vpn.goshkow.com",
                 "command": [],
                 "enabled": False,
                 "autostart": False,

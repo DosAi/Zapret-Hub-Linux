@@ -50,8 +50,8 @@
   };
 
   const connectTimeoutMessage = () => L(
-    "Не удалось подключиться к goshkow.ru за 15 секунд. Проверьте сеть и попробуйте снова.",
-    "Could not connect to goshkow.ru within 15 seconds. Check the network and try again."
+    "Не удалось подключиться к goshkow.com за 15 секунд. Проверьте сеть и попробуйте снова.",
+    "Could not connect to goshkow.com within 15 seconds. Check the network and try again."
   );
 
   const stillConnecting = (snap) => {
@@ -466,7 +466,7 @@
   const beginInstall = async () => {
     state.page = "progress";
     state.progress = 0;
-    state.status = L("Запуск загрузки с goshkow.ru…", "Starting download from goshkow.ru…");
+    state.status = L("Запуск загрузки с goshkow.com…", "Starting download from goshkow.com…");
     state.error = "";
     state.failed = false;
     render();
@@ -677,7 +677,7 @@
         } else if (command === "install.start" || command === "uninstall.start") {
           mockSnap = {
             phase: "connecting",
-            status: "Запрос метаданных goshkow.ru…",
+            status: "Запрос метаданных goshkow.com…",
             progress: 2,
             error: "",
             bytesDownloaded: 0,

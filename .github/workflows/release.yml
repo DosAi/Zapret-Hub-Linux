@@ -185,7 +185,7 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
       # Identical to local slim: no -X64Source / -Arm64Source, no installer_payload zips.
-      # Runtime and architecture-matching uninstaller are downloaded from goshkow.ru.
+      # Runtime and architecture-matching uninstaller are downloaded from goshkow.com.
       - name: Build slim installer (local build_nuitka_installer.ps1)
         shell: pwsh
         run: |
@@ -323,7 +323,7 @@ jobs:
           } else {
             $body = @(
               "## Assets",
-              "- ``install_zaprethub_${version}_universal.exe`` - slim installer (downloads app from goshkow.ru)",
+              "- ``install_zaprethub_${version}_universal.exe`` - slim installer (downloads app from goshkow.com)",
               "- ``zapret_hub_${version}_portable_win_x64.zip`` / ``_win_arm64.zip`` - portable builds",
               "- ``winget-manifests-${version}.zip`` - WinGet manifests"
             ) -join "`n"

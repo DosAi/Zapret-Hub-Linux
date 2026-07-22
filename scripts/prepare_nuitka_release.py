@@ -73,7 +73,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Prepare GitHub/mirror release assets for the slim installer model. "
-            "Portable zips are published for goshkow.ru; the installer downloads them later "
+            "Portable zips are published for goshkow.com; the installer downloads them later "
             "and does not embed these archives."
         )
     )
@@ -168,10 +168,10 @@ def main() -> None:
     note.write_text(
         "Slim installer release model\n"
         "============================\n"
-        "1) Publish portable_win_x64.zip and portable_win_arm64.zip to the goshkow.ru mirror\n"
+        "1) Publish portable_win_x64.zip and portable_win_arm64.zip to the goshkow.com mirror\n"
         "   (and/or keep them as GitHub release assets).\n"
         "2) install_zaprethub_*_universal.exe is a slim installer: at runtime it downloads the\n"
-        "   matching arch build from https://goshkow.ru/zapret-hub/update — it does NOT embed\n"
+        "   matching arch build from https://goshkow.com/zapret-hub/update — it does NOT embed\n"
         "   the portable archives.\n"
         "3) Each portable folder includes arch-matching uninstall_zaprethub.exe.\n"
         "4) Standalone uninstallers may also be published as separate release assets.\n",

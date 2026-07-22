@@ -17,8 +17,9 @@ from zapret_hub.services.logging_service import LoggingManager
 from zapret_hub.services.storage import StorageManager
 
 
-GOSHKOW_VPN_HOST = "vpn.goshkow.ru"
-GOSHKOW_VPN_ACCESS_URL = "https://vpn.goshkow.ru"
+GOSHKOW_VPN_HOST = "vpn.goshkow.com"
+GOSHKOW_VPN_LEGACY_HOST = "vpn.goshkow.ru"
+GOSHKOW_VPN_ACCESS_URL = "https://vpn.goshkow.com"
 
 
 class GoshkowVpnManager:
@@ -34,8 +35,11 @@ class GoshkowVpnManager:
         subscription_state = str(raw.get("subscription_state", "") or "").strip() or "empty"
         if subscription_state == "empty" and raw.get("subscription_url") and raw.get("servers") and raw.get("selected_server_id"):
             subscription_state = "valid"
+        subscription_url = str(raw.get("subscription_url", "") or "")
+        if subscription_url.startswith(f"https://{GOSHKOW_VPN_LEGACY_HOST}/"):
+            subscription_url = f"https://{GOSHKOW_VPN_HOST}/{subscription_url.split('/', 3)[3]}"
         return {
-            "subscription_url": str(raw.get("subscription_url", "") or ""),
+            "subscription_url": subscription_url,
             "subscription_state": subscription_state,
             "servers": list(raw.get("servers", []) or []),
             "selected_server_id": str(raw.get("selected_server_id", "") or ""),
@@ -188,11 +192,12 @@ class GoshkowVpnManager:
     def _normalize_subscription_url(self, url: str) -> str:
         value = str(url or "").strip()
         parsed = urllib.parse.urlparse(value)
-        if parsed.scheme != "https" or parsed.netloc.lower() != GOSHKOW_VPN_HOST:
-            raise ValueError("Поддерживаются только подписки с домена vpn.goshkow.ru.")
+        host = parsed.netloc.lower()
+        if parsed.scheme != "https" or host not in {GOSHKOW_VPN_HOST, GOSHKOW_VPN_LEGACY_HOST}:
+            raise ValueError("Поддерживаются только подписки с домена vpn.goshkow.com.")
         if not parsed.path.startswith("/sub/"):
-            raise ValueError("Ссылка должна вести на подписку vpn.goshkow.ru/sub/...")
-        return urllib.parse.urlunparse(parsed._replace(fragment=""))
+            raise ValueError("Ссылка должна вести на подписку vpn.goshkow.com/sub/...")
+        return urllib.parse.urlunparse(parsed._replace(netloc=GOSHKOW_VPN_HOST, fragment=""))
 
     def _download_subscription(self, url: str) -> tuple[str, dict[str, str]]:
         errors: list[str] = []
