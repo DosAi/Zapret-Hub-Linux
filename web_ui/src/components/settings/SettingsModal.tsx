@@ -158,7 +158,7 @@ export function SettingsModal({
     { key: "vpn", label: "goshkow VPN" },
     { key: "tg", label: "TG WS Proxy" },
   ];
-  const modeLabels: Record<RuntimeId, string> = { zapret: "Zapret", "goshkow-vpn": "goshkow VPN", zapret2: "Zapret2", none: L("Без обхода", "No bypass") };
+  const modeLabels: Record<RuntimeId, string> = { zapret: "Zapret", "goshkow-vpn": "goshkow VPN", zapret2: "Zapret2", none: L("Без основного компонента", "No primary component") };
   const selectTab = (next: SettingsTab) => {
     const currentIndex = tabs.findIndex((item) => item.key === tab);
     const nextIndex = tabs.findIndex((item) => item.key === next);
@@ -308,12 +308,12 @@ export function SettingsModal({
               </motion.div>}
             </AnimatePresence>
           </Section>
-          <Section title={L("Порядок методов обхода", "Bypass method order")}>
+          <Section title={L("Порядок сетевых компонентов", "Network component order")}>
             <Row
               label={L("Переключение скроллом", "Scroll switching")}
               hint={L(
-                "Позволяет переключать методы обхода скроллом по странице быстрого доступа",
-                "Lets you switch bypass methods by scrolling on the quick access page",
+                "Позволяет переключать сетевые компоненты скроллом по странице быстрого доступа",
+                "Lets you switch network components by scrolling on the quick access page",
               )}
             >
               <IosToggle

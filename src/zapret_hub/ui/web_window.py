@@ -2831,8 +2831,8 @@ class WebBridge(QObject):
         enabled_ids = {str(item) for item in (settings.enabled_component_ids or [])}
         component_descriptions = {
             "zapret": (
-                "Основной модуль обхода блокировок для сайтов и сервисов.",
-                "The primary website and service bypass module.",
+                "Основной модуль локальной обработки сетевого трафика.",
+                "The primary local network traffic processing module.",
             ),
             "zapret2": (
                 "Новое поколение zapret с winws2 и Lua-стратегиями.",
@@ -3726,9 +3726,9 @@ class WebMainWindow(QMainWindow):
             "zapret": "Zapret",
             "goshkow-vpn": "goshkow VPN",
             "zapret2": "Zapret 2",
-            "none": "Без обхода" if language == "ru" else "No bypass",
+            "none": "Без основного компонента" if language == "ru" else "No primary component",
         }
-        self._tray_runtime_menu.setTitle("Метод обхода" if language == "ru" else "Bypass method")
+        self._tray_runtime_menu.setTitle("Сетевой компонент" if language == "ru" else "Network component")
         self._tray_runtime_menu.clear()
         group = QActionGroup(self._tray_runtime_menu)
         group.setExclusive(True)

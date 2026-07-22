@@ -467,7 +467,7 @@ export function OnboardingFlow({
                 </p>
                 <div className="mt-7 grid w-full max-w-[650px] grid-cols-3 gap-3">
                   {([
-                    ["zapret", "Zapret", "component_zapret.svg", ru ? "Классический обход с подбором стратегии" : "Classic bypass with strategy selection"],
+                    ["zapret", "Zapret", "component_zapret.svg", ru ? "Локальная обработка трафика с подбором стратегии" : "Local traffic processing with strategy selection"],
                     ["zapret2", "Zapret 2", "component_zapret2.svg", ru ? "Автоматическая настройка нового поколения" : "Automatic next-generation setup"],
                     ["goshkow-vpn", "goshkow VPN", "vpn.svg", ru ? "VPN по ключу подписки" : "Subscription-based VPN"],
                   ] as const).map(([id, title, icon, description]) => (
@@ -478,7 +478,7 @@ export function OnboardingFlow({
                     </button>
                   ))}
                 </div>
-                <button onClick={() => setSelectedMode("none")} className="mt-3 rounded-xl border border-line-1 px-4 py-2 text-[11px] text-fg-dim transition-colors hover:bg-bg-2 hover:text-fg" style={selectedMode === "none" ? { borderColor: "var(--fg-dim)", background: "var(--bg-2)" } : undefined}>{ru ? "Без компонентов обхода" : "No bypass component"}</button>
+                <button onClick={() => setSelectedMode("none")} className="mt-3 rounded-xl border border-line-1 px-4 py-2 text-[11px] text-fg-dim transition-colors hover:bg-bg-2 hover:text-fg" style={selectedMode === "none" ? { borderColor: "var(--fg-dim)", background: "var(--bg-2)" } : undefined}>{ru ? "Без основного компонента" : "No primary component"}</button>
               </div>
             )}
 
