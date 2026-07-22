@@ -1535,7 +1535,7 @@ foreach ($adapter in @($payload.adapters)) {
         tcp_ports = self._normalize_zapret2_ports(settings.zapret2_tcp_ports, "80,443")
         udp_ports = self._normalize_zapret2_ports(settings.zapret2_udp_ports, "443")
         selected_services = {str(item) for item in (settings.selected_service_ids or [])}
-        control_mode = str(getattr(settings, "zapret_control_mode", "manual") or "manual")
+        control_mode = str(getattr(settings, "zapret2_control_mode", "manual") or "manual")
         if control_mode == "auto" and "discord" in selected_services:
             udp_ports = self._merge_zapret2_ports(
                 udp_ports,
@@ -1561,12 +1561,6 @@ foreach ($adapter in @($payload.adapters)) {
         if raw_filter:
             command.append(f"--wf-raw-part={raw_filter}")
 
-        strategy = str(settings.zapret2_lua_strategy or "").strip()
-        # Manual custom strategy still wins; Auto always uses Hub Lua + hostlists.
-        if strategy and control_mode != "auto":
-            command.extend(shlex.split(strategy, posix=False))
-            return command
-
         configs_dir = Path(self.storage.paths.configs_dir)
         strategy_id = str(getattr(settings, "zapret2_strategy_id", "balanced") or "balanced")
         lists = zapret2_hub.prepare_zapret2_runtime_files(configs_dir, strategy_id)
@@ -1579,6 +1573,17 @@ foreach ($adapter in @($payload.adapters)) {
                 zapret2_hub.seed_bypass_catalog(configs_dir, only_missing=True)
         except Exception:
             pass
+
+        mod_lua_root = lists["hub"].parent / "mod_lua"
+        if mod_lua_root.is_dir():
+            for mod_lua in sorted(mod_lua_root.glob("*.lua")):
+                command.append(f"--lua-init=@{mod_lua}")
+
+        strategy = str(settings.zapret2_lua_strategy or "").strip()
+        # Manual custom strategy still wins, but enabled Lua modifications load first.
+        if strategy and control_mode != "auto":
+            command.extend(shlex.split(strategy, posix=False))
+            return command
 
         command.append(f"--lua-init=@{lists['lua_targets']}")
         command.append(f"--lua-init=@{lists['lua_orch']}")

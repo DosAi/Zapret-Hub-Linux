@@ -85,7 +85,7 @@ def test_zapret2_auto_discord_capture_includes_voice_udp_ranges() -> None:
             zapret2_tcp_ports="80,443",
             zapret2_udp_ports="443",
             selected_service_ids=["discord"],
-            zapret_control_mode="auto",
+            zapret2_control_mode="auto",
         )
     )
     udp_ports = process._normalize_zapret2_ports("443", "443")
