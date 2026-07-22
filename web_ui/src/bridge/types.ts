@@ -335,6 +335,12 @@ export type Events = {
   "onboarding.progress": { current: number; total: number; name: string; overallCurrent?: number; overallTotal?: number };
   "onboarding.configuration": { status: "success" | "error"; name: string; passed?: number; total?: number; error?: string };
   "component.update-check": ComponentUpdateCheck;
+  "component.update-result": {
+    id: ComponentId;
+    status: "started" | "success" | "up-to-date" | "error";
+    version?: string;
+    error?: string;
+  };
   "orchestrator.status": OrchestratorStatus;
   /** Fired when Auto bootstrap finishes (success or deferred Stage-1 stub). */
   "orchestrator.bootstrap": OrchestratorBootstrapResult;

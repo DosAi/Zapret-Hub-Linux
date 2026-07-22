@@ -16,7 +16,9 @@ class TunerStep:
 
 _OVERBLOCK_SYMPTOMS = frozenset({"suspect_overblock", "tls_fail", "http_block", "tcp_timeout"})
 _MISS_SYMPTOMS = frozenset({"external_miss"})
-_GAMING_SERVICES = frozenset({"gaming", "fortnite", "epic-games", "ubisoft", "riot-games", "battle-net"})
+_GAMING_SERVICES = frozenset(
+    {"discord", "gaming", "fortnite", "epic-games", "ubisoft", "riot-games", "battle-net"}
+)
 
 
 def _mod_looks_relevant(mod: Any, *, services: list[str], process: str = "") -> bool:

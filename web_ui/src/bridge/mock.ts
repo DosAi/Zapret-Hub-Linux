@@ -488,10 +488,13 @@ export function createMockBridge(): ZapretHubBridge {
       case "component.install-update": {
         const p = payload as Commands["component.install-update"]["in"];
         state.components[p.id].status = "updating";
+        emit("component.update-result", { id: p.id, status: "started" });
         pushState();
         setTimeout(() => {
           state.components[p.id].status = "on";
+          state.components[p.id].version = p.id === "zapret2" ? "f4cf5dde162a" : "latest";
           pushState();
+          emit("component.update-result", { id: p.id, status: "success", version: state.components[p.id].version });
         }, 900);
         return undefined as Commands[K]["out"];
       }

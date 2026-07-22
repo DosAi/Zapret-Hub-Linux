@@ -1067,6 +1067,8 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             settings_changes.update(_ubisoft_zapret_settings(context))
         if "fortnite" in requested:
             settings_changes.update(_fortnite_zapret_settings(context))
+        if "discord" in requested and str(getattr(settings, "zapret_control_mode", "manual")) == "auto":
+            settings_changes["zapret_game_filter_mode"] = "tcpudp"
         context.settings.update(**settings_changes)
         zapret_restarted = _finish_zapret_reconfiguration(context, restart=zapret_was_running) if zapret_services_changed else False
         result = {"selected_service_ids": ordered, "client_revision": client_revision, "zapret_restarted": zapret_restarted}

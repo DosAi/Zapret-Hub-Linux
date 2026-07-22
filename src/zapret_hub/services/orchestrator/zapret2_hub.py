@@ -74,6 +74,8 @@ _HUB_ORCHESTRATOR_LUA = r'''--[[
   Strategy knobs come from hub-strategy.lua (HUB_STRATEGY).
 ]]
 
+HUB_ORCHESTRATOR_VERSION = 2
+
 local function _strategy()
   return (HUB_STRATEGY and tostring(HUB_STRATEGY)) or "balanced"
 end
@@ -90,7 +92,7 @@ function hub_tls(ctx, desync)
   local s = _strategy()
   if s == "fake_heavy" then
     arg.blob = arg.blob or "fake_default_tls"
-    arg.tcp_md5 = true
+    arg.tcp_md5 = ""
     arg.repeats = arg.repeats or 11
     arg.tls_mod = arg.tls_mod or "rnd,dupsid,rndsni"
     return fake(ctx, desync)
@@ -101,7 +103,7 @@ function hub_tls(ctx, desync)
     return multisplit(ctx, desync)
   end
   arg.blob = arg.blob or "fake_default_tls"
-  arg.tcp_md5 = true
+  arg.tcp_md5 = ""
   arg.tls_mod = arg.tls_mod or "rnd,rndsni,dupsid"
   return fake(ctx, desync)
 end
@@ -114,7 +116,7 @@ function hub_tls_b(ctx, desync)
     return multidisorder(ctx, desync)
   elseif s == "multisplit" then
     arg.blob = arg.blob or "fake_default_tls"
-    arg.tcp_md5 = true
+    arg.tcp_md5 = ""
     arg.tls_mod = arg.tls_mod or "rnd,dupsid"
     return fake(ctx, desync)
   end
@@ -129,7 +131,7 @@ function hub_http(ctx, desync)
   local s = _strategy()
   if s == "fake_heavy" then
     arg.blob = arg.blob or "fake_default_http"
-    arg.tcp_md5 = true
+    arg.tcp_md5 = ""
     arg.repeats = arg.repeats or 6
     return fake(ctx, desync)
   elseif s == "multisplit" then
@@ -137,18 +139,18 @@ function hub_http(ctx, desync)
     return multisplit(ctx, desync)
   end
   arg.blob = arg.blob or "fake_default_http"
-  arg.tcp_md5 = true
+  arg.tcp_md5 = ""
   return fake(ctx, desync)
 end
 
 function hub_http_b(ctx, desync)
   local arg = _ensure_arg(desync)
   if _strategy() == "fake_heavy" then
-    arg.tcp_md5 = true
+    arg.tcp_md5 = ""
     return fakedsplit(ctx, desync)
   end
   arg.blob = arg.blob or "fake_default_http"
-  arg.tcp_md5 = true
+  arg.tcp_md5 = ""
   return fake(ctx, desync)
 end
 
@@ -254,11 +256,14 @@ def write_hub_orchestrator_lua(path: Path, *, force: bool = False) -> Path:
                 return path
         except Exception:
             pass
-        # Keep existing file if user/orchestrator already wrote a compatible copy;
-        # only refresh when missing markers for hub_tls.
+        # Refresh generated copies when the Lua API contract changes.
         try:
             current = path.read_text(encoding="utf-8", errors="ignore")
-            if "function hub_tls" in current and "function hub_discord" in current:
+            if (
+                "HUB_ORCHESTRATOR_VERSION = 2" in current
+                and "function hub_tls" in current
+                and "function hub_discord" in current
+            ):
                 return path
         except Exception:
             pass

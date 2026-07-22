@@ -26,6 +26,7 @@ class StorageManager:
     def _ensure_sample_files(self) -> None:
         components_file = self.paths.data_dir / "components.json"
         zapret_version = self._detect_zapret_version()
+        zapret2_version = self._detect_zapret2_version()
         tg_version = self._detect_tgws_version()
         default_components = [
             {
@@ -52,7 +53,7 @@ class StorageManager:
                 "id": "zapret2",
                 "name": "Zapret2",
                 "description": "Новое поколение zapret от bol-van с winws2/nfqws2 и Lua-стратегиями.",
-                "version": "master",
+                "version": zapret2_version,
                 "source": "https://github.com/bol-van/zapret2",
                 "command": [],
                 "enabled": False,
@@ -169,6 +170,16 @@ class StorageManager:
         except Exception:
             return "unknown"
         return "unknown"
+
+    def _detect_zapret2_version(self) -> str:
+        version_file = self.paths.runtime_dir / "zapret2" / ".zapret-hub-version"
+        try:
+            value = version_file.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        except OSError:
+            pass
+        return "master"
 
     def _ensure_default_bundled_mod_and_index(self, settings_file: Path) -> None:
         legacy_mod_id = "gaming-by-goshkow"

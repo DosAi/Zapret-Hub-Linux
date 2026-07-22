@@ -1451,15 +1451,7 @@ class WebBridge(QObject):
             return None
         if command == "component.install-update":
             component_id = str((payload or {}).get("id", ""))
-            actions = {
-                "zapret": self.context.processes.update_zapret_runtime,
-                "zapret2": self.context.processes.update_zapret2_runtime,
-                "goshkow-vpn": self.context.vpn.refresh_subscription,
-                "tg-ws-proxy": self.context.processes.update_tg_ws_proxy_runtime,
-            }
-            action = actions.get(component_id)
-            if action is not None:
-                self._run_background(action)
+            self._run_component_update(component_id)
             return None
         if command == "dns.select-profile":
             profile = str((payload or {}).get("profile", "xbox"))
@@ -2038,7 +2030,8 @@ class WebBridge(QObject):
                     current = self.context.storage._detect_tgws_version() or current
                     latest = str(self.context.processes.fetch_latest_tg_ws_proxy_release().get("latest_version", "") or "")
                 elif component_id == "zapret2":
-                    latest = "master"
+                    current = self.context.storage._detect_zapret2_version() or current
+                    latest = str(self.context.processes.fetch_latest_zapret2_release().get("latest_version", "") or "")
                 elif component_id == "goshkow-vpn":
                     latest = "актуальная подписка"
                 else:
@@ -2062,6 +2055,65 @@ class WebBridge(QObject):
             )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _run_component_update(self, component_id: str) -> None:
+        actions = {
+            "zapret": self.context.processes.update_zapret_runtime,
+            "zapret2": self.context.processes.update_zapret2_runtime,
+            "tg-ws-proxy": self.context.processes.update_tg_ws_proxy_runtime,
+        }
+        action = actions.get(component_id)
+        if action is None:
+            return
+
+        def emit(status: str, *, version: str = "", error: str = "") -> None:
+            payload = {"id": component_id, "status": status, "version": version, "error": error}
+            self.event.emit("component.update-result", json.dumps(payload, ensure_ascii=False))
+
+        emit("started")
+
+        def worker() -> None:
+            try:
+                result = action()
+                result_status = str((result or {}).get("status") or "updated")
+                version = str((result or {}).get("version") or "")
+                error = str((result or {}).get("error") or "")
+                if result_status == "error":
+                    raise RuntimeError(error or "Component update failed")
+                final_status = "up-to-date" if result_status == "up-to-date" else "success"
+                self._schedule_on_gui(lambda: emit(final_status, version=version))
+                message = (
+                    ("Компонент уже обновлён." if self._ru() else "The component is already up to date.")
+                    if final_status == "up-to-date"
+                    else ("Компонент успешно обновлён." if self._ru() else "The component was updated successfully.")
+                )
+                self._schedule_on_gui(
+                    lambda text=message: self._emit_toast(
+                        text,
+                        kind="success",
+                        toast_id=f"component-update-{component_id}",
+                    )
+                )
+            except Exception as exception:
+                error = str(exception)
+                self.context.logging.log(
+                    "error",
+                    "Component update failed",
+                    component_id=component_id,
+                    error=error,
+                )
+                self._schedule_on_gui(lambda message=error: emit("error", error=message))
+                self._schedule_on_gui(
+                    lambda message=error: self._emit_toast(
+                        message,
+                        kind="error",
+                        toast_id=f"component-update-{component_id}",
+                    )
+                )
+            finally:
+                self._schedule_on_gui(lambda: self.emit_state(force=True))
+
+        threading.Thread(target=worker, daemon=True, name=f"zapret-hub-update-{component_id}").start()
 
     def _start_onboarding_configuration(self, *, selected_services: list[str] | None = None) -> None:
         if self._onboarding_configuration_running:

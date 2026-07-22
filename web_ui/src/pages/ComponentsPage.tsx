@@ -42,6 +42,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
   const bridge = useBridge();
   const { t } = useLocale();
   const [checkingId, setCheckingId] = useState<ComponentId | null>(null);
+  const [updatingId, setUpdatingId] = useState<ComponentId | null>(null);
   const [updateCheck, setUpdateCheck] = useState<ComponentUpdateCheck | null>(null);
   const [dnsOpen, setDnsOpen] = useState(false);
   const [confirmManualOpen, setConfirmManualOpen] = useState(false);
@@ -88,6 +89,9 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
   useEffect(() => bridge.subscribe("component.update-check", (result) => {
     setCheckingId(null);
     setUpdateCheck(result);
+  }), [bridge]);
+  useEffect(() => bridge.subscribe("component.update-result", (result) => {
+    setUpdatingId(result.status === "started" ? result.id : null);
   }), [bridge]);
   if (!state) return null;
 
@@ -183,7 +187,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
                 </div>
                 <div className="mt-3 flex items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-1.5">
-                    {id !== "xbox-dns" && id !== "goshkow-vpn" && <button disabled={checkingId === id} onClick={() => checkUpdate(id)} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg disabled:opacity-50">{checkingId === id ? t("component.checking") : t("component.update")}</button>}
+                    {id !== "xbox-dns" && id !== "goshkow-vpn" && <button disabled={checkingId === id || updatingId === id} onClick={() => checkUpdate(id)} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg disabled:opacity-50">{updatingId === id ? t("component.updating") : checkingId === id ? t("component.checking") : t("component.update")}</button>}
                     {id === "goshkow-vpn" && <button onClick={onConnectVpn} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.connect")}</button>}
                     {id === "goshkow-vpn" && <button onClick={() => bridge.call("component.open-external", { id })} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.trial")}</button>}
                     {id === "xbox-dns" && <button onClick={() => setDnsOpen((value) => !value)} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.chooseDns")}</button>}
@@ -263,7 +267,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
               )}
               <div className="mt-4 flex justify-end gap-2">
                 <button onClick={() => setUpdateCheck(null)} className="rounded-[10px] border border-line-1 px-3 py-2 text-[11px] text-fg-dim hover:bg-bg-2">{updateCheck.available ? t("update.keep") : t("settings.close")}</button>
-                {updateCheck.available && !updateCheck.error && <button onClick={() => { bridge.call("component.install-update", { id: updateCheck.id }); setUpdateCheck(null); }} className="rounded-[10px] bg-fg px-3 py-2 text-[11px] font-semibold text-bg-0 hover:opacity-90">{t("component.update")}</button>}
+                {updateCheck.available && !updateCheck.error && <button onClick={() => { setUpdatingId(updateCheck.id); bridge.call("component.install-update", { id: updateCheck.id }); setUpdateCheck(null); }} className="rounded-[10px] bg-fg px-3 py-2 text-[11px] font-semibold text-bg-0 hover:opacity-90">{t("component.update")}</button>}
               </div>
             </motion.div>
           </motion.div>

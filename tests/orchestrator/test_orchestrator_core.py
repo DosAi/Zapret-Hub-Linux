@@ -494,6 +494,8 @@ def test_zapret2_lua_files_created_once(tmp_path: Path):
     orch = paths["lua_orch"].read_text(encoding="utf-8")
     assert "function hub_tls" in orch
     assert "function hub_discord" in orch
+    assert "HUB_ORCHESTRATOR_VERSION = 2" in orch
+    assert "tcp_md5 = true" not in orch
     strategy = paths["lua_strategy"].read_text(encoding="utf-8")
     assert 'HUB_STRATEGY = "balanced"' in strategy
     paths["lua_orch"].write_text(orch + "\n-- keep\n", encoding="utf-8")
@@ -518,3 +520,4 @@ def test_tuner_discord_seed_batches_catalog():
     blob = "\n".join(s.value for s in domain_steps)
     assert "discord.com" in blob
     assert "gateway.discord.gg" in blob
+    assert any(step.kind == "game_filter" and step.value == "tcpudp" for step in steps)

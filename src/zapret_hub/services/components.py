@@ -19,6 +19,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -1450,11 +1451,11 @@ foreach ($adapter in @($payload.adapters)) {
             return runtime_root
         return self._install_zapret2_archive()
 
-    def _install_zapret2_archive(self) -> Path:
+    def _install_zapret2_archive(self, *, archive_url: str = "", version: str = "") -> Path:
         runtime_root = self.storage.paths.runtime_dir / "zapret2"
         # Windows binaries are published in zapret-win-bundle; the zapret2
         # source archive itself does not contain winws2.exe.
-        archive_url = "https://codeload.github.com/bol-van/zapret-win-bundle/zip/refs/heads/master"
+        archive_url = archive_url or "https://codeload.github.com/bol-van/zapret-win-bundle/zip/refs/heads/master"
         temp_root = Path(tempfile.mkdtemp(prefix="zapret_hub_zapret2_"))
         try:
             zip_path = temp_root / "zapret2-master.zip"
@@ -1470,8 +1471,16 @@ foreach ($adapter in @($payload.adapters)) {
             if runtime_root.exists():
                 shutil.rmtree(runtime_root, ignore_errors=True)
             shutil.copytree(source_root, runtime_root, dirs_exist_ok=True)
+            if version:
+                (runtime_root / ".zapret-hub-version").write_text(version, encoding="utf-8")
             self.storage.ensure_layout()
-            self.logging.log("info", "Zapret2 runtime installed", backup=str(backup or ""), source=archive_url)
+            self.logging.log(
+                "info",
+                "Zapret2 runtime installed",
+                version=version,
+                backup=str(backup or ""),
+                source=archive_url,
+            )
             return runtime_root
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
@@ -1525,6 +1534,13 @@ foreach ($adapter in @($payload.adapters)) {
         settings = self.settings.get()
         tcp_ports = self._normalize_zapret2_ports(settings.zapret2_tcp_ports, "80,443")
         udp_ports = self._normalize_zapret2_ports(settings.zapret2_udp_ports, "443")
+        selected_services = {str(item) for item in (settings.selected_service_ids or [])}
+        control_mode = str(getattr(settings, "zapret_control_mode", "manual") or "manual")
+        if control_mode == "auto" and "discord" in selected_services:
+            udp_ports = self._merge_zapret2_ports(
+                udp_ports,
+                "3478-3497,19294-19344,42377-62133",
+            )
         bundle_root = zapret2_hub.bundle_winws_root(winws2_path)
         lua_lib = self._zapret2_lua_arg(runtime_root, "zapret-lib.lua")
         lua_antidpi = self._zapret2_lua_arg(runtime_root, "zapret-antidpi.lua")
@@ -1546,7 +1562,6 @@ foreach ($adapter in @($payload.adapters)) {
             command.append(f"--wf-raw-part={raw_filter}")
 
         strategy = str(settings.zapret2_lua_strategy or "").strip()
-        control_mode = str(getattr(settings, "zapret_control_mode", "manual") or "manual")
         # Manual custom strategy still wins; Auto always uses Hub Lua + hostlists.
         if strategy and control_mode != "auto":
             command.extend(shlex.split(strategy, posix=False))
@@ -1592,6 +1607,9 @@ foreach ($adapter in @($payload.adapters)) {
                 continue
             normalized.append(str(start) if start == end else f"{start}-{end}")
         return ",".join(dict.fromkeys(normalized)) or fallback
+
+    def _merge_zapret2_ports(self, *values: str) -> str:
+        return self._normalize_zapret2_ports(",".join(values), "443")
 
     def _zapret2_lua_arg(self, runtime_root: Path, filename: str) -> str:
         for candidate in (runtime_root / "lua" / filename, runtime_root / filename):
@@ -3861,11 +3879,24 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 raise ValueError("Invalid zapret release metadata")
         except Exception as error:
             self.logging.log("warning", "Zapret release metadata fallback", error=str(error))
+            fallback = self._fetch_latest_release_atom("Flowseal/zapret-discord-youtube")
+            tag = str(fallback.get("tag") or "")
+            version = str(fallback.get("latest_version") or "")
             return {
-                "latest_version": "",
-                "asset_url": "",
-                "asset_name": "",
-                "zipball_url": "https://codeload.github.com/Flowseal/zapret-discord-youtube/zip/refs/heads/main",
+                "latest_version": version,
+                "asset_url": (
+                    f"https://github.com/Flowseal/zapret-discord-youtube/releases/download/"
+                    f"{urllib.parse.quote(tag)}/zapret-discord-youtube-{urllib.parse.quote(version)}.zip"
+                    if tag and version
+                    else ""
+                ),
+                "asset_name": f"zapret-discord-youtube-{version}.zip" if version else "",
+                "zipball_url": (
+                    f"https://codeload.github.com/Flowseal/zapret-discord-youtube/zip/refs/tags/"
+                    f"{urllib.parse.quote(tag)}"
+                    if tag
+                    else "https://codeload.github.com/Flowseal/zapret-discord-youtube/zip/refs/heads/main"
+                ),
             }
         latest_version = str(payload.get("tag_name") or payload.get("name") or "").strip().lstrip("v")
         asset = next(
@@ -3891,10 +3922,22 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 raise ValueError("Invalid tg-ws-proxy release metadata")
         except Exception as error:
             self.logging.log("warning", "TG WS Proxy release metadata fallback", error=str(error))
+            fallback = self._fetch_latest_release_atom("Flowseal/tg-ws-proxy")
+            tag = str(fallback.get("tag") or "")
+            version = str(fallback.get("latest_version") or "")
             return {
-                "latest_version": "",
-                "source_url": "https://codeload.github.com/Flowseal/tg-ws-proxy/zip/refs/heads/main",
-                "exe_url": "https://github.com/Flowseal/tg-ws-proxy/releases/latest/download/TgWsProxy_windows.exe",
+                "latest_version": version,
+                "source_url": (
+                    f"https://codeload.github.com/Flowseal/tg-ws-proxy/zip/refs/tags/{urllib.parse.quote(tag)}"
+                    if tag
+                    else "https://codeload.github.com/Flowseal/tg-ws-proxy/zip/refs/heads/main"
+                ),
+                "exe_url": (
+                    f"https://github.com/Flowseal/tg-ws-proxy/releases/download/"
+                    f"{urllib.parse.quote(tag)}/TgWsProxy_windows.exe"
+                    if tag
+                    else "https://github.com/Flowseal/tg-ws-proxy/releases/latest/download/TgWsProxy_windows.exe"
+                ),
                 "exe_name": "TgWsProxy_windows.exe",
             }
         latest_version = str(payload.get("tag_name") or payload.get("name") or "").strip().lstrip("v")
@@ -3912,6 +3955,45 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             "source_url": str(payload.get("zipball_url") or "").strip(),
             "exe_url": str((windows_asset or {}).get("browser_download_url", "")).strip(),
             "exe_name": str((windows_asset or {}).get("name", "")).strip() or "TgWsProxy_windows.exe",
+        }
+
+    def _fetch_latest_release_atom(self, repository: str) -> dict[str, str]:
+        feed_url = f"https://github.com/{repository}/releases.atom"
+        payload = self.github.github_bytes(feed_url, timeout=20, purpose=f"{repository}-release-feed")
+        root = ET.fromstring(payload)
+        namespace = {"atom": "http://www.w3.org/2005/Atom"}
+        entry = root.find("atom:entry", namespace)
+        if entry is None:
+            raise ValueError(f"GitHub release feed is empty: {repository}")
+        link = entry.find("atom:link[@rel='alternate']", namespace)
+        href = str(link.get("href") if link is not None else "")
+        marker = "/releases/tag/"
+        tag = urllib.parse.unquote(href.split(marker, 1)[1]).strip() if marker in href else ""
+        if not tag:
+            title = entry.findtext("atom:title", default="", namespaces=namespace).strip()
+            tag = title.rsplit(" ", 1)[-1].strip()
+        if not tag:
+            raise ValueError(f"GitHub release feed has no tag: {repository}")
+        return {"tag": tag, "latest_version": tag.lstrip("vV")}
+
+    def fetch_latest_zapret2_release(self) -> dict[str, str]:
+        repository = "bol-van/zapret-win-bundle"
+        feed_url = f"https://github.com/{repository}/commits/master.atom"
+        payload = self.github.github_bytes(feed_url, timeout=20, purpose="zapret2-bundle-feed")
+        root = ET.fromstring(payload)
+        namespace = {"atom": "http://www.w3.org/2005/Atom"}
+        entry = root.find("atom:entry", namespace)
+        if entry is None:
+            raise ValueError("Zapret2 bundle feed is empty")
+        link = entry.find("atom:link[@rel='alternate']", namespace)
+        href = str(link.get("href") if link is not None else "")
+        marker = "/commit/"
+        commit = href.split(marker, 1)[1].strip("/") if marker in href else ""
+        if not commit:
+            raise ValueError("Zapret2 bundle feed has no commit")
+        return {
+            "latest_version": commit[:12],
+            "source_url": f"https://codeload.github.com/{repository}/zip/{commit}",
         }
 
     def update_zapret_runtime(self) -> dict[str, str]:
@@ -3987,13 +4069,21 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             shutil.rmtree(temp_root, ignore_errors=True)
 
     def update_zapret2_runtime(self) -> dict[str, str]:
+        release = self.fetch_latest_zapret2_release()
+        latest_version = str(release.get("latest_version") or "").strip()
+        current_version = self.storage._detect_zapret2_version()
+        if latest_version and current_version == latest_version:
+            return {"status": "up-to-date", "version": current_version}
         was_running = self._is_image_running("winws2.exe")
         if was_running:
             self.stop_component("zapret2")
-        runtime_root = self._install_zapret2_archive()
+        runtime_root = self._install_zapret2_archive(
+            archive_url=str(release.get("source_url") or ""),
+            version=latest_version,
+        )
         if was_running:
             self.start_component("zapret2")
-        return {"status": "updated", "version": "master", "path": str(runtime_root)}
+        return {"status": "updated", "version": latest_version or current_version, "path": str(runtime_root)}
 
     def _download_to_file(self, url: str, destination: Path, timeout: int = 60) -> None:
         self.github.github_download(url, destination, timeout=timeout, purpose=f"download:{Path(destination).name}", min_bytes=1024)

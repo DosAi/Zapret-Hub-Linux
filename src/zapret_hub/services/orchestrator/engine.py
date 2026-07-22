@@ -31,6 +31,7 @@ _STATUS_TEXT = {
 _LONG_TUNE_S = 30.0
 _FAIL_THRESHOLD = 3
 _SCAN_INTERVAL_S = 3.0
+_DISCORD_PROBE_INTERVAL_S = 20.0
 _MAX_STEPS = 12
 _EXHAUSTED_COOLDOWN_S = 900.0
 _SYN_SENT_MIN_AGE_HINT = 2  # require repeated fails; SYN_SENT alone is normal
@@ -73,6 +74,7 @@ class OrchestratorEngine:
         self._last_incident_at = 0.0
         self._loop_interval_s = 1.0
         self._last_scan_at = 0.0
+        self._last_discord_probe_at = 0.0
         self._mapper = ServiceMapper()
         self._signals = SignalCollector()
         self._tuner = SmartTuner()
@@ -613,6 +615,25 @@ class OrchestratorEngine:
         samples = self._signals.snapshot_connections(limit=60)
         settings = self.context.settings.get()
         selected = {str(item) for item in (settings.selected_service_ids or [])}
+        now = time.monotonic()
+        if "discord" in selected and (now - self._last_discord_probe_at) >= _DISCORD_PROBE_INTERVAL_S:
+            self._last_discord_probe_at = now
+            discord_probe = self._signals.probe_host_access("discord.com")
+            if discord_probe.ok:
+                self._memory.reset_fail("service:discord")
+            elif self._memory.bump_fail("service:discord") >= 2:
+                self._handle_incident(
+                    {
+                        "domain": "discord.com",
+                        "process": "Discord.exe",
+                        "proto": "tcp",
+                        "remote_port": 443,
+                        "services": ["discord"],
+                        "symptom": classify_failure(discord_probe, domain_in_lists=True),
+                        "selected": list(selected),
+                    }
+                )
+                return
         lists_dirs = self._list_dirs()
         learner = HostlistLearner(Path(self.context.paths.configs_dir))
 
