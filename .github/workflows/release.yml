@@ -84,13 +84,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: release-portable-win-x64
-          path: |
-            release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_x64.zip
-            release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_x64.zip.sha256
-            release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_x64.zip.build_info.json
-            release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_x64.asset.json
-            release_${{ steps.meta.outputs.version }}/mirror-update-assets.example.json
-            release_${{ steps.meta.outputs.version }}/README_RELEASE.txt
+          path: release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_x64.zip
           if-no-files-found: error
 
   portable-arm64:
@@ -149,13 +143,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: release-portable-win-arm64
-          path: |
-            release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_arm64.zip
-            release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_arm64.zip.sha256
-            release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_arm64.zip.build_info.json
-            release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_arm64.asset.json
-            release_${{ steps.meta.outputs.version }}/mirror-update-assets.example.json
-            release_${{ steps.meta.outputs.version }}/README_RELEASE.txt
+          path: release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_arm64.zip
           if-no-files-found: error
 
   installer:
@@ -283,28 +271,12 @@ jobs:
             Write-Host "Staged $name ($([math]::Round($found.Length/1MB,1)) MB)"
           }
 
-          # Mirror digest sidecars from prepare_nuitka_release (sha256 / asset json / example update JSON).
-          Get-ChildItem .\.artifacts -Recurse -File | Where-Object {
-            $_.Name -match '\.(sha256|asset\.json|build_info\.json)$' -or
-            $_.Name -in @('mirror-update-assets.example.json', 'README_RELEASE.txt')
-          } | ForEach-Object {
-            Copy-Item $_.FullName (Join-Path $releaseDir $_.Name) -Force
-            Write-Host "Staged sidecar $($_.Name)"
-          }
-
-          # Always regenerate digest sidecars from the staged zips so mirror JSON matches uploaded bytes.
+          # Digests for mirror/in-app updates: log only (do not attach sidecar files to the GitHub Release).
           foreach ($arch in @('x64', 'arm64')) {
             $zipName = "zapret_hub_${version}_portable_win_${arch}.zip"
             $zipPath = Join-Path $releaseDir $zipName
             $hash = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLowerInvariant()
-            Set-Content -Path (Join-Path $releaseDir "$zipName.sha256") -Value "$hash  $zipName" -Encoding utf8
-            $identity = @{
-              version = $version
-              digest = $hash
-              updated_at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-            } | ConvertTo-Json -Compress
-            Set-Content -Path (Join-Path $releaseDir "$zipName.build_info.json") -Value $identity -Encoding utf8
-            Write-Host "Digest $arch = sha256:$hash"
+            Write-Host "Digest $arch = sha256:$hash (for mirror JSON; not uploaded as a release asset)"
           }
 
       - name: Optional Authenticode signing
@@ -368,7 +340,7 @@ jobs:
           $body >> $env:GITHUB_OUTPUT
           "__ZAPRET_HUB_NOTES__" >> $env:GITHUB_OUTPUT
 
-      - name: Remove legacy standalone uninstaller assets
+      - name: Remove legacy / sidecar release assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -379,7 +351,15 @@ jobs:
             $version = "${{ steps.release_meta.outputs.version }}"
             @(
               "uninstall_zaprethub_${version}_win_x64.exe",
-              "uninstall_zaprethub_${version}_win_arm64.exe"
+              "uninstall_zaprethub_${version}_win_arm64.exe",
+              "README_RELEASE.txt",
+              "mirror-update-assets.example.json",
+              "zapret_hub_${version}_portable_win_x64.zip.sha256",
+              "zapret_hub_${version}_portable_win_x64.zip.build_info.json",
+              "zapret_hub_${version}_portable_win_x64.asset.json",
+              "zapret_hub_${version}_portable_win_arm64.zip.sha256",
+              "zapret_hub_${version}_portable_win_arm64.zip.build_info.json",
+              "zapret_hub_${version}_portable_win_arm64.asset.json"
             ) | ForEach-Object {
               if ($assets -contains $_) {
                 gh release delete-asset $tag $_ --yes
@@ -397,10 +377,5 @@ jobs:
           files: |
             release_${{ steps.release_meta.outputs.version }}/install_zaprethub_${{ steps.release_meta.outputs.version }}_universal.exe
             release_${{ steps.release_meta.outputs.version }}/zapret_hub_${{ steps.release_meta.outputs.version }}_portable_win_x64.zip
-            release_${{ steps.release_meta.outputs.version }}/zapret_hub_${{ steps.release_meta.outputs.version }}_portable_win_x64.zip.sha256
-            release_${{ steps.release_meta.outputs.version }}/zapret_hub_${{ steps.release_meta.outputs.version }}_portable_win_x64.zip.build_info.json
             release_${{ steps.release_meta.outputs.version }}/zapret_hub_${{ steps.release_meta.outputs.version }}_portable_win_arm64.zip
-            release_${{ steps.release_meta.outputs.version }}/zapret_hub_${{ steps.release_meta.outputs.version }}_portable_win_arm64.zip.sha256
-            release_${{ steps.release_meta.outputs.version }}/zapret_hub_${{ steps.release_meta.outputs.version }}_portable_win_arm64.zip.build_info.json
             release_${{ steps.release_meta.outputs.version }}/winget-manifests-${{ steps.release_meta.outputs.version }}.zip
-            release_${{ steps.release_meta.outputs.version }}/README_RELEASE.txt
