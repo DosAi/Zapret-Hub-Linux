@@ -53,7 +53,7 @@ export function ModsPage({
 
   return (
     <div className="relative h-full overflow-hidden">
-      <div ref={scrollerRef} className="scroll-area h-full overflow-auto">
+      <div ref={scrollerRef} className="scroll-area glass-page-scroll h-full overflow-auto">
       <div className="scroll-content px-7 pb-7 pt-[86px]">
         {visibleMods.length === 0 ? (
           <div className="grid h-32 place-items-center rounded-xl border border-dashed border-line-1 text-[12px] text-fg-mute">

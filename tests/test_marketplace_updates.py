@@ -20,6 +20,21 @@ def test_version_compare():
     assert not svc._is_newer("1.0.0", "1.0.1")
 
 
+def test_marketplace_card_reads_nested_latest_version_size() -> None:
+    svc = MarketplaceService.__new__(MarketplaceService)
+    card = svc._normalize_card(
+        {
+            "id": 3,
+            "slug": "sample",
+            "title": "Sample",
+            "latest_version": {"version": "2.1.0", "size": 6_919_188},
+        }
+    )
+    assert card["latestVersionSize"] == 6_919_188
+    version = svc._normalize_version({"id": 4, "version": "2.1.0", "file_size": 6_919_188})
+    assert version["size"] == 6_919_188
+
+
 def test_dismiss_until_newer(tmp_path):
     class Paths:
         data_dir = tmp_path

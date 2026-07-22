@@ -21,6 +21,14 @@ import type { MarketplaceCompatibility, Mod } from "@/bridge/types";
 
 type InstalledView = "zapret" | "zapret2";
 
+function formatFileSize(bytes?: number) {
+  const value = Math.max(0, Number(bytes || 0));
+  if (!value) return "";
+  if (value < 1024) return `${Math.round(value)} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
 function ProjectCover({ url, title }: { url?: string; title: string }) {
   const [failed, setFailed] = useState(false);
   return (
@@ -120,7 +128,10 @@ function SortableLocalCard({
         </div>
       </div>
       <div className="flex shrink-0 flex-col items-end justify-between gap-2 pl-1">
-        <IosToggle on={mod.enabled} onChange={onToggle} />
+        <div className="flex items-center gap-2">
+          {mod.diskSize ? <span className="text-[10px] text-fg-mute">{formatFileSize(mod.diskSize)}</span> : null}
+          <IosToggle on={mod.enabled} onChange={onToggle} />
+        </div>
         <div className="flex flex-wrap items-center justify-end gap-1">
           {canUpdate ? (
             <button
@@ -133,11 +144,11 @@ function SortableLocalCard({
             </button>
           ) : null}
           {canOpenSite ? (
-            <button type="button" onClick={onOpenSite} className="rounded-md px-1.5 py-0.5 text-[10px] text-fg-mute hover:bg-bg-3 hover:text-fg">
+            <button type="button" onClick={onOpenSite} className="rounded-lg border border-line-1 bg-bg-3/70 px-2.5 py-1 text-[10px] text-fg-dim transition-colors hover:border-line-2 hover:bg-bg-3 hover:text-fg">
               {ru ? "На сайте" : "Website"}
             </button>
           ) : null}
-          <button type="button" onClick={onDelete} className="rounded-md px-1.5 py-0.5 text-[10px] text-fg-mute hover:bg-bg-3 hover:text-[var(--err)]">
+          <button type="button" onClick={onDelete} className="rounded-lg border border-line-1 bg-bg-3/70 px-2.5 py-1 text-[10px] text-fg-dim transition-colors hover:border-red-400/50 hover:bg-red-500/10 hover:text-red-300">
             {ru ? "Удалить" : "Delete"}
           </button>
         </div>
@@ -234,7 +245,7 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
 
   return (
     <div className="relative h-full overflow-hidden">
-      <div ref={scrollerRef} className="scroll-area h-full overflow-auto">
+      <div ref={scrollerRef} className="scroll-area glass-page-scroll h-full overflow-auto" style={{ "--glass-header-height": "94px" } as React.CSSProperties}>
       <div className="scroll-content px-6 pb-3 pt-[94px]">
         {list.length === 0 ? (
           <div className="grid h-40 place-content-center justify-items-center gap-3 text-center">

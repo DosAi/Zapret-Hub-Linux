@@ -2752,6 +2752,18 @@ class WebBridge(QObject):
             return stored
         return stored
 
+    @staticmethod
+    def _mod_disk_size(item: Any) -> int:
+        try:
+            root = Path(str(getattr(item, "path", "") or ""))
+            if root.is_file():
+                return int(root.stat().st_size)
+            if root.is_dir():
+                return sum(int(path.stat().st_size) for path in root.rglob("*") if path.is_file())
+        except (OSError, ValueError):
+            pass
+        return 0
+
     def _build_marketplace_mods_payload(self) -> dict[str, list[dict[str, Any]]]:
         """Build only installed-mod data for a lightweight Marketplace refresh."""
         settings = self.context.settings.get()
@@ -2781,6 +2793,7 @@ class WebBridge(QObject):
                 "updateAvailable": bool(update),
                 "latestVersion": str(update.get("latestVersion") or ""),
                 "updateChangelog": str(update.get("changelog") or ""),
+                "diskSize": self._mod_disk_size(item),
             }
 
         mods = []

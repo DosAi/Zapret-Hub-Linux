@@ -54,6 +54,7 @@ export interface Mod {
   updateAvailable?: boolean;
   latestVersion?: string;
   updateChangelog?: string;
+  diskSize?: number;
 }
 
 export type MarketplaceUpdateItem = {
@@ -495,6 +496,7 @@ export interface MarketplaceCard {
   featured: boolean;
   updatedAt: number;
   publishedAt: number;
+  latestVersionSize?: number;
 }
 
 export interface MarketplaceVersion {

@@ -8,6 +8,15 @@ type ScrollState = {
 
 const states = new WeakMap<HTMLElement, ScrollState>();
 
+function resetScroller(scroller: HTMLElement) {
+  const state = states.get(scroller);
+  if (!state) return;
+  if (state.frame !== null) cancelAnimationFrame(state.frame);
+  state.frame = null;
+  state.lastTime = 0;
+  state.target = scroller.scrollTop;
+}
+
 export function useSmoothWheel() {
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
@@ -24,6 +33,7 @@ export function useSmoothWheel() {
 
       event.preventDefault();
       const state = states.get(scroller) ?? { target: scroller.scrollTop, frame: null, lastTime: 0 };
+      state.target = Math.max(0, Math.min(max, state.target));
       if (state.frame === null) {
         state.target = scroller.scrollTop;
         state.lastTime = 0;
@@ -49,7 +59,30 @@ export function useSmoothWheel() {
       state.frame = requestAnimationFrame(animate);
     };
 
+    const observer = new MutationObserver((mutations) => {
+      const scrollers = new Set<HTMLElement>();
+      for (const mutation of mutations) {
+        const parent = mutation.target instanceof Element
+          ? mutation.target.closest<HTMLElement>(".scroll-area")
+          : null;
+        if (parent) scrollers.add(parent);
+      }
+      scrollers.forEach(resetScroller);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      const scroller = target?.closest<HTMLElement>(".scroll-area");
+      if (scroller) resetScroller(scroller);
+    };
+
     document.addEventListener("wheel", onWheel, { passive: false });
-    return () => document.removeEventListener("wheel", onWheel);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => {
+      observer.disconnect();
+      document.removeEventListener("wheel", onWheel);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+    };
   }, []);
 }

@@ -78,21 +78,12 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
 
   const notePowerIntent = (currentState: NonNullable<typeof state>) => {
     const status = currentState.runtime.status;
-    if (status === "on" || status === "starting" || status === "stopping") {
-      keepPowerRef.current = true;
-    }
+    keepPowerRef.current = status === "on" || status === "starting";
   };
 
   const scheduleModeCommit = (nextId: RuntimeId) => {
     const currentState = stateRef.current;
     if (!currentState) return;
-    if (nextId === "goshkow-vpn" && !currentState.ui.hasValidVpnKey) {
-      clearModeTimer();
-      setPreviewMode(null);
-      pendingModeRef.current = null;
-      onConnectVpn?.();
-      return;
-    }
     pendingModeRef.current = nextId;
     clearModeTimer();
     if (nextId === currentState.runtime.active) {
@@ -110,15 +101,14 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
         setPreviewMode(null);
         return;
       }
-      if (target === "goshkow-vpn" && !latest.ui.hasValidVpnKey) {
+      const keepPower = keepPowerRef.current
+        || latest.runtime.status === "on"
+        || latest.runtime.status === "starting";
+      if (target === "goshkow-vpn" && !latest.ui.hasValidVpnKey && keepPower) {
         setPreviewMode(null);
         onConnectVpn?.();
         return;
       }
-      const keepPower = keepPowerRef.current
-        || latest.runtime.status === "on"
-        || latest.runtime.status === "starting"
-        || latest.runtime.status === "stopping";
       patchOptimistic({
         runtime: {
           active: target,
@@ -138,6 +128,13 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
     if (state?.runtime.status === "on") keepPowerRef.current = true;
     if (state?.runtime.status === "off") keepPowerRef.current = false;
   }, [previewMode, state?.runtime.active, state?.runtime.status]);
+  // Tray/context-menu changes bypass the local selector. Once no local action is
+  // pending, mirror the authoritative power state so a later browse cannot
+  // accidentally restore an old "on" intent.
+  useEffect(() => {
+    if (!state || previewMode || pendingPower || pendingModeRef.current) return;
+    keepPowerRef.current = state.runtime.status === "on" || state.runtime.status === "starting";
+  }, [pendingPower, previewMode, state?.runtime.active, state?.runtime.status]);
   useEffect(() => () => {
     clearModeTimer();
   }, []);

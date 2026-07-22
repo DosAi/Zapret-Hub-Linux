@@ -169,7 +169,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
 
   return (
     <div className="relative h-full overflow-hidden">
-      <div ref={scrollerRef} className="scroll-area h-full overflow-auto">
+      <div ref={scrollerRef} className="scroll-area glass-page-scroll h-full overflow-auto">
       <div className="scroll-content px-7 pb-7 pt-[86px]">
         <div className="grid grid-cols-2 gap-4">
           {ORDER.map((id) => {
