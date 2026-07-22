@@ -115,12 +115,6 @@ Zapret, Zapret 2 и VPN запускаться не будут. При этом 
 
 Для **Zapret** он учитывает выбранные сервисы, последовательно проверяет `general`-конфигурации и сохраняет рабочий вариант. Для **Zapret 2** он анализирует доступные стратегии и применяет подходящую. Результат остаётся доступен для ручной корректировки: автоматика помогает начать работу, но не забирает контроль у пользователя.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/services-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/services-light.png">
-  <img alt="Выбор сервисов в Zapret Hub" src="assets/services-dark.png" width="75%">
-</picture>
-
 ## 🛍️ Zapret Marketplace
 
 **Zapret Marketplace** — встроенный каталог дополнений для Zapret и Zapret 2. Больше не нужно вручную искать архивы, определять совместимую версию и раскладывать файлы по папкам.
@@ -139,16 +133,7 @@ Zapret, Zapret 2 и VPN запускаться не будут. При этом 
   <img src="https://img.shields.io/badge/Перейти-в%20Marketplace-e83e75?style=for-the-badge" alt="Перейти в Zapret Marketplace">
 </a>
 
-<br><br>
-
-<img alt="Zapret Marketplace" src="assets/marketplace-preview.png" width="85%">
-
-</div>
-
 Marketplace имеет открытый API и не привязан исключительно к Zapret Hub. Другие GUI-приложения и независимые клиенты тоже могут использовать каталог, получать сведения о проектах и работать с дополнениями. Zapret Hub предлагает нативную интеграцию как самый простой путь, но не ограничивает пользователей одной программой.
-
-> [!TIP]
-> Пример открытого API Marketplace: `https://goshkow.ru/api/marketplace/v1/projects`
 
 ## ✨ Возможности
 
