@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import shutil
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -21,6 +24,17 @@ def _should_skip_path(path: Path, source_dir: Path) -> bool:
     if "docs" in lowered and rel.name.lower() == "readme.md":
         return True
     return False
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _zip_with_root(source_dir: Path, zip_path: Path, root_name: str = "zapret_hub") -> None:
@@ -49,6 +63,31 @@ def _copy_uninstaller(source: Path | None, destination_dir: Path) -> None:
     shutil.copy2(source, destination_dir / "uninstall_zaprethub.exe")
 
 
+def _write_identity_files(portable_dir: Path, *, version: str, digest: str) -> dict[str, str]:
+    """Embed archive SHA256 so the extracted app knows its own build identity."""
+    payload = {
+        "version": str(version),
+        "digest": str(digest).strip().lower().removeprefix("sha256:"),
+        "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+    for path in (
+        portable_dir / "build_info.json",
+        portable_dir / "data" / "app_release_identity.json",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return payload
+
+
+def _clear_identity_files(portable_dir: Path) -> None:
+    for path in (
+        portable_dir / "build_info.json",
+        portable_dir / "data" / "app_release_identity.json",
+    ):
+        if path.exists():
+            path.unlink()
+
+
 def _package_portable(
     *,
     source: Path,
@@ -56,8 +95,19 @@ def _package_portable(
     version: str,
     arch: str,
     uninstaller: Path | None,
-) -> None:
+) -> dict[str, object]:
+    """Build portable zip and record its SHA256 for the mirror + local identity stamp.
+
+    The published digest is SHA256 of the portable zip bytes (same field the app
+    downloads and verifies). A zip cannot contain its own matching SHA256, so the
+    release zip stays free of identity files; ``build_info.json`` /
+    ``app_release_identity.json`` are written next to the zip and into the unpacked
+    portable folder for tooling. Installer and in-app updater embed the verified
+    archive digest into the live install so hotfix checks can compare local vs remote.
+    """
     portable_dir = release_dir / f"zapret_hub_{version}_portable_win_{arch}"
+    zip_name = f"zapret_hub_{version}_portable_win_{arch}.zip"
+    zip_path = release_dir / zip_name
     if portable_dir.exists():
         shutil.rmtree(portable_dir, ignore_errors=True)
     shutil.copytree(source, portable_dir, dirs_exist_ok=True)
@@ -65,7 +115,35 @@ def _package_portable(
     for backup_dir in portable_dir.rglob("tg-ws-proxy.bak.*"):
         if backup_dir.is_dir():
             shutil.rmtree(backup_dir, ignore_errors=True)
-    _zip_with_root(portable_dir, release_dir / f"zapret_hub_{version}_portable_win_{arch}.zip")
+
+    _clear_identity_files(portable_dir)
+    _zip_with_root(portable_dir, zip_path)
+    published_digest = _sha256_file(zip_path)
+
+    identity = _write_identity_files(portable_dir, version=version, digest=published_digest)
+    # Sidecar copy for mirror sync (do not re-zip — that would change the digest).
+    (release_dir / f"{zip_name}.build_info.json").write_text(
+        json.dumps(identity, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (release_dir / f"{zip_name}.sha256").write_text(f"{published_digest}  {zip_name}\n", encoding="utf-8")
+    meta = {
+        "architecture": arch,
+        "name": zip_name,
+        "digest": f"sha256:{published_digest}",
+        "size": zip_path.stat().st_size,
+        "version": version,
+        "note": (
+            "Mirror assets.*.digest MUST equal this sha256. "
+            "Installer/in-app updater write the same digest into the install as build identity."
+        ),
+    }
+    (release_dir / f"zapret_hub_{version}_portable_win_{arch}.asset.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"portable {arch}: {zip_name} sha256={published_digest}")
+    return meta
 
 
 def _parse_args() -> argparse.Namespace:
@@ -116,7 +194,6 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parents[1]
     args = _parse_args()
     version = str(args.version)
     x64_source = Path(args.x64_source).resolve() if args.x64_source else None
@@ -138,7 +215,6 @@ def main() -> None:
     if write_payload:
         if x64_source is None or arm64_source is None:
             raise SystemExit("--write-installer-payload-zips requires both --x64-source and --arm64-source")
-        # Optional local/dev fallback only — slim installer does not embed these.
         payload_dir.mkdir(parents=True, exist_ok=True)
         _zip_with_root(x64_source, payload_dir / "win_x64.zip")
         _zip_with_root(arm64_source, payload_dir / "win_arm64.zip")
@@ -147,8 +223,9 @@ def main() -> None:
 
     release_dir.mkdir(parents=True, exist_ok=True)
 
+    assets: dict[str, object] = {}
     if x64_source is not None:
-        _package_portable(
+        assets["x64"] = _package_portable(
             source=x64_source,
             release_dir=release_dir,
             version=version,
@@ -156,13 +233,33 @@ def main() -> None:
             uninstaller=uninstaller_x64,
         )
     if arm64_source is not None:
-        _package_portable(
+        assets["arm64"] = _package_portable(
             source=arm64_source,
             release_dir=release_dir,
             version=version,
             arch="arm64",
             uninstaller=uninstaller_arm64,
         )
+
+    mirror_snippet = {
+        "product": "Zapret Hub",
+        "version": version,
+        "tag": f"v{version}",
+        "assets": {
+            key: {
+                "name": value["name"],
+                "download_url": f"https://goshkow.com/zapret-hub/{key}",
+                "digest": value["digest"],
+                "size": value["size"],
+            }
+            for key, value in assets.items()
+            if isinstance(value, dict)
+        },
+    }
+    (release_dir / "mirror-update-assets.example.json").write_text(
+        json.dumps(mirror_snippet, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     note = release_dir / "README_RELEASE.txt"
     note.write_text(
@@ -174,7 +271,22 @@ def main() -> None:
         "   matching arch build from https://goshkow.com/zapret-hub/update — it does NOT embed\n"
         "   the portable archives.\n"
         "3) Each portable folder includes arch-matching uninstall_zaprethub.exe.\n"
-        "4) Standalone uninstallers may also be published as separate release assets.\n",
+        "4) Standalone uninstallers may also be published as separate release assets.\n"
+        "\n"
+        "Mirror update JSON (https://goshkow.com/zapret-hub/update)\n"
+        "----------------------------------------------------------\n"
+        "Required fields for same-version hotfix detection:\n"
+        "  - version / tag  (product version, e.g. 3.0.0 — may stay unchanged for hotfixes)\n"
+        "  - assets.x64.digest     = sha256:<portable x64 zip bytes on the mirror>\n"
+        "  - assets.arm64.digest   = sha256:<portable arm64 zip bytes on the mirror>\n"
+        "  - assets.x64.download_url / assets.arm64.download_url\n"
+        "  - assets.x64.size / assets.arm64.size (optional but verified when present)\n"
+        "Optional: assets.installer.digest for the slim setup exe.\n"
+        "\n"
+        "After each hotfix re-upload of the same version, UPDATE the digest values to the new\n"
+        "zip SHA256 (see *.sha256 and mirror-update-assets.example.json in this folder).\n"
+        "The app treats: newer semver OR (same version AND remote digest != local digest)\n"
+        "as an update. Matching digests => no prompt. Do not rely on binary_updated_at.\n",
         encoding="utf-8",
     )
 

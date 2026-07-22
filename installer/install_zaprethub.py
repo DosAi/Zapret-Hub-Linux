@@ -1098,12 +1098,22 @@ class InstallerWorker(QThread):
             _overlay_tree(source_root, self.target_dir, self.target_dir, preserved_names, remove_extra=self.clean_target)
             _installer_log("overlay_done", target_dir=str(self.target_dir))
             if release_identity:
-                identity_dir = self.target_dir / "data"
-                identity_dir.mkdir(parents=True, exist_ok=True)
-                (identity_dir / "app_release_identity.json").write_text(
-                    json.dumps(release_identity, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                identity_dirs = [self.target_dir / "data"]
+                try:
+                    if not (self.target_dir / "portable.flag").exists():
+                        local_app_data = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+                        identity_dirs.append(local_app_data / "Zapret_Hub" / "data")
+                except Exception:
+                    pass
+                for identity_dir in identity_dirs:
+                    try:
+                        identity_dir.mkdir(parents=True, exist_ok=True)
+                        (identity_dir / "app_release_identity.json").write_text(
+                            json.dumps(release_identity, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        continue
                 _installer_log("release_identity_saved", digest=release_identity.get("digest", ""))
 
             self._cleanup_temps()
