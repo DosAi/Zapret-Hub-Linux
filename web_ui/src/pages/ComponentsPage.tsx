@@ -40,12 +40,13 @@ function statusLabel(status: ComponentStatus, t: (key: LocaleKey) => string): st
 export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focusId, onFocusHandled }: { onConfigure?: (id: ComponentId) => void; onReconfigure?: () => void; onConnectVpn?: () => void; focusId?: string | null; onFocusHandled?: () => void }) {
   const state = useAppState();
   const bridge = useBridge();
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const [checkingId, setCheckingId] = useState<ComponentId | null>(null);
   const [updatingId, setUpdatingId] = useState<ComponentId | null>(null);
   const [updateCheck, setUpdateCheck] = useState<ComponentUpdateCheck | null>(null);
   const [dnsOpen, setDnsOpen] = useState(false);
   const [confirmManualOpen, setConfirmManualOpen] = useState(false);
+  const [confirmManualBackend, setConfirmManualBackend] = useState<"zapret" | "zapret2">("zapret");
   const [optimisticDns, setOptimisticDns] = useState<Settings["dns"]["profile"] | null>(null);
   const [optimisticToggle, setOptimisticToggle] = useState<Partial<Record<ComponentId, boolean>>>({});
   const toggleTimers = useRef<Partial<Record<ComponentId, number>>>({});
@@ -133,24 +134,37 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
   const dnsTitle = (id: Settings["dns"]["profile"]) => t(`dns.profile.${id}.title` as LocaleKey);
   const dnsDesc = (id: Settings["dns"]["profile"]) => t(`dns.profile.${id}.desc` as LocaleKey);
   const dhcpAddresses = t("dns.profile.dhcp.addresses");
-  const controlMode = state.orchestrator?.mode ?? state.settings.zapret.controlMode ?? "manual";
-  const isAuto = controlMode === "auto";
+  const controlMode = (id: "zapret" | "zapret2") => id === "zapret2"
+    ? (state.settings.zapret2.controlMode ?? "manual")
+    : (state.settings.zapret.controlMode ?? "manual");
 
-  const setControlMode = (mode: "manual" | "auto") => {
-    if (mode === controlMode) return;
-    if (mode === "manual" && isAuto) {
+  const setControlMode = (backend: "zapret" | "zapret2", mode: "manual" | "auto") => {
+    const current = controlMode(backend);
+    if (mode === current) return;
+    if (mode === "manual" && current === "auto") {
+      setConfirmManualBackend(backend);
       setConfirmManualOpen(true);
       return;
     }
-    applyControlMode(mode);
+    applyControlMode(backend, mode);
   };
 
-  const applyControlMode = (mode: "manual" | "auto") => {
-    patchOptimistic({
+  const applyControlMode = (backend: "zapret" | "zapret2", mode: "manual" | "auto") => {
+    const active = state.runtime.active === backend;
+    patchOptimistic(backend === "zapret2" ? {
+      settings: { zapret2: { ...state.settings.zapret2, controlMode: mode } },
+      ...(active ? { orchestrator: { mode, isAuto: mode === "auto", backend } } : {}),
+    } : {
       settings: { zapret: { ...state.settings.zapret, controlMode: mode } },
-      orchestrator: { mode, isAuto: mode === "auto" },
+      ...(active ? { orchestrator: { mode, isAuto: mode === "auto", backend } } : {}),
     });
-    void bridge.call("orchestrator.setMode", { mode });
+    if (active && powered) {
+      patchOptimistic({
+        runtime: { status: "starting" },
+        components: { [backend]: { status: "starting" } },
+      });
+    }
+    void bridge.call("orchestrator.setMode", { mode, backend });
   };
 
   return (
@@ -191,18 +205,20 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
                     {id === "goshkow-vpn" && <button onClick={onConnectVpn} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.connect")}</button>}
                     {id === "goshkow-vpn" && <button onClick={() => bridge.call("component.open-external", { id })} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.trial")}</button>}
                     {id === "xbox-dns" && <button onClick={() => setDnsOpen((value) => !value)} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.chooseDns")}</button>}
-                    {id === "zapret" && !isAuto && <button onClick={onReconfigure} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.reconfigure")}</button>}
+                    {id === "zapret" && controlMode("zapret") !== "auto" && <button onClick={onReconfigure} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.reconfigure")}</button>}
                     {id === "tg-ws-proxy" && <button onClick={() => bridge.call("tg.connect", undefined)} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.connectTg")}</button>}
                   </div>
                   {(id === "tg-ws-proxy" || id === "xbox-dns") && <IosToggle on={on} onChange={(v) => toggleComponent(id, v)} label={c.name} />}
                 </div>
-                {id === "zapret" && (
+                {(id === "zapret" || id === "zapret2") && (
                   <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-line-1 pt-2.5">
-                    <span className="text-[10px] text-fg-mute">{t("component.mode.hint")}</span>
+                    <span className="text-[10px] text-fg-mute">
+                      {id === "zapret2" ? (locale === "ru" ? "Режим управления Zapret 2" : "Zapret 2 control mode") : t("component.mode.hint")}
+                    </span>
                     <Segmented
                       size="sm"
-                      value={controlMode}
-                      onChange={setControlMode}
+                      value={controlMode(id)}
+                      onChange={(mode) => setControlMode(id, mode)}
                       options={[
                         { value: "auto", label: t("component.mode.auto") },
                         { value: "manual", label: t("component.mode.manual") },
@@ -283,7 +299,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
         onCancel={() => setConfirmManualOpen(false)}
         onConfirm={() => {
           setConfirmManualOpen(false);
-          applyControlMode("manual");
+          applyControlMode(confirmManualBackend, "manual");
         }}
       />
       <ScrollGlassHeader scrollerRef={scrollerRef} className="absolute inset-x-0 top-0 z-20 border-b border-line-1 px-7 pb-4 pt-5">

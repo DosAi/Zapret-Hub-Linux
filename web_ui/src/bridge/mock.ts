@@ -541,7 +541,8 @@ export function createMockBridge(): ZapretHubBridge {
       case "orchestrator.setMode": {
         const p = payload as Commands["orchestrator.setMode"]["in"];
         const mode = p.mode === "auto" ? "auto" : "manual";
-        state.settings.zapret.controlMode = mode;
+        if (p.backend === "zapret2") state.settings.zapret2.controlMode = mode;
+        else state.settings.zapret.controlMode = mode;
         state.orchestrator = {
           ...state.orchestrator,
           mode,
@@ -665,7 +666,7 @@ export function createMockBridge(): ZapretHubBridge {
         const p = payload as Commands["mods.delete"]["in"];
         state.mods = state.mods.filter((x) => x.id !== p.id);
         pushState();
-        return undefined as Commands[K]["out"];
+        return { mods: state.mods, mods2: state.mods2 || [] } as Commands[K]["out"];
       }
       case "logs.clear": {
         const p = payload as Commands["logs.clear"]["in"];

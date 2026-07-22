@@ -3,11 +3,15 @@ from __future__ import annotations
 import base64
 import json
 import re
+import ssl
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any
+
+import certifi
 
 from zapret_hub.services.logging_service import LoggingManager
 from zapret_hub.services.storage import StorageManager
@@ -191,21 +195,58 @@ class GoshkowVpnManager:
         return urllib.parse.urlunparse(parsed._replace(fragment=""))
 
     def _download_subscription(self, url: str) -> tuple[str, dict[str, str]]:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Zapret-Hub/2.0 goshkow-vpn",
-                "Accept": "text/plain, application/octet-stream, */*",
-            },
+        errors: list[str] = []
+        contexts = (
+            ("system", ssl.create_default_context()),
+            ("certifi", ssl.create_default_context(cafile=certifi.where())),
         )
-        try:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(request, timeout=14) as response:
-                raw = response.read()
-                headers = {key.lower(): value for key, value in response.headers.items()}
-        except Exception as error:
-            raise RuntimeError(f"Не удалось загрузить подписку goshkow vpn: {error}") from error
-        return raw.decode("utf-8", errors="ignore"), headers
+        for label, context in contexts:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Zapret-Hub/3.0 goshkow-vpn",
+                    "Accept": "text/plain, application/octet-stream, */*",
+                    "Cache-Control": "no-cache",
+                    "Connection": "close",
+                },
+            )
+            try:
+                # A new HTTPSHandler/context forces a fresh TLS handshake instead of
+                # reusing a stale intermediary chain from a long-running process.
+                opener = urllib.request.build_opener(
+                    urllib.request.ProxyHandler({}),
+                    urllib.request.HTTPSHandler(context=context),
+                )
+                with opener.open(request, timeout=14) as response:
+                    raw = response.read()
+                    headers = {key.lower(): value for key, value in response.headers.items()}
+                if label != "system":
+                    self.logging.log("info", "goshkow VPN certificate fallback succeeded", ssl_path=label)
+                return raw.decode("utf-8", errors="ignore"), headers
+            except Exception as error:
+                errors.append(f"{label}: {error}")
+                if not self._is_certificate_error(error):
+                    break
+                self.logging.log(
+                    "warning",
+                    "goshkow VPN certificate retry",
+                    ssl_path=label,
+                    error=str(error),
+                )
+        detail = "; ".join(errors) or "неизвестная ошибка сети"
+        raise RuntimeError(f"Не удалось загрузить подписку goshkow vpn: {detail}")
+
+    @staticmethod
+    def _is_certificate_error(error: BaseException) -> bool:
+        if isinstance(error, ssl.SSLCertVerificationError):
+            return True
+        if isinstance(error, urllib.error.URLError):
+            reason = getattr(error, "reason", None)
+            if isinstance(reason, ssl.SSLCertVerificationError):
+                return True
+            if isinstance(reason, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(reason).upper():
+                return True
+        return "CERTIFICATE_VERIFY_FAILED" in str(error).upper()
 
     def _parse_subscription(self, text: str) -> list[dict[str, Any]]:
         decoded = self._maybe_decode_base64(text)

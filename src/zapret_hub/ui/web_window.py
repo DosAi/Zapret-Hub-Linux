@@ -306,6 +306,9 @@ class WebBridge(QObject):
         "marketplace.get",
         "marketplace.remove",
         "marketplace.check-updates",
+        "vpn.import-subscription",
+        "mods.delete",
+        "mods2.delete",
     })
 
     def __init__(self, context: Any | None, window: QMainWindow, *, show_onboarding: bool) -> None:
@@ -874,15 +877,30 @@ class WebBridge(QObject):
         normalized = "auto" if str(mode or "").strip().lower() == "auto" else "manual"
         if self.context is None:
             return self._orchestrator_snapshot()
-        selected_backend = str(backend or self.context.settings.get().selected_runtime_mode or "zapret")
+        settings_before = self.context.settings.get()
+        selected_backend = str(backend or settings_before.selected_runtime_mode or "zapret")
+        if selected_backend not in {"zapret", "zapret2"}:
+            selected_backend = "zapret"
+        active_backend = str(settings_before.selected_runtime_mode or "zapret")
+        states = {item.component_id: item for item in self.context.processes.list_states()}
+        component_state = states.get(selected_backend)
+        was_running = bool(component_state and getattr(component_state, "status", "") == "running")
+        should_restart = was_running or (
+            active_backend == selected_backend and self._runtime_is_powered_fast()
+        )
+        if was_running:
+            self.context.processes.stop_component(selected_backend)
         setting_name = "zapret2_control_mode" if selected_backend == "zapret2" else "zapret_control_mode"
         self.context.settings.update(**{setting_name: normalized})
         engine = getattr(self.context, "orchestrator", None)
-        if engine is not None:
+        if engine is not None and active_backend == selected_backend:
             snapshot = engine.set_mode(normalized, backend=selected_backend)
-            snapshot = engine.sync_lifecycle(zapret_active=self._zapret_runtime_active())
         else:
             snapshot = self._orchestrator_snapshot()
+        if should_restart:
+            self.context.processes.start_component(selected_backend)
+        if engine is not None and active_backend == selected_backend:
+            snapshot = engine.sync_lifecycle(zapret_active=self._zapret_runtime_active())
         try:
             self.event.emit("orchestrator.status", json.dumps(snapshot, ensure_ascii=False))
         except Exception:
@@ -1251,7 +1269,14 @@ class WebBridge(QObject):
         if command == "orchestrator.setMode":
             mode = str((payload or {}).get("mode", "manual"))
             backend = str((payload or {}).get("backend", ""))
-            return self._set_orchestrator_mode(mode, backend=backend or None, emit_state=True)
+            threading.Thread(
+                target=self._set_orchestrator_mode,
+                args=(mode,),
+                kwargs={"backend": backend or None, "emit_state": True},
+                daemon=True,
+                name=f"zapret-hub-orchestrator-mode-{backend or 'active'}",
+            ).start()
+            return None
         if command == "orchestrator.bootstrap":
             engine = getattr(self.context, "orchestrator", None)
             youtube = True if not isinstance(payload, dict) else bool(payload.get("youtube", True))
@@ -1298,8 +1323,8 @@ class WebBridge(QObject):
             return asdict(item)
         if command == "mods.delete":
             self.context.mods.remove(str((payload or {}).get("id", "")))
-            self.emit_state()
-            return None
+            self.emit_state(force=True)
+            return self._build_marketplace_mods_payload()
         if command == "mods.reorder":
             ordered = [str(item) for item in ((payload or {}).get("orderedIds") or [])]
             self.context.mods.reorder(ordered)
@@ -1363,8 +1388,8 @@ class WebBridge(QObject):
         if command == "mods2.delete":
             self.context.mods2.remove(str((payload or {}).get("id", "")))
             self._cached_file2_entries = None
-            self.emit_state()
-            return None
+            self.emit_state(force=True)
+            return self._build_marketplace_mods_payload()
         if command == "mods2.reorder":
             ordered = [str(item) for item in ((payload or {}).get("orderedIds") or [])]
             self.context.mods2.reorder(ordered)
@@ -1538,6 +1563,23 @@ class WebBridge(QObject):
 
             threading.Thread(target=_stop, daemon=True, name="zapret-hub-onboarding-cancel").start()
             return None
+        if command == "vpn.import-subscription":
+            url = str((payload or {}).get("url", "") or "").strip()
+            vpn_state = self.context.vpn.import_subscription(url)
+            if str(vpn_state.get("subscription_state", "") or "") != "valid":
+                raise RuntimeError(
+                    str(vpn_state.get("last_error", "") or "Не удалось проверить подписку goshkow VPN.")
+                )
+            self.context.settings.update(
+                goshkow_vpn_subscription_url=str(vpn_state.get("subscription_url", "") or ""),
+                goshkow_vpn_tun_enabled=bool(vpn_state.get("tun_enabled", True)),
+                goshkow_vpn_routing_mode=str(vpn_state.get("routing_mode", "global") or "global"),
+                goshkow_vpn_rules_mode=str(vpn_state.get("rules_mode", "blacklist") or "blacklist"),
+                goshkow_vpn_system_proxy_mode=str(vpn_state.get("system_proxy_mode", "set") or "set"),
+                goshkow_vpn_processes=str(vpn_state.get("processes", "") or ""),
+                goshkow_vpn_processes_exclude_mode=bool(vpn_state.get("processes_exclude_mode", False)),
+            )
+            return {"subscriptionState": "valid"}
         if command == "component.check-update":
             component_id = str((payload or {}).get("id", ""))
             request_id = str((payload or {}).get("requestId", ""))

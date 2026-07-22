@@ -5,6 +5,7 @@ import { useLocale } from "@/hooks/useLocale";
 import { useMarketplaceQueue } from "@/hooks/useMarketplaceQueue";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
+import { ScrollGlassHeader } from "@/components/ui/ScrollGlassHeader";
 import { getBridge } from "@/bridge";
 import type {
   MarketplaceCard,
@@ -827,15 +828,22 @@ export function MarketplacePage({
       const target = pendingRemoval;
       if (!target) return;
       setPendingRemoval(null);
+      const previousMods = state?.mods || [];
+      const previousMods2 = state?.mods2 || [];
+      applyMarketplaceMods(
+        previousMods.filter((mod) => mod.marketplaceSlug !== target.slug),
+        previousMods2.filter((mod) => mod.marketplaceSlug !== target.slug),
+      );
+      queueApi.markUninstalled(target.slug);
       try {
         const result = await bridge.call("marketplace.remove", { slug: target.slug });
         applyMarketplaceMods(result.mods || [], result.mods2 || []);
-        queueApi.markUninstalled(target.slug);
       } catch (err) {
+        applyMarketplaceMods(previousMods, previousMods2);
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [bridge, pendingRemoval, queueApi],
+    [bridge, pendingRemoval, queueApi, state?.mods, state?.mods2],
   );
 
   const compatOptions = useMemo(
@@ -914,7 +922,7 @@ export function MarketplacePage({
             transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
             className="absolute inset-0 flex flex-col"
           >
-            <div className="border-b border-line-1 px-6 pb-3 pt-5">
+            <ScrollGlassHeader scrollerRef={scrollRef} contentKey="marketplace-catalog" className="absolute inset-x-0 top-0 z-30 border-b border-line-1 px-6 pb-3 pt-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <h2 className="text-[15px] font-semibold text-fg">Marketplace</h2>
@@ -1014,9 +1022,10 @@ export function MarketplacePage({
                   />
                 </div>
               </div>
-            </div>
+            </ScrollGlassHeader>
 
-            <div ref={scrollRef} className="scroll-area min-h-0 flex-1 overflow-auto px-6 py-3">
+            <div ref={scrollRef} className="scroll-area h-full overflow-auto">
+              <div className="scroll-content px-6 pb-3 pt-[132px]">
               {error ? (
                 <div className="mb-3 rounded-lg border border-[color-mix(in_srgb,var(--err)_40%,transparent)] bg-[color-mix(in_srgb,var(--err)_8%,transparent)] px-3 py-2 text-[11px] text-[var(--err)]">
                   {error}
@@ -1079,6 +1088,7 @@ export function MarketplacePage({
                   {ru ? `Показано ${projects.length} из ${total}` : `Shown ${projects.length} of ${total}`}
                 </div>
               ) : null}
+              </div>
             </div>
           </motion.div>
         )}

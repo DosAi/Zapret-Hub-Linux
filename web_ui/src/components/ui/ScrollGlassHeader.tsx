@@ -1,16 +1,10 @@
-import { type ReactNode, type RefObject, useEffect, useRef } from "react";
+import { type ReactNode, type RefObject, useLayoutEffect, useRef } from "react";
 
 function sanitizeMirrorClone(root: HTMLElement) {
   root.querySelectorAll<HTMLElement>("*").forEach((node) => {
-    node.style.opacity = "";
-    node.style.transform = "";
-    node.style.filter = "";
-    node.style.visibility = "";
     node.style.pointerEvents = "none";
   });
-  root.style.opacity = "";
-  root.style.transform = "";
-  root.style.filter = "";
+  root.style.pointerEvents = "none";
 }
 
 export function ScrollGlassHeader({
@@ -29,7 +23,7 @@ export function ScrollGlassHeader({
 }) {
   const mirrorRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const scroller = scrollerRef.current;
     const mirror = mirrorRef.current;
     const source = scroller?.querySelector<HTMLElement>(".scroll-content");
@@ -39,6 +33,24 @@ export function ScrollGlassHeader({
     let syncFrame = 0;
     let rebuildTimer = 0;
     let settleTimer = 0;
+
+    const syncAnimatedStyles = () => {
+      if (!clone) return;
+      const sourceNodes = [source, ...source.querySelectorAll<HTMLElement>("*")];
+      const cloneNodes = [clone, ...clone.querySelectorAll<HTMLElement>("*")];
+      if (sourceNodes.length !== cloneNodes.length) {
+        rebuild();
+        return;
+      }
+      sourceNodes.forEach((sourceNode, index) => {
+        const cloneNode = cloneNodes[index];
+        const style = sourceNode.getAttribute("style");
+        if (style === null) cloneNode.removeAttribute("style");
+        else cloneNode.setAttribute("style", style);
+        cloneNode.style.pointerEvents = "none";
+      });
+      clone.classList.add("scroll-header-mirror-content");
+    };
 
     const sync = () => {
       syncFrame = 0;
@@ -55,21 +67,33 @@ export function ScrollGlassHeader({
       clone.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
       sanitizeMirrorClone(clone);
       mirror.replaceChildren(clone);
+      syncAnimatedStyles();
       sync();
     };
     const scheduleRebuild = () => {
-      if (rebuildTimer) window.clearTimeout(rebuildTimer);
-      rebuildTimer = window.setTimeout(rebuild, 48);
+      if (rebuildTimer) return;
+      rebuildTimer = window.setTimeout(rebuild, 0);
       if (settleTimer) window.clearTimeout(settleTimer);
       // Catch content after tab / page enter animations finish.
       settleTimer = window.setTimeout(rebuild, 220);
+    };
+    const scheduleAnimatedSync = () => {
+      if (syncFrame) return;
+      syncFrame = requestAnimationFrame(() => {
+        syncFrame = 0;
+        syncAnimatedStyles();
+        sync();
+      });
     };
 
     rebuild();
     settleTimer = window.setTimeout(rebuild, 220);
     scroller.addEventListener("scroll", scheduleSync, { passive: true });
-    const observer = new MutationObserver(scheduleRebuild);
-    observer.observe(source, { childList: true, subtree: true });
+    const observer = new MutationObserver((mutations) => {
+      if (mutations.some((mutation) => mutation.type === "childList")) scheduleRebuild();
+      else scheduleAnimatedSync();
+    });
+    observer.observe(source, { childList: true, subtree: true, attributes: true, attributeFilter: ["style", "class"] });
     return () => {
       scroller.removeEventListener("scroll", scheduleSync);
       observer.disconnect();
