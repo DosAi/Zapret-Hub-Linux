@@ -122,7 +122,7 @@ Zapret Hub объединяет в одном окне:
 Раздел **Компоненты** предназначен для включения, выключения и настройки встроенных компонентов приложения.
 
 В разделе можно:  
-🔹 Изменить `general` Zapret  
+🔹 Изменить `general` Zapret 
 🔹 Подключить TG-WS-Proxy к Telegram  
 🔹 Настроить и подключить `goshkow vpn`  
 🔹 Скачать последнюю версию Telegram Desktop  
@@ -203,6 +203,7 @@ VPN можно использовать как альтернативу Zapret. 
 |------------|--------|
 | [zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) | **Flowseal** |
 | [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) | **Flowseal** |
+| [zapret2](https://github.com/bol-van/zapret2) | **bol-van** |
 | [zapret](https://github.com/bol-van/zapret-win-bundle) экосистема | **bol-van** |
 
 > [!CAUTION]
