@@ -273,10 +273,7 @@ def run(argv: list[str] | None = None) -> int:
     class _BootstrapBridge(QObject):
         @Slot(object)
         def finish_bootstrap(self, bundle: object) -> None:
-            if os.environ.get("ZAPRET_HUB_LEGACY_UI", "").strip() == "1":
-                from zapret_hub.ui.main_window import MainWindow
-            else:
-                from zapret_hub.ui.web_window import WebMainWindow as MainWindow
+            from zapret_hub.ui.web_window import WebMainWindow
             from zapret_hub.services.backend_worker import BackendWorkerClient
 
             _startup_trace("finish_bootstrap: entered")
@@ -302,10 +299,9 @@ def run(argv: list[str] | None = None) -> int:
             if launch_hidden:
                 startup_show_onboarding = False
             context.backend = None
-            legacy_ui = os.environ.get("ZAPRET_HUB_LEGACY_UI", "").strip() == "1"
             early_window = getattr(app, "_startup_window", None)
             _startup_trace("finish_bootstrap: before MainWindow")
-            if (not legacy_ui) and early_window is not None and hasattr(early_window, "bind_application"):
+            if early_window is not None and hasattr(early_window, "bind_application"):
                 window = early_window
                 window.bind_application(
                     context,
@@ -314,7 +310,7 @@ def run(argv: list[str] | None = None) -> int:
                 )
                 _startup_trace("finish_bootstrap: early shell bound")
             else:
-                window = MainWindow(
+                window = WebMainWindow(
                     context,
                     launch_hidden=launch_hidden,
                     startup_show_onboarding=startup_show_onboarding,
@@ -441,8 +437,7 @@ def run(argv: list[str] | None = None) -> int:
     app._bootstrap_bridge = bootstrap_bridge  # type: ignore[attr-defined]
 
     # Open the real frameless window immediately with a CSS preloader; bootstrap fills it in.
-    use_web_ui = os.environ.get("ZAPRET_HUB_LEGACY_UI", "").strip() != "1"
-    if use_web_ui and not known.autostart_launch:
+    if not known.autostart_launch:
         from zapret_hub.ui.web_window import WebMainWindow
 
         early = WebMainWindow.create_early_shell(app_icon)

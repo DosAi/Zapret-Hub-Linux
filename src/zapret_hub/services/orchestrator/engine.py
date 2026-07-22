@@ -12,7 +12,7 @@ from zapret_hub.services.orchestrator.learner import HostlistLearner
 from zapret_hub.services.orchestrator.mapper import ServiceMapper
 from zapret_hub.services.orchestrator.memory import WorkingMemory
 from zapret_hub.services.orchestrator.signals import SignalCollector, classify_failure
-from zapret_hub.services.orchestrator.tuner import SmartTuner, TunerStep
+from zapret_hub.services.orchestrator.tuner import SmartTuner
 from zapret_hub.services.service_catalog import SERVICE_PRESETS
 from zapret_hub.services.service_rules import SERVICE_RULES
 

@@ -4,7 +4,7 @@ import json
 import ssl
 import time
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Callable, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 

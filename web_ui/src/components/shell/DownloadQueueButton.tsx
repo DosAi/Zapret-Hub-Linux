@@ -202,16 +202,23 @@ export function DownloadQueueButton({
     if (!open || !buttonRef.current) return;
     const update = () => {
       const rect = buttonRef.current!.getBoundingClientRect();
-      const width = 280;
-      const maxHeight = Math.min(280, window.innerHeight - 24);
-      // Escape sidebar overflow/transform: portal + viewport coords to the right of the button.
-      const left = Math.min(Math.max(8, rect.right + 10), window.innerWidth - width - 8);
-      const preferredBottom = Math.max(8, window.innerHeight - rect.bottom);
-      const bottom = Math.min(preferredBottom, window.innerHeight - maxHeight - 8);
+      const inset = 8;
+      const gap = 10;
+      const width = Math.max(180, Math.min(280, window.innerWidth - inset * 2));
+      const maxHeight = Math.max(120, Math.min(280, window.innerHeight - inset * 2));
+      const panelHeight = Math.min(panelRef.current?.offsetHeight || maxHeight, maxHeight);
+      const preferredLeft = rect.right + gap;
+      const fallbackLeft = rect.left - width - gap;
+      const leftCandidate = preferredLeft + width <= window.innerWidth - inset ? preferredLeft : fallbackLeft;
+      const left = Math.min(Math.max(inset, leftCandidate), window.innerWidth - width - inset);
+      const top = Math.min(
+        Math.max(inset, rect.bottom - panelHeight),
+        window.innerHeight - panelHeight - inset,
+      );
       setPanelStyle({
         position: "fixed",
         left,
-        bottom,
+        top,
         width,
         maxHeight,
         zIndex: 5000,

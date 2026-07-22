@@ -1,3 +1,13 @@
+from __future__ import annotations
+
+from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
+import hashlib
+import threading
+import urllib.request
+import zipfile
+
 from zapret_hub.services.marketplace import MarketplaceService
 
 
@@ -51,3 +61,98 @@ def test_dismiss_until_newer(tmp_path):
     }
     dismissed = svc._dismissals.get(row["slug"], "")
     assert svc._is_newer(row["latestVersion"], dismissed)
+
+
+def test_download_queue_completes_download_and_install(monkeypatch, tmp_path: Path) -> None:
+    archive_buffer = BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w") as archive:
+        archive.writestr("general-test.bat", "@echo off\n")
+    payload = archive_buffer.getvalue()
+
+    class Response:
+        status = 200
+        headers = {"Content-Length": str(len(payload))}
+
+        def __init__(self) -> None:
+            self._offset = 0
+
+        def getcode(self) -> int:
+            return self.status
+
+        def read(self, size: int = -1) -> bytes:
+            if self._offset >= len(payload):
+                return b""
+            end = len(payload) if size < 0 else min(len(payload), self._offset + size)
+            chunk = payload[self._offset:end]
+            self._offset = end
+            return chunk
+
+        def close(self) -> None:
+            return None
+
+    class Paths:
+        data_dir = tmp_path / "data"
+        cache_dir = tmp_path / "cache"
+
+    class Logging:
+        def log(self, *_args, **_kwargs) -> None:
+            return None
+
+    class Mods:
+        def __init__(self) -> None:
+            self.imported: list[Path] = []
+
+        def list_installed(self) -> list[object]:
+            return []
+
+        def import_from_path(self, path: str) -> object:
+            imported = Path(path)
+            self.imported.append(imported)
+            installed = tmp_path / "installed" / "market-test"
+            installed.mkdir(parents=True, exist_ok=True)
+            return SimpleNamespace(
+                id="market-test",
+                path=installed,
+                name="Market test",
+                description="",
+                author="",
+                version="1.0.0",
+            )
+
+        def update_metadata(self, *_args, **_kwargs) -> None:
+            return None
+
+    events: list[tuple[str, dict[str, object]]] = []
+    completed = threading.Event()
+
+    def on_event(name: str, event_payload: dict[str, object]) -> None:
+        events.append((name, event_payload))
+        if name == "marketplace.download-progress" and event_payload.get("status") == "done":
+            completed.set()
+
+    mods = Mods()
+    service = MarketplaceService(storage_paths=Paths(), logging=Logging(), mods=mods, on_event=on_event)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(
+        service,
+        "_create_ticket",
+        lambda *_args, **_kwargs: {
+            "filename": "market-test.zip",
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "direct_url": "https://example.test/market-test.zip",
+            "fallback_url": "",
+            "ticket": "ticket-1",
+        },
+    )
+    monkeypatch.setattr(service, "_complete_ticket", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "fetch_latest", lambda *_args, **_kwargs: {"version": "1.0.0", "compatibility": "zapret"})
+    monkeypatch.setattr(service, "get_project", lambda *_args, **_kwargs: {"project": {}})
+
+    queued = service.enqueue_download("market-test", title="Market test", compatibility="zapret")
+
+    assert queued["queued"] is True
+    assert completed.wait(3), events
+    assert mods.imported
+    assert any(name == "marketplace.download-progress" and data.get("status") == "installing" for name, data in events)
+    assert any(name == "marketplace.download-progress" and data.get("status") == "done" for name, data in events)

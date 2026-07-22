@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-import json
 
 from zapret_hub.domain.models import FileRecord
 from zapret_hub.services.settings import SettingsManager
