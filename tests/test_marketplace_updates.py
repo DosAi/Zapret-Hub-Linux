@@ -9,6 +9,8 @@ import time
 import urllib.request
 import zipfile
 
+import pytest
+
 from zapret_hub.services.marketplace import MarketplaceError, MarketplaceService
 
 
@@ -254,6 +256,51 @@ def test_enqueue_rejects_already_installed_marketplace_mod(tmp_path: Path) -> No
     assert result["alreadyInstalled"] is True
     assert result["modId"] == "mod-1"
     assert service.queue_status()["items"] == []
+
+
+def test_enqueue_rejects_download_when_less_than_one_gib_remains(monkeypatch, tmp_path: Path) -> None:
+    class Paths:
+        data_dir = tmp_path / "data"
+        cache_dir = tmp_path / "cache"
+        mods_dir = tmp_path / "mods"
+
+    class Logging:
+        def log(self, *_args, **_kwargs) -> None:
+            return None
+
+    service = MarketplaceService(storage_paths=Paths(), logging=Logging())
+    monkeypatch.setattr(
+        "zapret_hub.services.marketplace.shutil.disk_usage",
+        lambda _path: SimpleNamespace(total=10 * 1024**3, used=9 * 1024**3, free=1024**3 - 1),
+    )
+
+    with pytest.raises(MarketplaceError) as error:
+        service.enqueue_download("market-test")
+
+    assert error.value.code == "insufficient_disk_space"
+    assert service.queue_status()["items"] == []
+
+
+def test_install_space_reserves_one_gib_after_archive_download(monkeypatch, tmp_path: Path) -> None:
+    class Paths:
+        data_dir = tmp_path / "data"
+        cache_dir = tmp_path / "cache"
+        mods_dir = tmp_path / "mods"
+
+    class Logging:
+        def log(self, *_args, **_kwargs) -> None:
+            return None
+
+    service = MarketplaceService(storage_paths=Paths(), logging=Logging())
+    monkeypatch.setattr(
+        "zapret_hub.services.marketplace.shutil.disk_usage",
+        lambda _path: SimpleNamespace(total=10 * 1024**3, used=8 * 1024**3, free=1024**3 + 100),
+    )
+
+    with pytest.raises(MarketplaceError) as error:
+        service._ensure_install_space("zapret", incoming_bytes=101)
+
+    assert error.value.code == "insufficient_disk_space"
 
 
 def test_ticket_http_error_uses_verified_public_download(monkeypatch, tmp_path: Path) -> None:

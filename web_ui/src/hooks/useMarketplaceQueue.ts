@@ -15,9 +15,10 @@ type Store = {
   queue: MarketplaceQueueStatus;
   completedFlash: boolean;
   recentlyInstalled: Set<string>;
+  storageWarning: boolean;
 };
 
-let store: Store = { queue: EMPTY, completedFlash: false, recentlyInstalled: new Set() };
+let store: Store = { queue: EMPTY, completedFlash: false, recentlyInstalled: new Set(), storageWarning: false };
 const listeners = new Set<() => void>();
 let wired = false;
 let flashTimer: number | undefined;
@@ -136,6 +137,9 @@ function ensureWired() {
   bridge.subscribe("marketplace.download-progress", (payload) => {
     const slug = String(payload?.slug || "");
     const status = String(payload?.status || "");
+    if (status === "error" && String(payload?.error || "") === "insufficient_disk_space") {
+      setStore({ storageWarning: true });
+    }
     if (!slug) return;
     const items = [...store.queue.items];
     const idx = items.findIndex((item) => item.slug === slug || (payload.jobId && item.jobId === payload.jobId));
@@ -348,6 +352,9 @@ export function useMarketplaceQueue() {
           items: store.queue.items.filter((entry) => entry.slug !== item.slug),
           pending: store.queue.pending.filter((slug) => slug !== item.slug),
         });
+        if (String(error).includes("insufficient_disk_space")) {
+          setStore({ storageWarning: true });
+        }
         throw error;
       }
     },
@@ -366,6 +373,8 @@ export function useMarketplaceQueue() {
     progress,
     completedFlash: snap.completedFlash,
     recentlyInstalled: snap.recentlyInstalled,
+    storageWarning: snap.storageWarning,
+    clearStorageWarning: () => setStore({ storageWarning: false }),
     cancel,
     pause,
     resume,

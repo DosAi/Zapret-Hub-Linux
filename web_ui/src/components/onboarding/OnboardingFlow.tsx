@@ -59,6 +59,8 @@ export function OnboardingFlow({
   const pickedInitialized = useRef(false);
   const [progress, setProgress] = useState({ current: 0, total: 1, name: "", overallCurrent: 0, overallTotal: 1 });
   const [configuration, setConfiguration] = useState<{ status: "running" | "success" | "error"; name: string }>({ status: "running", name: "" });
+  const stepRef = useRef(step);
+  const openRef = useRef(open);
   const [selectedMode, setSelectedMode] = useState<RuntimeId>(initialMode);
   /** First-run Zapret: Manual (services grid) vs Auto (orchestrator bootstrap). */
   const [setupMode, setSetupMode] = useState<"manual" | "auto">("manual");
@@ -80,9 +82,18 @@ export function OnboardingFlow({
     overallCurrent: value.overallCurrent ?? 1,
     overallTotal: value.overallTotal ?? 1,
   })), [bridge]);
+  stepRef.current = step;
+  openRef.current = open;
   useEffect(() => bridge.subscribe("onboarding.configuration", (result) => {
-    setConfiguration({ status: result.status, name: result.name });
     setGameOpen(false);
+    if (result.status === "success" && openRef.current && stepRef.current === 3) {
+      // The next step already communicates success; skip the redundant technical checkmark.
+      setConfiguration({ status: "success", name: result.name });
+      pauseStatePushes(720);
+      goToStep(setStep, 4);
+      return;
+    }
+    setConfiguration({ status: result.status, name: result.name });
   }), [bridge]);
   useEffect(() => {
     if (open) {

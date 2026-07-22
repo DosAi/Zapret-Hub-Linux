@@ -66,18 +66,18 @@ export function LogsPage({ active = false }: { active?: boolean }) {
           const target = event.currentTarget;
           followTail.current = target.scrollHeight - target.scrollTop - target.clientHeight < 36;
         }}
-        className="scroll-area flex-1 overflow-auto px-6 py-3 font-mono text-[11px] leading-[1.55] text-fg-dim"
+        className="scroll-area min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-6 py-3 font-mono text-[11px] leading-[1.55] text-fg-dim"
       >
         {logs.length === 0 && <div className="grid h-full place-items-center text-[12px] text-fg-mute">{locale === "ru" ? "Логов пока нет" : "No logs yet"}</div>}
         {logs.map((l) => (
-          <div key={l.id} className="flex gap-3">
+          <div key={l.id} className="flex w-full min-w-0 gap-3">
             <span className="w-16 shrink-0 text-fg-mute">{new Date(l.ts).toLocaleTimeString()}</span>
             <span className="w-14 shrink-0 uppercase text-fg-mute">{l.source}</span>
             <span
               className="w-10 shrink-0 uppercase"
               style={{ color: l.level === "error" ? "var(--err)" : l.level === "warn" ? "var(--warn)" : "var(--fg-mute)" }}
             >{l.level}</span>
-            <span className="min-w-0 flex-1 whitespace-pre-wrap text-fg">{l.message}</span>
+            <span className="min-w-0 flex-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-fg">{l.message}</span>
           </div>
         ))}
       </div>

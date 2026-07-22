@@ -2,6 +2,8 @@ import { motion } from "framer-motion";
 import { uiAssetUrl } from "@/lib/assets";
 import { useMarketplaceQueue } from "@/hooks/useMarketplaceQueue";
 import { DownloadQueueButton } from "@/components/shell/DownloadQueueButton";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
+import { useLocale } from "@/hooks/useLocale";
 
 export type NavKey = "quick" | "components" | "marketplace" | "installed" | "mods" | "files" | "logs" | "settings";
 
@@ -33,6 +35,7 @@ const items: { key: NavKey; label: string }[] = [
 
 export function Sidebar({ current, onSelect, labels }: { current: NavKey; onSelect: (k: NavKey) => void; labels: Record<NavKey, string> }) {
   const queue = useMarketplaceQueue();
+  const { locale } = useLocale();
 
   return (
     <nav className="sidebar flex h-full w-[74px] shrink-0 flex-col items-center bg-transparent py-3">
@@ -68,7 +71,7 @@ export function Sidebar({ current, onSelect, labels }: { current: NavKey; onSele
         })}
       </ul>
       <div className="mt-auto flex flex-col items-center">
-        <DownloadQueueButton
+      <DownloadQueueButton
           visible={queue.visible}
           progress={queue.progress}
           completedFlash={queue.completedFlash}
@@ -77,7 +80,18 @@ export function Sidebar({ current, onSelect, labels }: { current: NavKey; onSele
           onPause={(slug, jobId) => void queue.pause(slug, jobId)}
           onResume={(slug, jobId) => void queue.resume(slug, jobId)}
           onReorder={(orderedSlugs) => void queue.reorder(orderedSlugs)}
-        />
+      />
+      <ConfirmModal
+        open={queue.storageWarning}
+        title={locale === "ru" ? "Недостаточно места" : "Not enough disk space"}
+        message={locale === "ru"
+          ? "Для установки модификаций на диске должен оставаться как минимум 1 ГБ свободного места. Освободите место и повторите попытку."
+          : "At least 1 GB of free disk space must remain to install modifications. Free up some space and try again."}
+        confirmLabel={locale === "ru" ? "Понятно" : "OK"}
+        cancelLabel={locale === "ru" ? "Закрыть" : "Close"}
+        onConfirm={queue.clearStorageWarning}
+        onCancel={queue.clearStorageWarning}
+      />
         <a
           href="https://github.com"
           target="_blank"
