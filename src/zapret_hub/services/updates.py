@@ -83,8 +83,8 @@ class UpdatesManager:
         self.logging.log("info", "Update check completed", items=len(updates), app_status=app_status.status)
         return updates
 
-    def fetch_latest_application_release(self) -> dict[str, str]:
-        payload = self._read_release_cache(max_age_seconds=600)
+    def fetch_latest_application_release(self, *, force_refresh: bool = False) -> dict[str, str]:
+        payload = None if force_refresh else self._read_release_cache(max_age_seconds=600)
         using_fresh_cache = payload is not None
         cache_warning = ""
         if payload is None:
@@ -145,13 +145,21 @@ class UpdatesManager:
         asset = self._pick_release_asset(release_payload.get("assets") or [])
         latest_release_stamp = self._release_timestamp(latest, asset)
         installed_stamp = self._installed_build_timestamp()
+        installed_identity = self._installed_release_identity()
+        remote_digest = str(asset.get("digest", "") if asset else "").strip().lower().removeprefix("sha256:")
+        installed_digest = str(installed_identity.get("digest") or "").strip().lower().removeprefix("sha256:")
+        installed_version = str(installed_identity.get("version") or "").strip()
         is_newer_version = self._version_key(latest_version) > self._version_key(__version__)
-        is_same_version_hotfix = (
-            self._version_key(latest_version) == self._version_key(__version__)
-            and latest_release_stamp is not None
-            and installed_stamp is not None
-            and latest_release_stamp.timestamp() > installed_stamp.timestamp() + 300
-        )
+        same_version = self._version_key(latest_version) == self._version_key(__version__)
+        if same_version and installed_version == latest_version and installed_digest and remote_digest:
+            is_same_version_hotfix = installed_digest != remote_digest
+        else:
+            is_same_version_hotfix = (
+                same_version
+                and latest_release_stamp is not None
+                and installed_stamp is not None
+                and latest_release_stamp.timestamp() > installed_stamp.timestamp() + 300
+            )
         status = "available" if is_newer_version or is_same_version_hotfix else "up-to-date"
         newer_releases = [
             {
@@ -177,6 +185,7 @@ class UpdatesManager:
             "is_hotfix": bool(is_same_version_hotfix),
             "release_updated_at": latest_release_stamp.isoformat() if latest_release_stamp else "",
             "installed_build_at": installed_stamp.isoformat() if installed_stamp else "",
+            "installed_build_digest": installed_digest,
             "releases": newer_releases,
             "using_cache": "1" if using_cache else "",
             "cache_warning": cache_warning,
@@ -392,6 +401,16 @@ class UpdatesManager:
                 continue
         return max(stamps) if stamps else None
 
+    def _installed_release_identity(self) -> dict[str, str]:
+        try:
+            path = self.storage.paths.data_dir / "app_release_identity.json"
+            payload = self.storage.read_json(path, default={})
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {str(key): str(value) for key, value in payload.items() if value is not None}
+
     def _parse_github_datetime(self, value: str) -> datetime | None:
         text = str(value or "").strip()
         if not text:
@@ -441,6 +460,8 @@ class UpdatesManager:
             "extract_root": str(payload_root),
             "launch_exe": str(launch_exe),
             "version": str(release_info.get("latest_version", "")),
+            "asset_digest": str(release_info.get("asset_digest", "")),
+            "release_updated_at": str(release_info.get("release_updated_at", "")),
         }
 
     def _find_payload_exe(self, root: Path) -> Path | None:
@@ -480,6 +501,14 @@ class UpdatesManager:
         script_path = script_root / f"apply_update_{int(datetime.utcnow().timestamp() * 1000)}.ps1"
         launcher_path = script_root / f"apply_update_{int(datetime.utcnow().timestamp() * 1000)}.cmd"
         log_path = script_root / f"apply_update_{int(datetime.utcnow().timestamp() * 1000)}.log"
+        identity_json = json.dumps(
+            {
+                "version": str(prepared_update.get("version") or ""),
+                "digest": str(prepared_update.get("asset_digest") or "").removeprefix("sha256:"),
+                "updated_at": str(prepared_update.get("release_updated_at") or ""),
+            },
+            ensure_ascii=False,
+        )
 
         script = textwrap.dedent(
             f"""
@@ -638,6 +667,11 @@ class UpdatesManager:
               Add-UpdateLog 'standalone validation failed, aborting relaunch to avoid broken install'
               exit 2
             }}
+
+            $identityDir = Join-Path $dst 'data'
+            New-Item -ItemType Directory -Path $identityDir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $identityDir 'app_release_identity.json') -Value '{identity_json.replace("'", "''")}' -Encoding UTF8
+            Add-UpdateLog 'installed release identity saved'
 
             Start-Sleep -Milliseconds 400
             $launch = Join-Path $dst 'zapret_hub.exe'

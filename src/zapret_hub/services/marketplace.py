@@ -276,6 +276,22 @@ class MarketplaceService:
                     except Exception as error:
                         self._log("warning", "Failed to replace marketplace mod", slug=slug, error=str(error))
 
+    def remove_installed(self, slug: str) -> dict[str, Any]:
+        slug = str(slug or "").strip()
+        if not slug:
+            raise MarketplaceError("invalid_slug", "Empty slug")
+        removed: list[str] = []
+        for manager in (self.mods, self.mods2):
+            if manager is None:
+                continue
+            for item in list(manager.list_installed()):
+                if str(getattr(item, "marketplace_slug", "") or "").strip() != slug:
+                    continue
+                manager.remove(item.id)
+                removed.append(str(item.id))
+        self.clear_update(slug)
+        return {"ok": True, "slug": slug, "removed": removed}
+
     def device_id(self) -> str:
         return self._device_id
 
@@ -1043,7 +1059,7 @@ class MarketplaceService:
             entry = self.mods2.import_from_path(zip_path)
             local_cover = self._cache_cover_image(Path(entry.path), icon_url)
             try:
-                self.mods2.update_metadata(
+                entry = self.mods2.update_metadata(
                     entry.id,
                     name=title.strip() or entry.name,
                     description=summary.strip() or entry.description,
@@ -1053,15 +1069,17 @@ class MarketplaceService:
                     marketplace_slug=slug,
                     source_url=project_url,
                 )
-            except Exception:
-                pass
+                self._verify_installed_entry(self.mods2, entry.id, slug)
+            except Exception as error:
+                self._rollback_failed_import(self.mods2, entry.id)
+                raise MarketplaceError("install_failed", f"Не удалось зарегистрировать модификацию: {error}") from error
             return str(entry.id)
         if self.mods is None:
             raise MarketplaceError("no_mods", "Mods manager unavailable")
         entry = self.mods.import_from_path(str(zip_path))
         local_cover = self._cache_cover_image(Path(entry.path), icon_url)
         try:
-            self.mods.update_metadata(
+            entry = self.mods.update_metadata(
                 entry.id,
                 name=title.strip() or entry.name,
                 description=summary.strip() or entry.description,
@@ -1071,9 +1089,27 @@ class MarketplaceService:
                 marketplace_slug=slug,
                 source_url=project_url,
             )
-        except Exception:
-            pass
+            self._verify_installed_entry(self.mods, entry.id, slug)
+        except Exception as error:
+            self._rollback_failed_import(self.mods, entry.id)
+            raise MarketplaceError("install_failed", f"Не удалось зарегистрировать модификацию: {error}") from error
         return str(entry.id)
+
+    @staticmethod
+    def _verify_installed_entry(manager: Any, mod_id: str, slug: str) -> None:
+        saved = next((item for item in manager.list_installed() if str(item.id) == str(mod_id)), None)
+        if saved is None:
+            raise RuntimeError("модификация отсутствует в реестре установленных")
+        if str(getattr(saved, "marketplace_slug", "") or "").strip() != str(slug or "").strip():
+            raise RuntimeError("не сохранена связь с Marketplace")
+        if not Path(str(getattr(saved, "path", "") or "")).exists():
+            raise RuntimeError("папка модификации не создана")
+
+    def _rollback_failed_import(self, manager: Any, mod_id: str) -> None:
+        try:
+            manager.remove(mod_id)
+        except Exception as rollback_error:
+            self._log("warning", "Failed to rollback Marketplace import", mod_id=mod_id, error=str(rollback_error))
 
     def _cache_cover_image(self, mod_path: Path, icon_url: str) -> str:
         """Download author-uploaded cover into the mod folder; return file:// URI when possible."""

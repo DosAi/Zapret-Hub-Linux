@@ -767,6 +767,16 @@ export function createMockBridge(): ZapretHubBridge {
         pumpMockDownloads();
         return { queued: true, slug, jobId: job.jobId, pending: mockDlQueue.map((j) => j.slug) } as Commands[K]["out"];
       }
+      case "marketplace.remove": {
+        const slug = String((payload as Commands["marketplace.remove"]["in"])?.slug || "");
+        const removed = [...state.mods, ...(state.mods2 || [])]
+          .filter((mod) => mod.marketplaceSlug === slug)
+          .map((mod) => mod.id);
+        state.mods = state.mods.filter((mod) => mod.marketplaceSlug !== slug);
+        state.mods2 = (state.mods2 || []).filter((mod) => mod.marketplaceSlug !== slug);
+        pushState();
+        return { ok: true, slug, removed } as Commands[K]["out"];
+      }
       case "marketplace.queue":
         return mockQueueSnapshot() as Commands[K]["out"];
       case "marketplace.cancel": {

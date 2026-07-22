@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from zapret_hub.services.updates import UpdatesManager
 
 
@@ -83,6 +85,49 @@ def test_version_compare_available_and_uptodate(monkeypatch) -> None:
     monkeypatch.setattr("zapret_hub.services.updates.__version__", "9.9.9")
     status2 = UpdatesManager._build_application_release_status(mgr, MIRROR_FIXTURE)
     assert status2["status"] == "up-to-date"
+
+
+def test_same_version_hotfix_uses_archive_digest(monkeypatch) -> None:
+    mgr = UpdatesManager.__new__(UpdatesManager)
+    mgr.REPO_URL = UpdatesManager.REPO_URL
+    monkeypatch.setattr("zapret_hub.services.updates.__version__", "2.1.2")
+    monkeypatch.setattr(
+        UpdatesManager,
+        "_installed_build_timestamp",
+        lambda self: datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        UpdatesManager,
+        "_installed_release_identity",
+        lambda self: {"version": "2.1.2", "digest": "old-digest"},
+    )
+
+    status = UpdatesManager._build_application_release_status(mgr, MIRROR_FIXTURE)
+
+    assert status["status"] == "available"
+    assert status["is_hotfix"] is True
+    assert status["asset_digest"].endswith("bbb")
+
+
+def test_same_version_same_digest_is_up_to_date(monkeypatch) -> None:
+    mgr = UpdatesManager.__new__(UpdatesManager)
+    mgr.REPO_URL = UpdatesManager.REPO_URL
+    monkeypatch.setattr("zapret_hub.services.updates.__version__", "2.1.2")
+    monkeypatch.setattr(
+        UpdatesManager,
+        "_installed_build_timestamp",
+        lambda self: datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        UpdatesManager,
+        "_installed_release_identity",
+        lambda self: {"version": "2.1.2", "digest": "bbb"},
+    )
+
+    status = UpdatesManager._build_application_release_status(mgr, MIRROR_FIXTURE)
+
+    assert status["status"] == "up-to-date"
+    assert status["is_hotfix"] is False
 
 
 def test_find_payload_exe_accepts_title_case(tmp_path) -> None:

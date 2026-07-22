@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useAppState, useBridge } from "@/hooks/useBridgeState";
+import { refreshAppState, useAppState, useBridge } from "@/hooks/useBridgeState";
 import { useLocale } from "@/hooks/useLocale";
 import { useMarketplaceQueue } from "@/hooks/useMarketplaceQueue";
 import type {
@@ -42,7 +42,7 @@ function CompatPill({ value }: { value: MarketplaceCompatibility }) {
 function Stat({ icon, value }: { icon: "dl" | "heart" | "bookmark"; value: string | number }) {
   const paths = {
     dl: "M12 3v12m0 0 4-4m-4 4-4-4M5 19h14",
-    heart: "M12 20s-7-4.5-7-9.2C5 7.5 7.5 5.5 10 5.5c1.4 0 2.5.7 3 1.7.5-1 1.6-1.7 3-1.7 2.5 0 5 2 5 5.3C19 15.5 12 20 12 20z",
+    heart: "M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78Z",
     bookmark: "M7 4h10v16l-5-3-5 3V4z",
   };
   return (
@@ -182,6 +182,7 @@ function CatalogCard({
   installed,
   onOpen,
   onDownload,
+  onRemove,
   onCancel,
   onPause,
   onResume,
@@ -192,6 +193,7 @@ function CatalogCard({
   installed: boolean;
   onOpen: () => void;
   onDownload: () => void;
+  onRemove: () => void;
   onCancel: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -258,10 +260,10 @@ function CatalogCard({
           {installed ? (
             <button
               type="button"
-              disabled
-              className="rounded-lg border border-line-1 bg-bg-3/70 px-3 py-1 text-[11px] text-fg-mute opacity-80"
+              onClick={onRemove}
+              className="rounded-lg border border-line-1 bg-bg-3/70 px-3 py-1 text-[11px] text-fg-dim transition-colors hover:border-red-400/50 hover:bg-red-500/10 hover:text-red-300"
             >
-              {ru ? "Установлено" : "Installed"}
+              {ru ? "Удалить" : "Remove"}
             </button>
           ) : (
             <button
@@ -414,6 +416,7 @@ function DetailView({
   installed,
   onBack,
   onDownload,
+  onRemove,
   onCancel,
   onPause,
   onResume,
@@ -425,6 +428,7 @@ function DetailView({
   installed: boolean;
   onBack: () => void;
   onDownload: () => void;
+  onRemove: () => void;
   onCancel: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -463,10 +467,10 @@ function DetailView({
             {installed ? (
               <button
                 type="button"
-                disabled
-                className="rounded-[10px] border border-line-1 bg-bg-3/70 px-3 py-2 text-[12px] text-fg-mute"
+                onClick={onRemove}
+                className="rounded-[10px] border border-line-1 bg-bg-3/70 px-3 py-2 text-[12px] text-fg-dim transition-colors hover:border-red-400/50 hover:bg-red-500/10 hover:text-red-300"
               >
-                {ru ? "Установлено" : "Installed"}
+                {ru ? "Удалить" : "Remove"}
               </button>
             ) : (
               <div className="flex items-center gap-1">
@@ -768,6 +772,22 @@ export function MarketplacePage({
     return slugs;
   }, [state?.mods, state?.mods2]);
 
+  const removeInstalled = useCallback(
+    async (slug: string, title: string) => {
+      const message = ru
+        ? `Удалить модификацию «${title}»?`
+        : `Remove the “${title}” modification?`;
+      if (!window.confirm(message)) return;
+      try {
+        await bridge.call("marketplace.remove", { slug });
+        await refreshAppState();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [bridge, ru],
+  );
+
   const compatOptions = useMemo(
     () => [
       { value: "" as CompatFilter, label: ru ? "Все" : "All" },
@@ -816,6 +836,7 @@ export function MarketplacePage({
                     projectUrl: detail.projectUrl,
                   })
                 }
+                onRemove={() => void removeInstalled(detail.slug, detail.title)}
                 onCancel={() => {
                   const item = queueApi.bySlug.get(detail.slug);
                   void queueApi.cancel(detail.slug, item?.jobId);
@@ -951,6 +972,7 @@ export function MarketplacePage({
                         projectUrl: item.projectUrl,
                       })
                     }
+                    onRemove={() => void removeInstalled(item.slug, item.title)}
                     onCancel={() => {
                       const qItem = queueApi.bySlug.get(item.slug);
                       void queueApi.cancel(item.slug, qItem?.jobId);

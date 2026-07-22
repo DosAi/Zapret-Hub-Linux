@@ -285,6 +285,7 @@ class WebBridge(QObject):
         "files2.create",
         "files2.rename",
         "marketplace.download",
+        "marketplace.remove",
         "marketplace.open-url",
         "marketplace.queue",
         "marketplace.cancel",
@@ -495,7 +496,7 @@ class WebBridge(QObject):
 
         def worker() -> None:
             try:
-                release = self.context.updates.fetch_latest_application_release()
+                release = self.context.updates.fetch_latest_application_release(force_refresh=manual)
             except Exception as error:
                 try:
                     self.context.logging.log("error", "App update check failed", error=str(error))
@@ -573,7 +574,7 @@ class WebBridge(QObject):
         if not release.get("asset_url"):
             # Refresh metadata once before failing.
             try:
-                fresh = self.context.updates.fetch_latest_application_release()
+                fresh = self.context.updates.fetch_latest_application_release(force_refresh=True)
                 if str(fresh.get("status")) == "available" and fresh.get("asset_url"):
                     release = {str(k): str(v) for k, v in fresh.items() if not isinstance(v, (list, dict))}
                     self._pending_app_release = dict(release)
@@ -1494,6 +1495,11 @@ class WebBridge(QObject):
                     kind="info",
                     toast_id=f"mp-queue-{result.get('slug')}",
                 )
+            return result
+        if command == "marketplace.remove":
+            slug = str((payload or {}).get("slug") or "")
+            result = self.context.marketplace.remove_installed(slug)
+            self.emit_state(force=True)
             return result
         if command == "marketplace.queue":
             return self.context.marketplace.queue_status()

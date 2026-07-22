@@ -288,6 +288,7 @@ export type Commands = {
     };
     out: { queued: boolean; slug: string; jobId?: string; pending: string[]; alreadyQueued?: boolean };
   };
+  "marketplace.remove": { in: { slug: string }; out: { ok: boolean; slug: string; removed: string[] } };
   "marketplace.queue": { in: void; out: MarketplaceQueueStatus };
   "marketplace.cancel": { in: { slug?: string; jobId?: string }; out: MarketplaceQueueStatus };
   "marketplace.pause": { in: { slug?: string; jobId?: string }; out: MarketplaceQueueStatus };

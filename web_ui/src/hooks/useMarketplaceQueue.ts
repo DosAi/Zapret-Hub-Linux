@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { getBridge } from "@/bridge";
 import type { MarketplaceQueueItem, MarketplaceQueueStatus } from "@/bridge/types";
+import { refreshAppState } from "@/hooks/useBridgeState";
 
 const EMPTY: MarketplaceQueueStatus = {
   busy: false,
@@ -116,6 +117,7 @@ function ensureWired() {
     };
     if (status === "done" || status === "error" || status === "cancelled") {
       if (idx >= 0) items.splice(idx, 1);
+      if (status === "done") void refreshAppState().catch(() => undefined);
     } else if (idx >= 0) {
       items[idx] = { ...items[idx], ...nextItem };
     } else {

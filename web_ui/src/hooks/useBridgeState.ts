@@ -471,6 +471,11 @@ export function useAppState(): AppState | null {
   if (!baseState) return null;
   return mergeDisplayed(baseState, optimistic);
 }
+export async function refreshAppState(): Promise<AppState | null> {
+  const next = await getBridge().call("state.get", undefined);
+  if (next) setBaseState(next, true);
+  return next;
+}
 
 export function useBridge() {
   return getBridge();
@@ -524,9 +529,4 @@ export function refreshLogs() {
       logsGetSupported = false;
       void viaFullState();
     });
-}
-
-/** @deprecated Prefer refreshLogs — full state.get rebuilds hitch the whole UI. */
-export function refreshAppState() {
-  refreshLogs();
 }

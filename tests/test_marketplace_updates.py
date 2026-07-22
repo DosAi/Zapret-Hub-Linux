@@ -101,26 +101,36 @@ def test_download_queue_completes_download_and_install(monkeypatch, tmp_path: Pa
     class Mods:
         def __init__(self) -> None:
             self.imported: list[Path] = []
+            self.installed: list[SimpleNamespace] = []
 
         def list_installed(self) -> list[object]:
-            return []
+            return list(self.installed)
 
         def import_from_path(self, path: str) -> object:
             imported = Path(path)
             self.imported.append(imported)
             installed = tmp_path / "installed" / "market-test"
             installed.mkdir(parents=True, exist_ok=True)
-            return SimpleNamespace(
+            entry = SimpleNamespace(
                 id="market-test",
                 path=installed,
                 name="Market test",
                 description="",
                 author="",
                 version="1.0.0",
+                marketplace_slug="",
             )
+            self.installed.append(entry)
+            return entry
 
-        def update_metadata(self, *_args, **_kwargs) -> None:
-            return None
+        def update_metadata(self, mod_id: str, **metadata) -> object:
+            entry = next(item for item in self.installed if item.id == mod_id)
+            for key, value in metadata.items():
+                setattr(entry, key, value)
+            return entry
+
+        def remove(self, mod_id: str) -> None:
+            self.installed = [item for item in self.installed if item.id != mod_id]
 
     events: list[tuple[str, dict[str, object]]] = []
     completed = threading.Event()
@@ -154,5 +164,35 @@ def test_download_queue_completes_download_and_install(monkeypatch, tmp_path: Pa
     assert queued["queued"] is True
     assert completed.wait(3), events
     assert mods.imported
+    assert mods.installed[0].marketplace_slug == "market-test"
+    assert mods.installed[0].path.exists()
     assert any(name == "marketplace.download-progress" and data.get("status") == "installing" for name, data in events)
     assert any(name == "marketplace.download-progress" and data.get("status") == "done" for name, data in events)
+
+
+def test_remove_installed_marketplace_mod(tmp_path: Path) -> None:
+    class Paths:
+        data_dir = tmp_path / "data"
+        cache_dir = tmp_path / "cache"
+
+    class Logging:
+        def log(self, *_args, **_kwargs) -> None:
+            return None
+
+    class Mods:
+        def __init__(self) -> None:
+            self.installed = [SimpleNamespace(id="mod-1", marketplace_slug="market-test")]
+
+        def list_installed(self) -> list[object]:
+            return list(self.installed)
+
+        def remove(self, mod_id: str) -> None:
+            self.installed = [item for item in self.installed if item.id != mod_id]
+
+    mods = Mods()
+    service = MarketplaceService(storage_paths=Paths(), logging=Logging(), mods=mods)
+
+    result = service.remove_installed("market-test")
+
+    assert result == {"ok": True, "slug": "market-test", "removed": ["mod-1"]}
+    assert mods.installed == []
