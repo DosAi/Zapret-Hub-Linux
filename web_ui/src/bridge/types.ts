@@ -360,6 +360,7 @@ export type Events = {
     latestVersion: string;
     changelog: string;
     htmlUrl: string;
+    isHotfix?: boolean;
     demo?: boolean;
   };
   "vpn.setup-required": {

@@ -547,6 +547,7 @@ class WebBridge(QObject):
                 "latestVersion": latest,
                 "changelog": str(release.get("body") or ""),
                 "htmlUrl": str(release.get("html_url") or ""),
+                "isHotfix": bool(release.get("is_hotfix")),
                 "demo": False,
             }
             try:

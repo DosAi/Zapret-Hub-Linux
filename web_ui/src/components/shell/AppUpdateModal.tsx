@@ -9,6 +9,7 @@ export type AppUpdatePrompt = {
   latestVersion: string;
   changelog: string;
   htmlUrl: string;
+  isHotfix?: boolean;
   demo?: boolean;
 };
 
@@ -72,14 +73,22 @@ export function AppUpdateModal({
             className="flex w-[520px] max-w-[92%] flex-col overflow-hidden rounded-[16px] border border-line-2 bg-bg-2 shadow-[0_18px_42px_-20px_rgba(0,0,0,0.75)]"
           >
             <header className="flex h-12 items-center justify-between border-b border-line-1 px-4">
-              <div className="text-[13px] font-semibold text-fg">{ru ? "Доступно обновление" : "Update available"}</div>
+              <div className="text-[13px] font-semibold text-fg">
+                {prompt.isHotfix
+                  ? (ru ? "Обнаружен hotfix" : "Hotfix available")
+                  : (ru ? "Доступно обновление" : "Update available")}
+              </div>
               <button type="button" disabled={busy} onClick={onClose} className="grid h-7 w-7 place-items-center rounded-[8px] text-fg-dim hover:bg-bg-3 hover:text-fg disabled:opacity-40">×</button>
             </header>
             <div className="space-y-3 px-4 py-3">
               <p className="whitespace-pre-line text-[12px] leading-relaxed text-fg-dim">
-                {ru
-                  ? `Вышла новая версия Zapret Hub.\nТекущая: ${prompt.currentVersion} · Новая: ${prompt.latestVersion}`
-                  : `A new Zapret Hub version is available.\nCurrent: ${prompt.currentVersion} · New: ${prompt.latestVersion}`}
+                {prompt.isHotfix
+                  ? (ru
+                    ? `Для Zapret Hub ${prompt.currentVersion} найден hotfix.\nHotfix — необязательное обновление, но оно может содержать важные исправления, поэтому настоятельно рекомендуем обновиться.`
+                    : `A hotfix is available for Zapret Hub ${prompt.currentVersion}.\nA hotfix is optional, but it may contain important fixes, so updating is strongly recommended.`)
+                  : (ru
+                    ? `Вышла новая версия Zapret Hub.\nТекущая: ${prompt.currentVersion} · Новая: ${prompt.latestVersion}`
+                    : `A new Zapret Hub version is available.\nCurrent: ${prompt.currentVersion} · New: ${prompt.latestVersion}`)}
               </p>
               <MarkdownContent className="max-h-[180px] overflow-y-auto rounded-[12px] border border-line-1 bg-bg-1 p-3 text-[11px] leading-relaxed text-fg-dim">
                 {prompt.changelog || (ru ? "Список изменений недоступен." : "Changelog is unavailable.")}
