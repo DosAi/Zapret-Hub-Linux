@@ -14,6 +14,7 @@ import { useAppState, useBridge, patchOptimistic } from "@/hooks/useBridgeState"
 import { useLocale } from "@/hooks/useLocale";
 import { Segmented } from "@/components/ui/Segmented";
 import { IosToggle } from "@/components/ui/IosToggle";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import type { MarketplaceCompatibility, Mod } from "@/bridge/types";
 
 type InstalledView = "zapret" | "zapret2";
@@ -21,7 +22,7 @@ type InstalledView = "zapret" | "zapret2";
 function ProjectCover({ url, title }: { url?: string; title: string }) {
   const [failed, setFailed] = useState(false);
   return (
-    <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-[12px] border border-line-1 bg-bg-2">
+    <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-[10px] border border-line-1 bg-bg-2">
       {url && !failed ? (
         <img
           src={url}
@@ -155,6 +156,7 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const [view, setView] = useState<InstalledView>("zapret");
   const [queued, setQueued] = useState<Set<string>>(new Set());
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string; prefix: "mods" | "mods2" } | null>(null);
 
   useEffect(() => {
     const off = getBridge().subscribe("marketplace.download-progress", (payload) => {
@@ -288,8 +290,7 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
                       if (mod.sourceUrl) void bridge.call("marketplace.open-url", { url: mod.sourceUrl });
                     }}
                     onDelete={() => {
-                      if (!window.confirm(ru ? `Удалить «${mod.name}»?` : `Delete “${mod.name}”?`)) return;
-                      void bridge.call(`${prefix}.delete`, { id: mod.id });
+                      setPendingDelete({ id: mod.id, name: mod.name, prefix });
                     }}
                   />
                 ))}
@@ -298,6 +299,19 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
           </DndContext>
         )}
       </div>
+      <ConfirmModal
+        open={Boolean(pendingDelete)}
+        title={ru ? "Удаление модификации" : "Remove modification"}
+        message={pendingDelete ? (ru ? `Вы действительно хотите удалить «${pendingDelete.name}»?` : `Do you really want to remove “${pendingDelete.name}”?`) : ""}
+        confirmLabel={ru ? "Удалить" : "Remove"}
+        cancelLabel={ru ? "Отмена" : "Cancel"}
+        onConfirm={() => {
+          const target = pendingDelete;
+          setPendingDelete(null);
+          if (target) void bridge.call(`${target.prefix}.delete`, { id: target.id });
+        }}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }

@@ -108,6 +108,7 @@ export function SettingsModal({
   const [tabDirection, setTabDirection] = useState(1);
   const [draft, setDraft] = useState<Partial<Settings> & { locale?: "ru" | "en"; modeOrder?: RuntimeId[] }>({});
   const [confirmManualOpen, setConfirmManualOpen] = useState(false);
+  const [confirmManualBackend, setConfirmManualBackend] = useState<"zapret" | "zapret2">("zapret");
   const [surfOpen, setSurfOpen] = useState(false);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -350,6 +351,7 @@ export function SettingsModal({
                   const current = (settings.zapret.controlMode ?? state.orchestrator?.mode ?? "manual") as "manual" | "auto";
                   if (mode === current) return;
                   if (mode === "manual" && current === "auto") {
+                    setConfirmManualBackend("zapret");
                     setConfirmManualOpen(true);
                     return;
                   }
@@ -359,7 +361,7 @@ export function SettingsModal({
                     orchestrator: { mode, isAuto: mode === "auto" },
                   });
                   patch({ zapret: nextZapret });
-                  void bridge.call("orchestrator.setMode", { mode });
+                  void bridge.call("orchestrator.setMode", { mode, backend: "zapret" });
                 }}
                 options={[
                   { value: "auto", label: L("Автоматический", "Automatic") },
@@ -386,7 +388,7 @@ export function SettingsModal({
               <button onClick={() => bridge.call("zapret.rebuild-runtime", undefined)} className="rounded-[10px] border border-line-1 bg-bg-2 px-3 py-2 text-[11px] text-fg transition-all duration-200 hover:bg-bg-3">{L("Пересобрать runtime", "Rebuild runtime")}</button>
             </div>
             <div className="mt-2 grid grid-cols-2 gap-2">
-              <button onClick={() => onNavigate?.("mods")} className="flex items-center gap-2 rounded-[11px] border border-line-1 bg-bg-2 px-3 py-2.5 text-left text-[11px] text-fg transition-all duration-200 hover:bg-bg-3"><span className="h-4 w-4 bg-current" style={{ WebkitMask: `url("${uiAssetUrl("icons/mods.svg")}") center / contain no-repeat`, mask: `url("${uiAssetUrl("icons/mods.svg")}") center / contain no-repeat` }} />{L("Пользовательские модификации…", "Custom modifications…")}</button>
+              <button onClick={() => onNavigate?.("mods")} className="flex items-center gap-2 rounded-[11px] border border-line-1 bg-bg-2 px-3 py-2.5 text-left text-[11px] text-fg transition-all duration-200 hover:bg-bg-3"><span className="h-4 w-4 bg-current" style={{ WebkitMask: `url("${uiAssetUrl("icons/mods.svg")}") center / contain no-repeat`, mask: `url("${uiAssetUrl("icons/mods.svg")}") center / contain no-repeat` }} />{L("Пользовательские модификации Zapret", "Custom Zapret modifications")}</button>
               <button onClick={() => onNavigate?.("files")} className="flex items-center gap-2 rounded-[11px] border border-line-1 bg-bg-2 px-3 py-2.5 text-left text-[11px] text-fg transition-all duration-200 hover:bg-bg-3"><span className="h-4 w-4 bg-current" style={{ WebkitMask: `url("${uiAssetUrl("icons/files.svg")}") center / contain no-repeat`, mask: `url("${uiAssetUrl("icons/files.svg")}") center / contain no-repeat` }} />{L("Файлы Zapret", "Zapret files")}</button>
             </div>
           </Section>
@@ -411,27 +413,28 @@ export function SettingsModal({
           <Section title={L("Авто-режим", "Auto mode")}>
             <Row label={L("Управление", "Control")}>
               <SelectField
-                value={(settings.zapret.controlMode ?? state.orchestrator?.mode ?? "manual") as "manual" | "auto"}
+                value={(settings.zapret2.controlMode ?? "manual") as "manual" | "auto"}
                 onChange={(value) => {
                   const mode = value as "manual" | "auto";
-                  const current = (settings.zapret.controlMode ?? state.orchestrator?.mode ?? "manual") as "manual" | "auto";
+                  const current = (settings.zapret2.controlMode ?? "manual") as "manual" | "auto";
                   if (mode === current) return;
                   if (mode === "manual" && current === "auto") {
+                    setConfirmManualBackend("zapret2");
                     setConfirmManualOpen(true);
                     return;
                   }
-                  const nextZapret = { ...settings.zapret, controlMode: mode };
+                  const nextZapret2 = { ...settings.zapret2, controlMode: mode };
                   patchOptimistic({
-                    settings: { zapret: nextZapret },
+                    settings: { zapret2: nextZapret2 },
                     orchestrator: { mode, isAuto: mode === "auto", backend: "zapret2" },
                   });
-                  patch({ zapret: nextZapret });
-                  void bridge.call("orchestrator.setMode", { mode });
+                  patch({ zapret2: nextZapret2 });
+                  void bridge.call("orchestrator.setMode", { mode, backend: "zapret2" });
                 }}
                 options={[{ value: "manual", label: L("Вручную", "Manual") }, { value: "auto", label: L("Авто", "Auto") }]}
               />
             </Row>
-            {((settings.zapret.controlMode ?? state.orchestrator?.mode ?? "manual") === "auto") && (
+            {((settings.zapret2.controlMode ?? "manual") === "auto") && (
               <div className="mt-2 text-[10px] leading-relaxed text-fg-dim">
                 {L(
                   "Авто пишет hostlist/ipset и Lua (hub-orchestrator.lua). Домены/IP подхватываются без рестарта; смена Lua-стратегии перезапускает winws2.",
@@ -440,7 +443,7 @@ export function SettingsModal({
               </div>
             )}
             <div className="mt-2 grid grid-cols-2 gap-2">
-              <button onClick={() => onNavigate?.("mods2")} className="flex items-center gap-2 rounded-[11px] border border-line-1 bg-bg-2 px-3 py-2.5 text-left text-[11px] text-fg transition-all duration-200 hover:bg-bg-3"><span className="h-4 w-4 bg-current" style={{ WebkitMask: `url("${uiAssetUrl("icons/mods.svg")}") center / contain no-repeat`, mask: `url("${uiAssetUrl("icons/mods.svg")}") center / contain no-repeat` }} />{L("Пользовательские модификации…", "Custom modifications…")}</button>
+              <button onClick={() => onNavigate?.("mods2")} className="flex items-center gap-2 rounded-[11px] border border-line-1 bg-bg-2 px-3 py-2.5 text-left text-[11px] text-fg transition-all duration-200 hover:bg-bg-3"><span className="h-4 w-4 bg-current" style={{ WebkitMask: `url("${uiAssetUrl("icons/mods.svg")}") center / contain no-repeat`, mask: `url("${uiAssetUrl("icons/mods.svg")}") center / contain no-repeat` }} />{L("Пользовательские модификации Zapret 2", "Custom Zapret 2 modifications")}</button>
               <button onClick={() => onNavigate?.("files2")} className="flex items-center gap-2 rounded-[11px] border border-line-1 bg-bg-2 px-3 py-2.5 text-left text-[11px] text-fg transition-all duration-200 hover:bg-bg-3"><span className="h-4 w-4 bg-current" style={{ WebkitMask: `url("${uiAssetUrl("icons/files.svg")}") center / contain no-repeat`, mask: `url("${uiAssetUrl("icons/files.svg")}") center / contain no-repeat` }} />{L("Файлы Zapret 2", "Zapret 2 files")}</button>
             </div>
             <div className="mt-2 text-[10px] leading-relaxed text-fg-mute">
@@ -451,14 +454,14 @@ export function SettingsModal({
             </div>
           </Section>
           <Section title="winws2">
-            <Row label="TCP ports" hint="--wf-tcp-in / --wf-tcp-out"><input disabled={(settings.zapret.controlMode ?? state.orchestrator?.mode ?? "manual") === "auto"} value={settings.zapret2.tcpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, tcpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
-            <Row label="UDP ports" hint="--wf-udp-in / --wf-udp-out"><input disabled={(settings.zapret.controlMode ?? state.orchestrator?.mode ?? "manual") === "auto"} value={settings.zapret2.udpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, udpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
-            <Row label="WinDivert filter" hint={L("Дополнительный фильтр --wf-raw-part", "Additional --wf-raw-part filter")}><textarea disabled={(settings.zapret.controlMode ?? state.orchestrator?.mode ?? "manual") === "auto"} value={settings.zapret2.rawFilter} onChange={(event) => patch({ zapret2: { ...settings.zapret2, rawFilter: event.target.value } })} className="h-16 w-[250px] resize-none rounded-[10px] border border-line-1 bg-bg-1 p-2.5 text-[11px] text-fg outline-none focus:border-line-2 disabled:cursor-not-allowed disabled:opacity-50" /></Row>
+            <Row label="TCP ports" hint="--wf-tcp-in / --wf-tcp-out"><input disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.tcpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, tcpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
+            <Row label="UDP ports" hint="--wf-udp-in / --wf-udp-out"><input disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.udpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, udpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
+            <Row label="WinDivert filter" hint={L("Дополнительный фильтр --wf-raw-part", "Additional --wf-raw-part filter")}><textarea disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.rawFilter} onChange={(event) => patch({ zapret2: { ...settings.zapret2, rawFilter: event.target.value } })} className="h-16 w-[250px] resize-none rounded-[10px] border border-line-1 bg-bg-1 p-2.5 text-[11px] text-fg outline-none focus:border-line-2 disabled:cursor-not-allowed disabled:opacity-50" /></Row>
           </Section>
           <Section title="Lua desync">
             <Row label={L("Профиль Lua", "Lua profile")} hint={L("Hub-стратегия (Auto). Custom ниже — только Manual.", "Hub strategy (Auto). Custom below is Manual-only.")}>
               <SelectField
-                disabled={(settings.zapret.controlMode ?? state.orchestrator?.mode ?? "manual") === "auto"}
+                disabled={(settings.zapret2.controlMode ?? "manual") === "auto"}
                 value={settings.zapret2.strategyId || "balanced"}
                 onChange={(value) => patch({ zapret2: { ...settings.zapret2, strategyId: value } })}
                 options={[
@@ -468,7 +471,7 @@ export function SettingsModal({
                 ]}
               />
             </Row>
-            <Row label={L("Своя стратегия", "Custom strategy")} hint={L("Аргументы --filter/--lua-desync. В Auto игнорируется.", "--filter/--lua-desync args. Ignored in Auto.")}><textarea disabled={(settings.zapret.controlMode ?? state.orchestrator?.mode ?? "manual") === "auto"} value={settings.zapret2.luaStrategy} onChange={(event) => patch({ zapret2: { ...settings.zapret2, luaStrategy: event.target.value } })} className="h-28 w-[250px] resize-none rounded-[10px] border border-line-1 bg-bg-1 p-2.5 font-mono text-[10px] text-fg outline-none focus:border-line-2 disabled:cursor-not-allowed disabled:opacity-50" /></Row>
+            <Row label={L("Своя стратегия", "Custom strategy")} hint={L("Аргументы --filter/--lua-desync. В Auto игнорируется.", "--filter/--lua-desync args. Ignored in Auto.")}><textarea disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.luaStrategy} onChange={(event) => patch({ zapret2: { ...settings.zapret2, luaStrategy: event.target.value } })} className="h-28 w-[250px] resize-none rounded-[10px] border border-line-1 bg-bg-1 p-2.5 font-mono text-[10px] text-fg outline-none focus:border-line-2 disabled:cursor-not-allowed disabled:opacity-50" /></Row>
           </Section>
         </>}
 
@@ -575,13 +578,23 @@ export function SettingsModal({
       onCancel={() => setConfirmManualOpen(false)}
       onConfirm={() => {
         setConfirmManualOpen(false);
+        if (confirmManualBackend === "zapret2") {
+          const nextZapret2 = { ...settings.zapret2, controlMode: "manual" as const };
+          patchOptimistic({
+            settings: { zapret2: nextZapret2 },
+            orchestrator: { mode: "manual", isAuto: false, backend: "zapret2" },
+          });
+          patch({ zapret2: nextZapret2 });
+          void bridge.call("orchestrator.setMode", { mode: "manual", backend: "zapret2" });
+          return;
+        }
         const nextZapret = { ...settings.zapret, controlMode: "manual" as const };
         patchOptimistic({
           settings: { zapret: nextZapret },
           orchestrator: { mode: "manual", isAuto: false },
         });
         patch({ zapret: nextZapret });
-        void bridge.call("orchestrator.setMode", { mode: "manual" });
+        void bridge.call("orchestrator.setMode", { mode: "manual", backend: "zapret" });
       }}
     />
     <SurfGameModal

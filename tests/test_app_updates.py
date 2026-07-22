@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from zapret_hub.services.updates import UpdatesManager
 
@@ -139,3 +140,63 @@ def test_find_payload_exe_accepts_title_case(tmp_path) -> None:
     assert found is not None
     assert found.name.lower() == "zapret_hub.exe"
     assert UpdatesManager._resolve_payload_root(mgr, root) == root
+
+
+def test_download_bytes_reports_content_progress(monkeypatch) -> None:
+    class Response:
+        headers = {"Content-Length": "6"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size: int) -> bytes:
+            return self.parts.pop(0)
+
+        parts = [b"abc", b"def", b""]
+
+    mgr = UpdatesManager.__new__(UpdatesManager)
+    monkeypatch.setattr("zapret_hub.services.updates.urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(UpdatesManager, "_run_with_deadline", lambda _self, fn, timeout: fn())
+    progress: list[tuple[int, int]] = []
+
+    payload = mgr._download_bytes("https://example.test/update.zip", timeout=120, progress_callback=lambda done, total: progress.append((done, total)))
+
+    assert payload == b"abcdef"
+    assert progress == [(0, 6), (3, 6), (6, 6)]
+
+
+def test_update_helper_uses_fast_literal_copy_and_restart_retries(tmp_path, monkeypatch) -> None:
+    install_root = tmp_path / "install"
+    source_root = tmp_path / "payload"
+    source_root.mkdir()
+    temp_root = tmp_path / "download"
+    temp_root.mkdir()
+    script_root = tmp_path / "scripts"
+
+    mgr = UpdatesManager.__new__(UpdatesManager)
+    mgr.storage = SimpleNamespace(paths=SimpleNamespace(install_root=install_root))
+    mgr.logging = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("zapret_hub.services.updates.tempfile.gettempdir", lambda: str(script_root.parent))
+    monkeypatch.setattr("zapret_hub.services.updates.subprocess.Popen", lambda *_args, **_kwargs: SimpleNamespace())
+
+    mgr.launch_update(
+        {
+            "extract_root": str(source_root),
+            "temp_root": str(temp_root),
+            "version": "3.0.0",
+            "asset_digest": "sha256:test",
+            "release_updated_at": "2026-07-22T12:00:00Z",
+        }
+    )
+
+    scripts = list((script_root.parent / "zapret_hub_updates").glob("apply_update_*.ps1"))
+    assert len(scripts) == 1
+    script = scripts[0].read_text(encoding="utf-8")
+    assert "ZapretHubApplicationUpdater" in script
+    assert "& robocopy @robocopyArgs" in script
+    assert "Copy-Item -LiteralPath" in script
+    assert "$attempt -le 3" in script
+    assert "Start-Process -FilePath $launch" in script

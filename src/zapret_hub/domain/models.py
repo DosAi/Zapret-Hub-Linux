@@ -49,6 +49,7 @@ class AppSettings:
     favorite_zapret_generals: list[str] = field(default_factory=list)
     general_autotest_done: bool = False
     zapret_control_mode: str = "manual"
+    zapret2_control_mode: str = "manual"
     trusted_general: str = ""
     selected_service_ids: list[str] = field(default_factory=list)
     selected_runtime_mode: str = "zapret"

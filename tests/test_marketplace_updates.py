@@ -8,7 +8,7 @@ import threading
 import urllib.request
 import zipfile
 
-from zapret_hub.services.marketplace import MarketplaceService
+from zapret_hub.services.marketplace import MarketplaceError, MarketplaceService
 
 
 def test_version_compare():
@@ -196,3 +196,63 @@ def test_remove_installed_marketplace_mod(tmp_path: Path) -> None:
 
     assert result == {"ok": True, "slug": "market-test", "removed": ["mod-1"]}
     assert mods.installed == []
+
+
+def test_ticket_http_error_uses_verified_public_download(monkeypatch, tmp_path: Path) -> None:
+    class Paths:
+        data_dir = tmp_path / "data"
+        cache_dir = tmp_path / "cache"
+
+    class Logging:
+        def log(self, *_args, **_kwargs) -> None:
+            return None
+
+    service = MarketplaceService(storage_paths=Paths(), logging=Logging())
+
+    def reject_ticket(*_args, **_kwargs):
+        raise MarketplaceError("http_error", "HTTP 403")
+
+    monkeypatch.setattr(service, "_request_json", reject_ticket)
+    monkeypatch.setattr(
+        service,
+        "fetch_latest",
+        lambda *_args, **_kwargs: {
+            "version": "2.1.0",
+            "versionId": 4,
+            "size": 123,
+            "sha256": "abc123",
+        },
+    )
+
+    ticket = service._create_ticket("shizapret_mod", version_id=None)
+
+    assert ticket["direct_url"].endswith("/projects/shizapret_mod/download/latest")
+    assert ticket["size"] == 123
+    assert ticket["sha256"] == "abc123"
+    assert ticket["filename"] == "shizapret_mod-2.1.0.zip"
+
+
+def test_download_tries_absolute_fallback_after_marketplace_error(monkeypatch, tmp_path: Path) -> None:
+    service = MarketplaceService.__new__(MarketplaceService)
+    calls: list[tuple[str, int]] = []
+
+    def stream(url: str, _target: Path, *, resume_from: int, job=None) -> None:
+        del job
+        calls.append((url, resume_from))
+        if len(calls) == 1:
+            raise MarketplaceError("network_error", "CDN rejected request")
+
+    monkeypatch.setattr(service, "_stream_to_file", stream)
+    monkeypatch.setattr(service, "_log", lambda *_args, **_kwargs: None)
+
+    service._download_file(
+        "https://download.goshkow.ru/file.zip",
+        "/zapret-hub/marketplace/download/4",
+        tmp_path / "mod.zip",
+        expected_size=0,
+    )
+
+    assert calls == [
+        ("https://download.goshkow.ru/file.zip", 0),
+        ("https://goshkow.ru/zapret-hub/marketplace/download/4", 0),
+    ]

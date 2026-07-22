@@ -14,6 +14,10 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { MarketplaceQueueItem } from "@/bridge/types";
 import { useLocale } from "@/hooks/useLocale";
 
+function isWorkingStatus(status: string) {
+  return ["queued", "downloading", "paused", "installing", "starting"].includes(String(status || ""));
+}
+
 function MiniCover({ url, title }: { url?: string; title: string }) {
   const [failed, setFailed] = useState(false);
   if (!url || failed) {
@@ -170,6 +174,24 @@ function ActiveRow({
   );
 }
 
+function ErrorRow({ item, locale }: { item: MarketplaceQueueItem; locale: string }) {
+  const ru = locale === "ru";
+  return (
+    <div className="flex items-center gap-2 rounded-lg bg-red-500/8 px-1.5 py-1.5">
+      <MiniCover url={item.iconUrl} title={item.title || item.slug} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[11px] font-medium text-fg">{item.title || item.slug}</div>
+        <div className="line-clamp-2 text-[9px] leading-tight text-red-300">
+          {item.message || (ru ? "Установка не завершена. Попробуйте ещё раз или перезапустите приложение." : "Installation failed. Try again or restart the app.")}
+        </div>
+      </div>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="shrink-0 text-red-400">
+        <path d="M6 6l12 12M18 6 6 18" strokeLinecap="round" />
+      </svg>
+    </div>
+  );
+}
+
 export function DownloadQueueButton({
   visible,
   progress,
@@ -253,9 +275,11 @@ export function DownloadQueueButton({
     [items],
   );
   const queued = useMemo(
-    () => items.filter((item) => item.slug !== active?.slug),
+    () => items.filter((item) => item.slug !== active?.slug && isWorkingStatus(item.status)),
     [items, active?.slug],
   );
+  const errors = useMemo(() => items.filter((item) => item.status === "error"), [items]);
+  const hasError = errors.length > 0;
 
   const ring = Math.max(0, Math.min(1, progress));
   const deg = ring * 360;
@@ -288,13 +312,19 @@ export function DownloadQueueButton({
           style={{
             background: completedFlash
               ? "transparent"
+              : hasError
+                ? "transparent"
               : `conic-gradient(rgb(var(--page-accent-rgb)) ${deg}deg, color-mix(in srgb, var(--fg-mute) 28%, transparent) 0deg)`,
             WebkitMask: "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
             mask: "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
           }}
           aria-hidden
         />
-        {completedFlash ? (
+        {hasError ? (
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="text-red-400">
+            <path d="M6 6l12 12M18 6 6 18" strokeLinecap="round" />
+          </svg>
+        ) : completedFlash ? (
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="text-[rgb(var(--page-accent-rgb))]">
             <path d="M5 12.5l4.5 4.5L19 7" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
@@ -328,6 +358,7 @@ export function DownloadQueueButton({
                       </div>
                     ) : (
                       <>
+                        {errors.map((item) => <ErrorRow key={`error-${item.jobId}`} item={item} locale={locale} />)}
                         {active ? (
                           <ActiveRow
                             item={active}

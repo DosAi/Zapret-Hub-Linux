@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { refreshAppState, useAppState, useBridge } from "@/hooks/useBridgeState";
+import { applyMarketplaceMods, useAppState, useBridge } from "@/hooks/useBridgeState";
 import { useLocale } from "@/hooks/useLocale";
 import { useMarketplaceQueue } from "@/hooks/useMarketplaceQueue";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import type {
   MarketplaceCard,
   MarketplaceCompatibility,
@@ -56,10 +57,26 @@ function Stat({ icon, value }: { icon: "dl" | "heart" | "bookmark"; value: strin
   );
 }
 
-function ProjectCover({ url, title, eager = false }: { url?: string; title: string; eager?: boolean }) {
+function ProjectCover({
+  url,
+  title,
+  eager = false,
+  catalog = false,
+}: {
+  url?: string;
+  title: string;
+  eager?: boolean;
+  catalog?: boolean;
+}) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [visible, setVisible] = useState(eager);
   const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    setFailed(false);
+    setAttempt(0);
+  }, [url]);
 
   useEffect(() => {
     if (eager || visible) return;
@@ -82,21 +99,33 @@ function ProjectCover({ url, title, eager = false }: { url?: string; title: stri
   }, [eager, visible]);
 
   const showImage = Boolean(url) && visible && !failed;
+  const imageUrl = attempt > 0 && url
+    ? `${url}${url.includes("?") ? "&" : "?"}zh_retry=${attempt}`
+    : url;
   return (
     <div
       ref={ref}
-      className="relative h-14 w-14 shrink-0 overflow-hidden rounded-[12px] border border-line-1 bg-bg-2"
+      className={`relative shrink-0 overflow-hidden rounded-[12px] border border-line-1 bg-bg-2 ${
+        catalog ? "h-[76px] w-[76px] self-center" : "h-14 w-14"
+      }`}
       aria-hidden={!showImage}
     >
       {showImage ? (
         <img
-          src={url}
+          key={`${url}-${attempt}`}
+          src={imageUrl}
           alt=""
           loading={eager ? "eager" : "lazy"}
           decoding="async"
           referrerPolicy="no-referrer"
           className="absolute inset-0 h-full w-full object-cover object-center"
-          onError={() => setFailed(true)}
+          onError={() => {
+            if (attempt < 2) {
+              window.setTimeout(() => setAttempt((value) => value + 1), 500 * (attempt + 1));
+            } else {
+              setFailed(true);
+            }
+          }}
         />
       ) : (
         <div className="grid h-full w-full place-items-center text-[15px] font-semibold text-fg-mute">
@@ -214,7 +243,7 @@ function CatalogCard({
       }}
       className="group flex cursor-pointer items-stretch gap-3 rounded-[14px] border border-line-1 bg-[color-mix(in_srgb,var(--bg-2)_88%,transparent)] px-3.5 py-3 transition-colors hover:border-line-2 hover:bg-bg-2"
     >
-      <ProjectCover url={item.iconUrl} title={item.title} />
+      <ProjectCover url={item.iconUrl} title={item.title} eager catalog />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
           <h3 className="truncate text-[13px] font-semibold text-fg">{item.title}</h3>
@@ -593,11 +622,13 @@ function DetailView({
 }
 
 export function MarketplacePage({
+  active,
   openSlug,
   autoInstall = false,
   openVersionId = null,
   onSlugHandled,
 }: {
+  active: boolean;
   openSlug?: string | null;
   autoInstall?: boolean;
   openVersionId?: string | null;
@@ -622,6 +653,7 @@ export function MarketplacePage({
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
+  const [pendingRemoval, setPendingRemoval] = useState<{ slug: string; title: string } | null>(null);
   const [detailSlug, setDetailSlug] = useState<string | null>(null);
   const [detail, setDetail] = useState<MarketplaceProject | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -635,7 +667,7 @@ export function MarketplacePage({
   }, [q]);
 
   const loadList = useCallback(
-    async (opts?: { append?: boolean; page?: number }) => {
+    async (opts?: { append?: boolean; page?: number; refresh?: boolean }) => {
       const nextPage = opts?.page ?? 1;
       const seq = ++loadSeq.current;
       if (opts?.append) setLoadingMore(true);
@@ -649,6 +681,7 @@ export function MarketplacePage({
           sort,
           page: nextPage,
           limit: PAGE_LIMIT,
+          refresh: Boolean(opts?.refresh),
         });
         if (loadSeq.current !== seq) return;
         const list = result?.projects ?? [];
@@ -674,9 +707,9 @@ export function MarketplacePage({
   );
 
   useEffect(() => {
-    if (detailSlug) return;
-    void loadList({ page: 1 });
-  }, [loadList, detailSlug]);
+    if (!active || detailSlug) return;
+    void loadList({ page: 1, refresh: true });
+  }, [active, loadList, detailSlug]);
 
   useEffect(() => {
     if (detailSlug || loading || loadingMore || page >= pages) return;
@@ -774,19 +807,25 @@ export function MarketplacePage({
   }, [state?.mods, state?.mods2]);
 
   const removeInstalled = useCallback(
-    async (slug: string, title: string) => {
-      const message = ru
-        ? `Удалить модификацию «${title}»?`
-        : `Remove the “${title}” modification?`;
-      if (!window.confirm(message)) return;
+    (slug: string, title: string) => {
+      setPendingRemoval({ slug, title });
+    },
+    [],
+  );
+
+  const confirmRemoval = useCallback(
+    async () => {
+      const target = pendingRemoval;
+      if (!target) return;
+      setPendingRemoval(null);
       try {
-        await bridge.call("marketplace.remove", { slug });
-        await refreshAppState();
+        const result = await bridge.call("marketplace.remove", { slug: target.slug });
+        applyMarketplaceMods(result.mods || [], result.mods2 || []);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [bridge, ru],
+    [bridge, pendingRemoval],
   );
 
   const compatOptions = useMemo(
@@ -930,7 +969,29 @@ export function MarketplacePage({
                     </button>
                   ))}
                 </div>
-                <div className="ml-auto shrink-0">
+                <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => void loadList({ page: 1, refresh: true })}
+                    disabled={loading}
+                    aria-label={ru ? "Обновить каталог" : "Refresh catalog"}
+                    title={ru ? "Обновить каталог" : "Refresh catalog"}
+                    className="grid h-7 w-7 place-items-center rounded-full border border-line-1 bg-bg-1 text-fg-dim transition hover:border-line-2 hover:bg-bg-3 hover:text-fg disabled:opacity-50"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                      className={`h-3.5 w-3.5 fill-none stroke-current ${loading ? "animate-spin" : ""}`}
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M20 7v5h-5" />
+                      <path d="M4 17v-5h5" />
+                      <path d="M6.1 8.2A7 7 0 0 1 18.8 7L20 12" />
+                      <path d="M17.9 15.8A7 7 0 0 1 5.2 17L4 12" />
+                    </svg>
+                  </button>
                   <FilterSelect
                     value={sort}
                     onChange={(value) => setSort(value as SortKey)}
@@ -1015,6 +1076,21 @@ export function MarketplacePage({
           </motion.div>
         )}
       </AnimatePresence>
+      <ConfirmModal
+        open={Boolean(pendingRemoval)}
+        title={ru ? "Удаление модификации" : "Remove modification"}
+        message={
+          pendingRemoval
+            ? ru
+              ? `Вы действительно хотите удалить «${pendingRemoval.title}»?`
+              : `Do you really want to remove “${pendingRemoval.title}”?`
+            : ""
+        }
+        confirmLabel={ru ? "Удалить" : "Remove"}
+        cancelLabel={ru ? "Отмена" : "Cancel"}
+        onConfirm={() => void confirmRemoval()}
+        onCancel={() => setPendingRemoval(null)}
+      />
     </div>
   );
 }

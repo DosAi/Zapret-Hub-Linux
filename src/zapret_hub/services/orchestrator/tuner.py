@@ -89,6 +89,12 @@ class SmartTuner:
         services = list(service_ids or [])
         service_set = set(services)
         enabled_mods = enabled_mod_ids or set()
+        available_mods = {
+            str(getattr(item, "id", "") or ""): item
+            for item in (installed_mods or [])
+            if str(getattr(item, "id", "") or "")
+        }
+        available_mod_ids = set(available_mods)
         steps: list[TunerStep] = []
         seen: set[tuple[str, str]] = set()
 
@@ -139,12 +145,16 @@ class SmartTuner:
                         )
                     )
             for mod_id in knowledge_winner.get("mods") or []:
-                if str(mod_id) not in enabled_mods:
+                if str(mod_id) in available_mod_ids and str(mod_id) not in enabled_mods:
                     add(
                         TunerStep(
                             kind="enable_mod",
                             value=str(mod_id),
-                            reason="knowledge_winner",
+                            reason=(
+                                "knowledge_marketplace_mod"
+                                if str(getattr(available_mods[str(mod_id)], "marketplace_slug", "") or "").strip()
+                                else "knowledge_user_mod"
+                            ),
                             label_ru=f"Включаю модификацию {mod_id}",
                             label_en=f"Enabling modification {mod_id}",
                         )
@@ -345,7 +355,7 @@ class SmartTuner:
                     continue
                 if not _mod_looks_relevant(mod, services=services, process=process):
                     continue
-                if str(getattr(mod, "source_type", "") or "") not in {"zapret_bundle", ""}:
+                if str(getattr(mod, "source_type", "") or "") not in {"zapret_bundle", "zapret2_bundle", ""}:
                     # Prefer zapret_bundle; still allow if has general scripts.
                     if not list(getattr(mod, "general_scripts", None) or []):
                         continue
@@ -353,7 +363,11 @@ class SmartTuner:
                     TunerStep(
                         kind="enable_mod",
                         value=mod_id,
-                        reason="mod_merge",
+                        reason=(
+                            "marketplace_mod"
+                            if str(getattr(mod, "marketplace_slug", "") or "").strip()
+                            else "user_mod"
+                        ),
                         label_ru=f"Подключаю модификацию «{getattr(mod, 'name', mod_id)}»",
                         label_en=f"Enabling modification “{getattr(mod, 'name', mod_id)}”",
                     )

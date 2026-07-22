@@ -254,11 +254,25 @@ class ServiceMapper:
                             )
                         )
 
-        best: dict[str, MapHit] = {}
+        grouped: dict[str, list[MapHit]] = {}
         for hit in hits:
-            previous = best.get(hit.service_id)
-            if previous is None or hit.score > previous.score:
-                best[hit.service_id] = hit
+            grouped.setdefault(hit.service_id, []).append(hit)
+
+        best: dict[str, MapHit] = {}
+        for service_id, service_hits in grouped.items():
+            strongest = max(service_hits, key=lambda item: item.score)
+            evidence_kinds = {item.kind for item in service_hits}
+            score = sum(item.score for item in service_hits)
+            if "domain" in evidence_kinds and "ip" in evidence_kinds:
+                score += 8.0
+            if "process" in evidence_kinds and ({"domain", "ip", "reverse_dns"} & evidence_kinds):
+                score += 5.0
+            best[service_id] = MapHit(
+                service_id=service_id,
+                kind=strongest.kind,
+                matched=strongest.matched,
+                score=score,
+            )
         return sorted(best.values(), key=lambda item: item.score, reverse=True)
 
     def primary_service(

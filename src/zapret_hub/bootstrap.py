@@ -138,8 +138,10 @@ def bootstrap_application() -> ApplicationContext:
         backend=None,
     )
     orchestrator.attach(context)
-    mode = str(settings.get().zapret_control_mode or "manual")
-    orchestrator.set_mode(mode)
+    current = settings.get()
+    backend = "zapret2" if str(current.selected_runtime_mode or "") == "zapret2" else "zapret"
+    mode = str((current.zapret2_control_mode if backend == "zapret2" else current.zapret_control_mode) or "manual")
+    orchestrator.set_mode(mode, backend=backend)
     return context
 
 

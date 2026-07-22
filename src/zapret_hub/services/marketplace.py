@@ -38,6 +38,7 @@ class DownloadJob:
     bytes_total: int = 0
     message: str = ""
     error: str = ""
+    mod_id: str = ""
 
 
 @dataclass
@@ -176,6 +177,8 @@ class MarketplaceService:
             "compatibility": str(payload.get("compatibility") or "zapret"),
             "changelog": str(payload.get("changelog") or ""),
             "versionId": int(payload.get("id") or payload.get("version_id") or 0) or None,
+            "size": int(payload.get("size") or 0),
+            "sha256": str(payload.get("sha256") or ""),
         }
 
     def check_updates(self, *, lang: str = "ru") -> dict[str, Any]:
@@ -421,6 +424,7 @@ class MarketplaceService:
         page: int = 1,
         limit: int = 20,
         lang: str = "ru",
+        refresh: bool = False,
     ) -> dict[str, Any]:
         payload = self._request_json(
             "GET",
@@ -433,6 +437,7 @@ class MarketplaceService:
                 "page": max(1, int(page)),
                 "limit": min(48, max(1, int(limit))),
                 "lang": lang if lang in {"ru", "en"} else "ru",
+                "_": int(time.time() * 1000) if refresh else None,
             },
         )
         projects = payload.get("projects") if isinstance(payload.get("projects"), list) else []
@@ -656,7 +661,7 @@ class MarketplaceService:
         return None
 
     def _job_payload(self, job: DownloadJob) -> dict[str, Any]:
-        return {
+        payload = {
             "jobId": job.id,
             "slug": job.slug,
             "status": job.status,
@@ -669,6 +674,10 @@ class MarketplaceService:
             "bytesTotal": int(job.bytes_total),
             "error": job.error,
         }
+        if job.mod_id:
+            payload["modId"] = job.mod_id
+            payload["installedVerified"] = True
+        return payload
 
     def _queue_snapshot(self) -> dict[str, Any]:
         active = next((j for j in self._jobs if j.status in {"downloading", "installing"}), None)
@@ -849,6 +858,8 @@ class MarketplaceService:
         job.progress = max(job.progress, 0.9)
         job.message = filename
         self._emit_job(job)
+        job.progress = max(job.progress, 0.94)
+        self._emit_job(job)
         installed_id = self._install_zip(
             target,
             compatibility=compat,
@@ -861,18 +872,10 @@ class MarketplaceService:
             marketplace_version=marketplace_version,
         )
         self.clear_update(job.slug)
-        job.status = "done"
-        job.progress = 1.0
+        job.progress = 0.99
         job.message = installed_id or job.slug
         job.compatibility = compat
-        self._emit(
-            "marketplace.download-progress",
-            {
-                **self._job_payload(job),
-                "modId": installed_id,
-                "pending": [j.slug for j in self._jobs if j.id != job.id and j.status in {"queued", "downloading", "paused", "installing"}],
-            },
-        )
+        job.mod_id = installed_id
 
     def _raise_if_stopped(self, job: DownloadJob) -> None:
         with self._lock:
@@ -890,10 +893,48 @@ class MarketplaceService:
                 return self._request_json("POST", "/downloads", body=body, timeout=30)
             except MarketplaceError as error:
                 last_error = error
+                if error.code in {"http_error", "download_active"}:
+                    self._log(
+                        "warning",
+                        "Marketplace ticket unavailable, using public download route",
+                        slug=slug,
+                        error=error.code,
+                    )
+                    return self._direct_download_ticket(slug, version_id=version_id)
                 if error.code != "download_active" or attempt >= 3:
                     raise
                 time.sleep(1.2 * (attempt + 1))
         raise last_error or MarketplaceError("download_active")
+
+    def _direct_download_ticket(self, slug: str, *, version_id: int | None) -> dict[str, Any]:
+        latest: dict[str, Any] = {}
+        try:
+            latest = self.fetch_latest(slug)
+        except Exception as error:
+            self._log("warning", "Marketplace latest metadata unavailable", slug=slug, error=str(error))
+        latest_id = int(latest.get("versionId") or 0) or None
+        selected_id = int(version_id or 0) or latest_id
+        if selected_id and selected_id != latest_id:
+            download_url = f"https://goshkow.ru/zapret-hub/marketplace/download/{selected_id}"
+            size = 0
+            sha256 = ""
+        else:
+            download_url = (
+                "https://goshkow.ru/zapret-hub/marketplace/projects/"
+                f"{urllib.parse.quote(slug)}/download/latest"
+            )
+            size = int(latest.get("size") or 0)
+            sha256 = str(latest.get("sha256") or "")
+        version = str(latest.get("version") or "").strip()
+        filename = f"{slug}-{version}.zip" if version else f"{slug}.zip"
+        return {
+            "filename": filename,
+            "size": size,
+            "sha256": sha256,
+            "direct_url": download_url,
+            "fallback_url": "",
+            "ticket": "",
+        }
 
     def _complete_ticket(self, ticket: str, *, success: bool, bytes_sent: int) -> None:
         self._request_json(
@@ -914,23 +955,40 @@ class MarketplaceService:
     ) -> None:
         if not direct_url and not fallback_url:
             raise MarketplaceError("no_url", "No download URL in ticket")
-        try:
-            self._stream_to_file(direct_url, target, resume_from=0, job=job)
-            return
-        except MarketplaceError:
-            raise
-        except Exception as direct_error:
-            self._log("warning", "Marketplace direct download failed, trying fallback", error=str(direct_error))
-            if not fallback_url:
-                raise
+        candidates: list[str] = []
+        for raw in (direct_url, fallback_url):
+            url = str(raw or "").strip()
+            if not url:
+                continue
+            if url.startswith("/"):
+                url = urllib.parse.urljoin("https://goshkow.ru", url)
+            if url not in candidates:
+                candidates.append(url)
+        last_error: BaseException | None = None
+        for index, url in enumerate(candidates):
             already = target.stat().st_size if target.exists() else 0
-            # If direct left a partial file, resume via Range; else rewrite.
-            self._stream_to_file(
-                fallback_url,
-                target,
-                resume_from=already if already and expected_size and already < expected_size else 0,
-                job=job,
-            )
+            resume = already if index > 0 and already and expected_size and already < expected_size else 0
+            try:
+                self._stream_to_file(url, target, resume_from=resume, job=job)
+                return
+            except MarketplaceError as error:
+                if error.code in {"cancelled", "paused"}:
+                    raise
+                last_error = error
+            except Exception as error:
+                last_error = error
+            if index + 1 < len(candidates):
+                self._log(
+                    "warning",
+                    "Marketplace download source failed, trying fallback",
+                    source=url,
+                    error=str(last_error),
+                )
+        if isinstance(last_error, MarketplaceError):
+            raise last_error
+        if last_error is not None:
+            raise MarketplaceError("network_error", self._friendly_network_message(last_error)) from last_error
+        raise MarketplaceError("no_url", "No usable download URL")
 
     def _stream_to_file(self, url: str, target: Path, *, resume_from: int, job: DownloadJob | None = None) -> None:
         headers = {"User-Agent": self.USER_AGENT, "X-Zapret-Device": self._device_id}

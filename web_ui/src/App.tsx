@@ -456,6 +456,7 @@ function Shell() {
       } else if (key === "marketplace") {
         nodes.marketplace = (
           <MarketplacePage
+            active={nav === "marketplace"}
             openSlug={marketplaceSlug}
             autoInstall={marketplaceInstall}
             openVersionId={marketplaceVersionId}

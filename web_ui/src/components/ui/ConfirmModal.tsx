@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
+import { createPortal } from "react-dom";
 
 export function ConfirmModal({
   open,
@@ -17,12 +18,13 @@ export function ConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  return (
+  if (typeof document === "undefined") return null;
+  return createPortal(
     <AnimatePresence>
       {open && (
         <motion.div
           key="confirm-modal"
-          className="absolute inset-0 z-[100] grid place-items-center bg-black/46"
+          className="fixed inset-0 z-[6000] grid place-items-center bg-black/46 backdrop-blur-[2px]"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -75,6 +77,7 @@ export function ConfirmModal({
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }

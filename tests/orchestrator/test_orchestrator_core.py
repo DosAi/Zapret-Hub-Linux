@@ -10,7 +10,7 @@ from zapret_hub.services.orchestrator.cutover import CutoverManager
 from zapret_hub.services.orchestrator.knowledge import KnowledgeStore
 from zapret_hub.services.orchestrator.learner import HostlistLearner
 from zapret_hub.services.orchestrator.mapper import ServiceMapper, map_target
-from zapret_hub.services.orchestrator.signals import ProbeResult, classify_failure, probe_required_ok
+from zapret_hub.services.orchestrator.signals import ConnSample, ProbeResult, classify_failure, probe_required_ok
 from zapret_hub.services.orchestrator.tuner import SmartTuner, TunerStep
 
 
@@ -67,6 +67,87 @@ def test_mapper_browsers_not_youtube():
     assert mapper.primary_service(process="msedge.exe") is None
     assert mapper.primary_service(process="firefox.exe") is None
     assert map_target(process="FortniteClient-Win64-Shipping.exe") == "fortnite"
+
+
+def test_mapper_combines_process_and_domain_evidence():
+    mapper = ServiceMapper()
+    process_only = mapper.map(process="Discord.exe")[0]
+    combined = mapper.map(process="Discord.exe", host="gateway.discord.gg", use_dns=False)[0]
+    assert combined.service_id == "discord"
+    assert combined.score > process_only.score
+
+
+def test_passive_scan_activates_discord_from_established_process(tmp_path: Path):
+    engine = __import__(
+        "zapret_hub.services.orchestrator.engine", fromlist=["OrchestratorEngine"]
+    ).OrchestratorEngine()
+    settings = SimpleNamespace(selected_service_ids=[])
+    engine.context = SimpleNamespace(
+        settings=SimpleNamespace(get=lambda: settings),
+        paths=SimpleNamespace(configs_dir=tmp_path, merged_runtime_dir=tmp_path),
+        processes=SimpleNamespace(_current_zapret_runtime=None),
+        knowledge=None,
+        logging=None,
+    )
+    engine._mode = "auto"
+    engine._signals = SimpleNamespace(
+        snapshot_connections=lambda limit=60: [
+            ConnSample(
+                remote_ip="162.159.135.232",
+                remote_port=443,
+                proto="tcp",
+                state="ESTABLISHED",
+                pid=42,
+                process="Discord.exe",
+            )
+        ]
+    )
+    incidents: list[dict[str, Any]] = []
+    engine._handle_incident = incidents.append
+    engine._passive_scan()
+    assert incidents
+    assert incidents[0]["services"] == ["discord"]
+    assert incidents[0]["symptom"] == "service_detected"
+
+
+def test_staged_plans_escalate_cumulatively():
+    engine = __import__(
+        "zapret_hub.services.orchestrator.engine", fromlist=["OrchestratorEngine"]
+    ).OrchestratorEngine()
+    steps = [
+        TunerStep(kind="add_domain", value="discord.com", reason="t", label_ru="", label_en=""),
+        TunerStep(kind="general", value="alt.bat", reason="t", label_ru="", label_en=""),
+        TunerStep(kind="enable_mod", value="discord-mod", reason="t", label_ru="", label_en=""),
+        TunerStep(kind="enable_service", value="discord", reason="t", label_ru="", label_en=""),
+        TunerStep(kind="game_filter", value="tcpudp", reason="t", label_ru="", label_en=""),
+    ]
+    plans = engine._staged_plans(steps)
+    assert [phase for phase, _items in plans] == ["services", "user_mods", "network", "lists", "strategy"]
+    assert [item.kind for item in plans[0][1]] == ["enable_service"]
+    assert [item.kind for item in plans[-1][1]] == [
+        "enable_service",
+        "enable_mod",
+        "game_filter",
+        "add_domain",
+        "general",
+    ]
+
+
+def test_staged_plans_try_generals_as_alternatives():
+    engine = __import__(
+        "zapret_hub.services.orchestrator.engine", fromlist=["OrchestratorEngine"]
+    ).OrchestratorEngine()
+    steps = [
+        TunerStep(kind="enable_service", value="discord", reason="t", label_ru="", label_en=""),
+        TunerStep(kind="general", value="one.bat", reason="t", label_ru="", label_en=""),
+        TunerStep(kind="general", value="two.bat", reason="t", label_ru="", label_en=""),
+    ]
+    plans = engine._staged_plans(steps)
+    strategy_plans = [items for phase, items in plans if phase == "strategy"]
+    assert [[step.value for step in items if step.kind == "general"] for items in strategy_plans] == [
+        ["one.bat"],
+        ["two.bat"],
+    ]
 
 
 def test_tuner_multi_general_and_order():
@@ -136,6 +217,21 @@ def test_tuner_fortnite_enables_mod_and_alt9_general():
     assert any(s.kind == "ipset" and s.value == "any" for s in steps)
     generals = [s.value for s in steps if s.kind == "general"]
     assert any("ALT9" in g or "alt9" in g.lower() for g in generals)
+
+
+def test_tuner_ignores_removed_mod_from_knowledge():
+    steps = SmartTuner().plan(
+        symptom="external_miss",
+        domain="discord.com",
+        process="Discord.exe",
+        service_ids=["discord"],
+        selected_services={"discord"},
+        current={"general": "general.bat", "ipset": "loaded", "game_filter": "disabled"},
+        knowledge_winner={"mods": ["removed-marketplace-mod"]},
+        installed_mods=[],
+        enabled_mod_ids=set(),
+    )
+    assert not any(step.kind == "enable_mod" and step.value == "removed-marketplace-mod" for step in steps)
 
 
 def test_conflict_detect_requires_udp_voice_for_ark():
@@ -385,6 +481,17 @@ def test_apply_plan_probe_fail_rolls_back_settings_and_mods(tmp_path: Path):
     assert ctx.settings.selected_zapret_general == "base|general.bat"
     assert ctx.mods._mods["fortnite-unlock"].enabled is False
     assert Path(ctx.processes._current_zapret_runtime).name == "slot_a"
+
+
+def test_cutover_enables_zapret2_mod(tmp_path: Path):
+    ctx, cutover, _slot_a = _make_cutover_context(tmp_path, probe_ok=True)
+    ctx.mods2 = FakeMods([FakeMod(id="discord-zapret2", name="Discord Zapret2", enabled=False)])
+    changed = cutover._apply_one_mutation(
+        TunerStep(kind="enable_mod", value="discord-zapret2", reason="user_mod", label_ru="", label_en=""),
+        backend="zapret2",
+    )
+    assert changed == "mods"
+    assert ctx.mods2._mods["discord-zapret2"].enabled is True
 
 
 def test_apply_and_start_trusted_rolls_back_on_probe_fail(tmp_path: Path):

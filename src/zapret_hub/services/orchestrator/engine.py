@@ -36,6 +36,22 @@ _MAX_STEPS = 12
 _EXHAUSTED_COOLDOWN_S = 900.0
 _SYN_SENT_MIN_AGE_HINT = 2  # require repeated fails; SYN_SENT alone is normal
 
+_STEP_PHASES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("services", frozenset({"enable_service"})),
+    ("network", frozenset({"gaming_set", "game_filter", "ipset"})),
+    ("lists", frozenset({"add_domain", "add_ip", "exclude_domain"})),
+    ("strategy", frozenset({"general"})),
+)
+_PHASE_LABELS = {
+    "services": ("сервисы", "services"),
+    "marketplace_mods": ("модификации Marketplace", "Marketplace modifications"),
+    "user_mods": ("пользовательские модификации", "custom modifications"),
+    "network": ("TCP/UDP", "TCP/UDP"),
+    "lists": ("домены и IP", "domains and IPs"),
+    "strategy": ("стратегия", "strategy"),
+    "fallback": ("дополнительная проверка", "additional check"),
+}
+
 
 def _exe_label(process: str) -> str:
     """Short exe name for status (no IPs/domains/CIDRs)."""
@@ -99,7 +115,9 @@ class OrchestratorEngine:
         knowledge = getattr(context, "knowledge", None)
         self._cutover = CutoverManager(context, knowledge=knowledge, signals=self._signals)
         try:
-            mode = str(getattr(context.settings.get(), "zapret_control_mode", "manual") or "manual")
+            settings = context.settings.get()
+            backend = self._active_backend(settings)
+            mode = self._configured_mode(settings, backend)
         except Exception:
             mode = "manual"
         with self._lock:
@@ -121,8 +139,20 @@ class OrchestratorEngine:
         except Exception:
             pass
 
-    def set_mode(self, mode: str) -> dict[str, Any]:
+    @staticmethod
+    def _active_backend(settings: Any) -> str:
+        return "zapret2" if str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret") == "zapret2" else "zapret"
+
+    @staticmethod
+    def _configured_mode(settings: Any, backend: str) -> str:
+        field = "zapret2_control_mode" if backend == "zapret2" else "zapret_control_mode"
+        return "auto" if str(getattr(settings, field, "manual") or "manual") == "auto" else "manual"
+
+    def set_mode(self, mode: str, *, backend: str | None = None) -> dict[str, Any]:
         normalized = "auto" if str(mode or "").strip().lower() == "auto" else "manual"
+        selected_backend = backend or "zapret"
+        if self.context is not None and backend is None:
+            selected_backend = self._active_backend(self.context.settings.get())
         with self._lock:
             self._mode = normalized
             if normalized == "manual":
@@ -131,7 +161,8 @@ class OrchestratorEngine:
                 self._drain_queue()
         if self.context is not None:
             try:
-                self.context.settings.update(zapret_control_mode=normalized)
+                field = "zapret2_control_mode" if selected_backend == "zapret2" else "zapret_control_mode"
+                self.context.settings.update(**{field: normalized})
             except Exception:
                 pass
         self.sync_lifecycle(zapret_active=self._zapret_active)
@@ -144,6 +175,19 @@ class OrchestratorEngine:
             return self._mode
 
     def sync_lifecycle(self, *, zapret_active: bool) -> dict[str, Any]:
+        if self.context is not None:
+            try:
+                settings = self.context.settings.get()
+                configured = self._configured_mode(settings, self._active_backend(settings))
+                with self._lock:
+                    if configured != self._mode:
+                        self._mode = configured
+                        if configured == "manual":
+                            self._status = "idle"
+                            self._detail = ""
+                            self._drain_queue()
+            except Exception:
+                pass
         with self._lock:
             self._zapret_active = bool(zapret_active)
             should_run = self._mode == "auto" and self._zapret_active
@@ -248,13 +292,14 @@ class OrchestratorEngine:
     def run_bootstrap(self, *, youtube: bool = True, discord: bool = True) -> dict[str, Any]:
         if self.context is None:
             return {"ok": False, "error": "no_context"}
-        self.set_mode("auto")
+        settings = self.context.settings.get()
+        runtime = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
+        self.set_mode("auto", backend="zapret2" if runtime == "zapret2" else "zapret")
         knowledge = getattr(self.context, "knowledge", None)
         cutover = self._cutover or CutoverManager(self.context, knowledge=knowledge, signals=self._signals)
         self._cutover = cutover
 
         settings = self.context.settings.get()
-        runtime = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
         trusted_existing = str(getattr(settings, "trusted_general", "") or "").strip()
         strategy_existing = str(getattr(settings, "zapret2_strategy_id", "balanced") or "balanced")
         already_ready = bool(getattr(settings, "general_autotest_done", False)) and (
@@ -296,7 +341,7 @@ class OrchestratorEngine:
                                 learner.add_domains([host])
                         learner.add_ips(zapret2_hub.harvest_service_ips([sid]))
                 changes: dict[str, Any] = {
-                    "zapret_control_mode": "auto",
+                    ("zapret2_control_mode" if runtime == "zapret2" else "zapret_control_mode"): "auto",
                     "selected_service_ids": ordered,
                     "enabled_component_ids": sorted(enabled),
                 }
@@ -346,7 +391,7 @@ class OrchestratorEngine:
                 from zapret_hub.services.orchestrator import zapret2_hub
 
                 self.context.settings.update(
-                    zapret_control_mode="auto",
+                    zapret2_control_mode="auto",
                     selected_service_ids=ordered,
                     enabled_component_ids=sorted(enabled),
                     general_autotest_done=True,
@@ -649,6 +694,31 @@ class OrchestratorEngine:
                 return
             if checked >= 16:
                 break
+            process_services = [hit.service_id for hit in self._mapper.map_process(sample.process)]
+            missing_process_services = [item for item in process_services if item not in selected]
+            if missing_process_services:
+                service_id = missing_process_services[0]
+                activation_key = f"service-activation:{service_id}:{_exe_label(sample.process).lower()}"
+                if self._memory.mark_notified(activation_key, ttl_s=45.0):
+                    self._log(
+                        "info",
+                        "Orchestrator detected an active service process",
+                        process=sample.process,
+                        service=service_id,
+                    )
+                    self._handle_incident(
+                        {
+                            "domain": sample.domain,
+                            "ip": sample.remote_ip,
+                            "process": sample.process,
+                            "proto": sample.proto,
+                            "remote_port": sample.remote_port,
+                            "services": missing_process_services,
+                            "symptom": "service_detected",
+                            "selected": list(selected),
+                        }
+                    )
+                    return
             state = (sample.state or "").upper()
             interesting_tcp = state in {"SYN_SENT", "SYN_RECEIVED"}
             interesting_udp = sample.proto == "udp" and sample.remote_port in {
@@ -666,6 +736,10 @@ class OrchestratorEngine:
                     host=sample.domain, ip=sample.remote_ip, process=sample.process, use_dns=bool(sample.domain)
                 )
             ]
+            if sample.domain and not services and not learner.domain_in_merged_lists(sample.domain, lists_dirs):
+                # Reverse DNS often returns generic CloudFront/EC2/Google names.
+                # Do not rewrite the runtime for unrelated background traffic.
+                continue
             if not interesting_tcp and not interesting_udp and not services:
                 continue
             if sample.proto == "tcp" and not interesting_tcp and not sample.domain and not services:
@@ -790,7 +864,7 @@ class OrchestratorEngine:
             process = str(incident.get("process") or "")
             proto = str(incident.get("proto") or "")
             remote_port = int(incident.get("remote_port") or 0)
-            host_key = domain or ip or (domains[0] if domains else "") or (ips[0] if ips else "")
+            host_key = domain or ip or (domains[0] if domains else "") or (ips[0] if ips else "") or process.lower()
             if not host_key:
                 return
             if knowledge is not None and (
@@ -899,6 +973,12 @@ class OrchestratorEngine:
                 trusted = str(getattr(settings, "zapret2_strategy_id", "balanced") or "balanced")
                 current["general"] = trusted
                 enabled_mods = {str(item) for item in (getattr(settings, "enabled_zapret2_mod_ids", None) or [])}
+                try:
+                    mods2 = getattr(self.context, "mods2", None)
+                    if mods2 is not None:
+                        installed_mods = list(mods2.list_installed())
+                except Exception as error:
+                    self._log("warning", "list_installed Zapret2 mods failed", error=str(error))
             else:
                 try:
                     mods = getattr(self.context, "mods", None)
@@ -910,6 +990,12 @@ class OrchestratorEngine:
                     mod_generals = list(self.context.processes.list_zapret_generals())
                 except Exception as error:
                     self._log("warning", "list_zapret_generals failed", error=str(error))
+            installed_mods.sort(
+                key=lambda item: (
+                    0 if str(getattr(item, "marketplace_slug", "") or "").strip() else 1,
+                    str(getattr(item, "name", "") or getattr(item, "id", "") or "").lower(),
+                )
+            )
 
             steps = self._tuner.plan(
                 symptom=symptom,
@@ -948,15 +1034,39 @@ class OrchestratorEngine:
             cutover = self._ensure_cutover()
             # Keep status as «Подбираю конфигурацию…: Discord.exe» — not IPs/CIDRs/knobs.
             self.set_status("tuning", detail=detail)
-            result = cutover.apply_plan(
-                steps,
-                probe_targets=probe_targets,
-                required_hosts=required_hosts,
-            )
+            result: dict[str, Any] = {"ok": False, "applied": [], "error": "no_applicable_stage"}
+            attempted_steps: list[Any] = []
+            for phase, staged_steps in self._staged_plans(steps):
+                attempted_steps = staged_steps
+                phase_labels = _PHASE_LABELS.get(phase, (phase, phase))
+                phase_label = phase_labels[0] if self._language().lower().startswith("ru") else phase_labels[1]
+                self.set_status("tuning", detail=f"{detail} · {phase_label}")
+                self._log(
+                    "info",
+                    "Orchestrator trying staged plan",
+                    host=host_key,
+                    app=process,
+                    phase=phase,
+                    steps=len(staged_steps),
+                )
+                result = cutover.apply_plan(
+                    staged_steps,
+                    probe_targets=probe_targets,
+                    required_hosts=required_hosts,
+                )
+                if result.get("ok"):
+                    self._log(
+                        "info",
+                        "Orchestrator staged plan succeeded",
+                        host=host_key,
+                        app=process,
+                        phase=phase,
+                    )
+                    break
 
             if knowledge is not None:
                 try:
-                    for step in steps:
+                    for step in attempted_steps:
                         knowledge.record_situation(
                             {
                                 "host": host_key,
@@ -969,7 +1079,7 @@ class OrchestratorEngine:
                             }
                         )
                     if not result.get("ok"):
-                        for step in steps:
+                        for step in attempted_steps:
                             if step.kind == "general":
                                 knowledge.rank_general(step.value, -1.0)
                 except Exception as error:
@@ -1072,6 +1182,62 @@ class OrchestratorEngine:
             seen.add(key)
             unique.append(item)
         return unique[:8], required[:4]
+
+    @staticmethod
+    def _staged_plans(steps: list[Any]) -> list[tuple[str, list[Any]]]:
+        """Build cumulative plans so a successful lower-cost layer stops escalation."""
+        remaining = list(steps)
+        cumulative: list[Any] = []
+        plans: list[tuple[str, list[Any]]] = []
+        consumed: set[int] = set()
+        for phase, marketplace in (("marketplace_mods", True), ("user_mods", False)):
+            additions = [
+                step
+                for index, step in enumerate(remaining)
+                if index not in consumed
+                and step.kind == "enable_mod"
+                and (("marketplace" in str(step.reason).lower()) == marketplace)
+            ]
+            if additions:
+                # Services must always be tried before either modification layer.
+                if not plans:
+                    service_steps = [step for step in remaining if step.kind == "enable_service"]
+                    if service_steps:
+                        cumulative.extend(service_steps)
+                        for index, step in enumerate(remaining):
+                            if step.kind == "enable_service":
+                                consumed.add(index)
+                        plans.append(("services", list(cumulative)))
+                for addition in additions:
+                    cumulative.append(addition)
+                    for index, step in enumerate(remaining):
+                        if index not in consumed and step is addition:
+                            consumed.add(index)
+                            break
+                    plans.append((phase, list(cumulative)))
+        for phase, kinds in _STEP_PHASES:
+            additions = [step for index, step in enumerate(remaining) if index not in consumed and step.kind in kinds]
+            if not additions:
+                continue
+            for index, step in enumerate(remaining):
+                if index not in consumed and step.kind in kinds:
+                    consumed.add(index)
+            if phase == "lists":
+                cumulative.extend(additions)
+                plans.append((phase, list(cumulative)))
+                continue
+            for addition in additions:
+                # A second value for the same knob is an alternative, not
+                # another mutation to batch on top of the first one.
+                if phase != "services":
+                    cumulative = [step for step in cumulative if step.kind != addition.kind]
+                cumulative.append(addition)
+                plans.append((phase, list(cumulative)))
+        unknown = [step for index, step in enumerate(remaining) if index not in consumed]
+        if unknown:
+            cumulative.extend(unknown)
+            plans.append(("fallback", list(cumulative)))
+        return plans
 
     def _list_dirs(self) -> list[Path]:
         dirs: list[Path] = []

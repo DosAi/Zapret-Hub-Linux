@@ -4,6 +4,7 @@ import socket
 import ssl
 import time
 import urllib.request
+from urllib.error import HTTPError
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -118,6 +119,26 @@ class SignalCollector:
                 latency_ms=(time.perf_counter() - started) * 1000.0,
                 kind="http",
                 cls="ok",
+            )
+        except HTTPError as error:
+            # A 4xx response proves DNS, TCP and TLS connectivity. Many service
+            # gateways intentionally reject a generic orchestrator GET request.
+            if 400 <= int(error.code) < 500:
+                return ProbeResult(
+                    ok=True,
+                    target=url,
+                    latency_ms=(time.perf_counter() - started) * 1000.0,
+                    kind="http",
+                    cls="ok",
+                )
+            cls = _classify_error(str(error), kind="http")
+            return ProbeResult(
+                ok=False,
+                target=url,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                error=str(error),
+                kind="http",
+                cls=cls,
             )
         except Exception as error:
             cls = _classify_error(str(error), kind="http")

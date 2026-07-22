@@ -17,6 +17,7 @@ _SETTINGS_KEYS = (
     "zapret_game_filter_mode",
     "zapret_gaming_set",
     "selected_service_ids",
+    "enabled_component_ids",
     "trusted_general",
     "enabled_mod_ids",
     "enabled_zapret2_mod_ids",
@@ -57,6 +58,7 @@ class CutoverManager:
         settings = self.context.settings.get()
         payload: dict[str, Any] = {key: getattr(settings, key, None) for key in _SETTINGS_KEYS}
         payload["selected_service_ids"] = list(settings.selected_service_ids or [])
+        payload["enabled_component_ids"] = list(getattr(settings, "enabled_component_ids", None) or [])
         payload["enabled_mod_ids"] = list(getattr(settings, "enabled_mod_ids", None) or [])
         payload["enabled_zapret2_mod_ids"] = list(getattr(settings, "enabled_zapret2_mod_ids", None) or [])
         live = force_runtime or getattr(self.context.processes, "_current_zapret_runtime", None)
@@ -361,6 +363,7 @@ class CutoverManager:
                 self.context.settings.update(**changes)
             except Exception as error:
                 self._log("warning", "Zapret2 rollback settings failed", error=str(error))
+        self._restore_mod2_enables(list(good.get("enabled_zapret2_mod_ids") or []))
         try:
             if self._zapret2_running():
                 self.context.processes.stop_component("zapret2")
@@ -596,8 +599,8 @@ class CutoverManager:
             return "lists"
         if step.kind == "enable_mod":
             if backend == "zapret2":
-                self._log("info", "Skipping enable_mod on zapret2 backend", mod_id=step.value)
-                return "skip"
+                self._apply_enable_mod2(step.value)
+                return "mods"
             self._apply_enable_mod(step.value)
             return "mods"
         return self._apply_settings_step(step, backend=backend)
@@ -723,6 +726,16 @@ class CutoverManager:
                 raise RuntimeError(f"Mod not installed: {mod_id}")
         mods.set_enabled(mod_id, True)
         self._log("info", "Orchestrator enabled mod", mod_id=mod_id)
+
+    def _apply_enable_mod2(self, mod_id: str) -> None:
+        mods = getattr(self.context, "mods2", None)
+        if mods is None:
+            raise RuntimeError("Zapret2 mods manager unavailable")
+        installed_ids = {item.id for item in mods.list_installed()}
+        if mod_id not in installed_ids:
+            raise RuntimeError(f"Zapret2 mod not installed: {mod_id}")
+        mods.set_enabled(mod_id, True)
+        self._log("info", "Orchestrator enabled Zapret2 mod", mod_id=mod_id)
 
     def _stage_candidate_b(self) -> Path:
         processes = self.context.processes

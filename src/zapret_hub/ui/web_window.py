@@ -414,7 +414,11 @@ class WebBridge(QObject):
                     msg = str(payload.get("message") or "error")
                     self._schedule_on_gui(
                         lambda: self._emit_toast(
-                            f"Не удалось скачать «{slug}»: {msg}" if self._ru() else f"Failed to download “{slug}”: {msg}",
+                            (
+                                f"Не удалось установить «{slug}»: {msg} Попробуйте ещё раз; если ошибка повторится, перезапустите приложение."
+                                if self._ru()
+                                else f"Failed to install “{slug}”: {msg} Try again; restart the app if the error repeats."
+                            ),
                             kind="error",
                             toast_id=f"mp-dl-{slug}",
                         )
@@ -617,12 +621,55 @@ class WebBridge(QObject):
 
         def worker() -> None:
             stopped: list[str] = []
+            last_progress = {"phase": "", "percent": -1}
             try:
                 try:
                     if self.context.settings.get().apply_update_on_next_launch:
                         self.context.settings.update(apply_update_on_next_launch=False)
                 except Exception:
                     pass
+                def progress(phase: str, current: int, total: int) -> None:
+                    phase_ranges = {
+                        "download": (2.0, 78.0),
+                        "verify": (80.0, 84.0),
+                        "extract": (85.0, 98.0),
+                        "ready": (100.0, 100.0),
+                    }
+                    start, end = phase_ranges.get(phase, (0.0, 100.0))
+                    ratio = (float(current) / float(total)) if total > 0 else 0.0
+                    percent = int(round(start + max(0.0, min(1.0, ratio)) * (end - start)))
+                    if last_progress["phase"] == phase and last_progress["percent"] == percent:
+                        return
+                    last_progress.update(phase=phase, percent=percent)
+                    messages = {
+                        "download": ("Скачивание обновления", "Downloading update"),
+                        "verify": ("Проверка обновления", "Verifying update"),
+                        "extract": ("Распаковка обновления", "Extracting update"),
+                        "ready": ("Обновление готово к установке", "Update is ready to install"),
+                    }
+                    message_ru, message_en = messages.get(phase, ("Подготовка обновления", "Preparing update"))
+
+                    def emit() -> None:
+                        self.event.emit(
+                            "app.update-progress",
+                            json.dumps(
+                                {
+                                    "phase": phase,
+                                    "percent": percent,
+                                    "downloadedBytes": current if phase == "download" else 0,
+                                    "totalBytes": total if phase == "download" else 0,
+                                    "messageRu": message_ru,
+                                    "messageEn": message_en,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+
+                    self._schedule_on_gui(emit)
+
+                prepared = self.context.updates.prepare_update(payload, progress_callback=progress)
+                # Keep the active bypass online while the archive is downloaded.
+                # Components only need to stop for the short file replacement step.
                 states = {item.component_id: item for item in self.context.processes.list_states()}
                 for component_id, state in states.items():
                     if str(getattr(state, "status", "") or "").strip().lower() != "running":
@@ -632,7 +679,23 @@ class WebBridge(QObject):
                         stopped.append(component_id)
                     except Exception:
                         pass
-                prepared = self.context.updates.prepare_update(payload)
+                backend = getattr(self.context, "backend", None)
+                if backend is not None:
+                    try:
+                        backend.request_shutdown_background()
+                    except Exception:
+                        pass
+                    try:
+                        process = getattr(backend, "_process", None)
+                        if process is not None and process.is_alive():
+                            process.join(timeout=1.5)
+                            if process.is_alive():
+                                process.terminate()
+                                process.join(timeout=1.0)
+                            if process.is_alive():
+                                process.kill()
+                    except Exception:
+                        pass
                 self.context.updates.launch_update(prepared)
                 self._schedule_on_gui(self._quit_for_app_update)
             except Exception as error:
@@ -665,7 +728,9 @@ class WebBridge(QObject):
     def _quit_for_app_update(self) -> None:
         self._app_update_busy = False
         try:
-            quit_fn = getattr(self.window, "fade_close", None)
+            # An update must terminate the process. fade_close() may hide an
+            # apparently active runtime to tray and leave the updater blocked.
+            quit_fn = getattr(self.window, "_exit_from_tray", None)
             if callable(quit_fn):
                 quit_fn()
                 return
@@ -687,7 +752,9 @@ class WebBridge(QObject):
         engine._on_long_pick = self._on_orchestrator_long_pick
         try:
             settings = self.context.settings.get()
-            engine.set_mode(str(getattr(settings, "zapret_control_mode", "manual") or "manual"))
+            backend = "zapret2" if str(settings.selected_runtime_mode or "") == "zapret2" else "zapret"
+            field = "zapret2_control_mode" if backend == "zapret2" else "zapret_control_mode"
+            engine.set_mode(str(getattr(settings, field, "manual") or "manual"), backend=backend)
         except Exception:
             pass
         self._sync_orchestrator_lifecycle()
@@ -741,7 +808,12 @@ class WebBridge(QObject):
         engine = getattr(self.context, "orchestrator", None) if self.context is not None else None
         if engine is None:
             settings = self.context.settings.get() if self.context is not None else None
-            mode = str(getattr(settings, "zapret_control_mode", "manual") or "manual") if settings else "manual"
+            if settings is not None:
+                backend = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
+                field = "zapret2_control_mode" if backend == "zapret2" else "zapret_control_mode"
+                mode = str(getattr(settings, field, "manual") or "manual")
+            else:
+                mode = "manual"
             return {
                 "mode": mode,
                 "status": "idle",
@@ -780,14 +852,22 @@ class WebBridge(QObject):
         except Exception:
             return self._orchestrator_snapshot()
 
-    def _set_orchestrator_mode(self, mode: str, *, emit_state: bool = True) -> dict[str, Any]:
+    def _set_orchestrator_mode(
+        self,
+        mode: str,
+        *,
+        backend: str | None = None,
+        emit_state: bool = True,
+    ) -> dict[str, Any]:
         normalized = "auto" if str(mode or "").strip().lower() == "auto" else "manual"
         if self.context is None:
             return self._orchestrator_snapshot()
-        self.context.settings.update(zapret_control_mode=normalized)
+        selected_backend = str(backend or self.context.settings.get().selected_runtime_mode or "zapret")
+        setting_name = "zapret2_control_mode" if selected_backend == "zapret2" else "zapret_control_mode"
+        self.context.settings.update(**{setting_name: normalized})
         engine = getattr(self.context, "orchestrator", None)
         if engine is not None:
-            snapshot = engine.set_mode(normalized)
+            snapshot = engine.set_mode(normalized, backend=selected_backend)
             snapshot = engine.sync_lifecycle(zapret_active=self._zapret_runtime_active())
         else:
             snapshot = self._orchestrator_snapshot()
@@ -1156,7 +1236,8 @@ class WebBridge(QObject):
             return self._orchestrator_snapshot()
         if command == "orchestrator.setMode":
             mode = str((payload or {}).get("mode", "manual"))
-            return self._set_orchestrator_mode(mode, emit_state=True)
+            backend = str((payload or {}).get("backend", ""))
+            return self._set_orchestrator_mode(mode, backend=backend or None, emit_state=True)
         if command == "orchestrator.bootstrap":
             engine = getattr(self.context, "orchestrator", None)
             youtube = True if not isinstance(payload, dict) else bool(payload.get("youtube", True))
@@ -1168,7 +1249,6 @@ class WebBridge(QObject):
                     if engine is None:
                         result = {"ok": False, "error": "no_orchestrator"}
                     else:
-                        engine.set_mode("auto")
                         result = engine.run_bootstrap(youtube=youtube, discord=discord)
                         try:
                             engine.sync_lifecycle(zapret_active=self._zapret_runtime_active())
@@ -1475,6 +1555,7 @@ class WebBridge(QObject):
                 page=int(data.get("page") or 1),
                 limit=int(data.get("limit") or 20),
                 lang=lang if lang in {"ru", "en"} else "ru",
+                refresh=bool(data.get("refresh")),
             )
         if command == "marketplace.get":
             slug = str((payload or {}).get("slug") or "")
@@ -1511,8 +1592,10 @@ class WebBridge(QObject):
         if command == "marketplace.remove":
             slug = str((payload or {}).get("slug") or "")
             result = self.context.marketplace.remove_installed(slug)
-            self.emit_state(force=True)
-            return result
+            installed = self._build_marketplace_mods_payload()
+            self._merge_marketplace_mods_cache(installed)
+            self._schedule_on_gui(lambda: self.emit_state(force=True))
+            return {**result, **installed}
         if command == "marketplace.queue":
             return self.context.marketplace.queue_status()
         if command == "marketplace.cancel":
@@ -2310,7 +2393,9 @@ class WebBridge(QObject):
                     changes[target] = zapret[source]
             if "controlMode" in zapret:
                 # Mode changes go through the engine so the daemon starts/stops.
-                self._set_orchestrator_mode(str(zapret.get("controlMode") or "manual"), emit_state=False)
+                self._set_orchestrator_mode(
+                    str(zapret.get("controlMode") or "manual"), backend="zapret", emit_state=False
+                )
         zapret2 = patch.get("zapret2")
         if isinstance(zapret2, dict):
             for source, target in {
@@ -2319,6 +2404,7 @@ class WebBridge(QObject):
                 "rawFilter": "zapret2_raw_filter",
                 "luaStrategy": "zapret2_lua_strategy",
                 "strategyId": "zapret2_strategy_id",
+                "controlMode": "zapret2_control_mode",
             }.items():
                 if source in zapret2:
                     changes[target] = zapret2[source]
@@ -2783,6 +2869,7 @@ class WebBridge(QObject):
                     "generals": self._get_generals_payload(),
                 },
                 "zapret2": {
+                    "controlMode": str(getattr(settings, "zapret2_control_mode", "manual") or "manual"),
                     "tcpPorts": settings.zapret2_tcp_ports,
                     "udpPorts": settings.zapret2_udp_ports,
                     "rawFilter": settings.zapret2_raw_filter,

@@ -31,6 +31,7 @@ def _snapshot(context) -> dict[str, Any]:
             "zapret_gaming_set": getattr(settings, "zapret_gaming_set", "stun-wide-base"),
             "zapret_udp_exclude_ports": settings.zapret_udp_exclude_ports,
             "zapret_control_mode": getattr(settings, "zapret_control_mode", "manual"),
+            "zapret2_control_mode": getattr(settings, "zapret2_control_mode", "manual"),
             "trusted_general": getattr(settings, "trusted_general", ""),
             "selected_runtime_mode": getattr(settings, "selected_runtime_mode", "zapret"),
             "autostart_windows": bool(settings.autostart_windows),

@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -243,7 +244,13 @@ class UpdatesManager:
                     raise primary_error
             raise primary_error
 
-    def _download_bytes(self, url: str, *, timeout: int) -> bytes:
+    def _download_bytes(
+        self,
+        url: str,
+        *,
+        timeout: int,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> bytes:
         stall_limit = self.DOWNLOAD_STALL_SEC
         wall_limit = max(float(timeout), self.DOWNLOAD_DEADLINE_SEC)
 
@@ -253,6 +260,10 @@ class UpdatesManager:
             last_chunk = started
             chunks: list[bytes] = []
             with urllib.request.urlopen(request, timeout=min(60, int(timeout))) as response:
+                total = int(response.headers.get("Content-Length") or 0)
+                downloaded = 0
+                if progress_callback is not None:
+                    progress_callback(0, total)
                 while True:
                     now = time.monotonic()
                     if now - started >= wall_limit:
@@ -264,6 +275,9 @@ class UpdatesManager:
                         break
                     last_chunk = time.monotonic()
                     chunks.append(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback is not None:
+                        progress_callback(downloaded, total)
             return b"".join(chunks)
 
         return self._run_with_deadline(_load, timeout=wall_limit + 2.0)
@@ -425,7 +439,12 @@ class UpdatesManager:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
 
-    def prepare_update(self, release_info: dict[str, str]) -> dict[str, str]:
+    def prepare_update(
+        self,
+        release_info: dict[str, str],
+        *,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+    ) -> dict[str, str]:
         asset_url = str(release_info.get("asset_url") or "").strip()
         asset_name = str(release_info.get("asset_name") or "").strip() or "update.zip"
         if not asset_url:
@@ -433,8 +452,17 @@ class UpdatesManager:
 
         temp_root = Path(tempfile.mkdtemp(prefix="zapret_hub_update_"))
         zip_path = temp_root / asset_name
-        archive_bytes = self._download_bytes(asset_url, timeout=120)
         expected_size = int(str(release_info.get("asset_size") or "0") or 0)
+        def report(phase: str, current: int, total: int) -> None:
+            if progress_callback is not None:
+                progress_callback(phase, current, total)
+
+        archive_bytes = self._download_bytes(
+            asset_url,
+            timeout=120,
+            progress_callback=lambda current, total: report("download", current, total or expected_size),
+        )
+        report("verify", len(archive_bytes), len(archive_bytes))
         if expected_size and len(archive_bytes) != expected_size:
             raise ValueError("Размер загруженного обновления не совпадает с данными зеркала.")
         expected_digest = str(release_info.get("asset_digest") or "").strip().lower()
@@ -448,12 +476,17 @@ class UpdatesManager:
         extract_root = temp_root / "payload"
         extract_root.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path, "r") as archive:
-            archive.extractall(extract_root)
+            members = archive.infolist()
+            report("extract", 0, max(1, len(members)))
+            for index, member in enumerate(members, start=1):
+                archive.extract(member, extract_root)
+                report("extract", index, max(1, len(members)))
 
         payload_root = self._resolve_payload_root(extract_root)
         launch_exe = self._find_payload_exe(payload_root)
         if launch_exe is None:
             raise FileNotFoundError("The downloaded update package does not contain zapret_hub.exe.")
+        report("ready", 1, 1)
 
         return {
             "temp_root": str(temp_root),
@@ -521,6 +554,13 @@ class UpdatesManager:
             $logPath = '{str(log_path).replace("'", "''")}'
             $preserve = @('data', 'mods', 'configs', 'cache', 'logs', 'backups')
             $backupRoot = Join-Path '{str(script_root).replace("'", "''")}' ('preserve_' + [guid]::NewGuid().ToString('N'))
+            $mutex = New-Object System.Threading.Mutex($false, 'Global\\ZapretHubApplicationUpdater')
+            $ownsMutex = $false
+            try {{ $ownsMutex = $mutex.WaitOne(0) }} catch {{}}
+            if (-not $ownsMutex) {{
+              Add-Content -LiteralPath $logPath -Value ('[' + (Get-Date -Format s) + '] another updater is already active')
+              exit 3
+            }}
             New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
             Add-Content -LiteralPath $logPath -Value ('[' + (Get-Date -Format s) + '] updater started')
 
@@ -580,7 +620,7 @@ class UpdatesManager:
                   }}
                   New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
                   try {{
-                    Copy-Item $item.FullName $dest -Force -ErrorAction Stop
+                    Copy-Item -LiteralPath $item.FullName -Destination $dest -Force -ErrorAction Stop
                   }} catch {{
                     Add-UpdateLog ('copy failed: ' + $item.FullName + ' -> ' + $dest + ' | ' + $_.Exception.Message)
                   }}
@@ -588,7 +628,7 @@ class UpdatesManager:
               }}
             }}
 
-            for ($i = 0; $i -lt 120; $i++) {{
+            for ($i = 0; $i -lt 40; $i++) {{
               if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) {{ break }}
               Start-Sleep -Milliseconds 250
             }}
@@ -629,8 +669,23 @@ class UpdatesManager:
               }}
             }}
 
-            Overlay-Tree $src $dst $preserve
-            Add-Content -LiteralPath $logPath -Value ('[' + (Get-Date -Format s) + '] payload copied')
+            $excludeDirs = @()
+            foreach ($item in $preserve) {{ $excludeDirs += (Join-Path $src $item) }}
+            $robocopyArgs = @($src, $dst, '/E', '/R:8', '/W:1', '/COPY:DAT', '/DCOPY:DAT', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/XJ', '/XD') + $excludeDirs
+            & robocopy @robocopyArgs | Out-Null
+            $copyCode = $LASTEXITCODE
+            if ($copyCode -gt 7) {{
+              Add-UpdateLog ('robocopy failed with exit code ' + $copyCode)
+              foreach ($item in $preserve) {{
+                $backupItem = Join-Path $backupRoot $item
+                if (Test-Path $backupItem) {{
+                  Move-Item -LiteralPath $backupItem -Destination (Join-Path $dst $item) -Force
+                }}
+              }}
+              if ($ownsMutex) {{ $mutex.ReleaseMutex() }}
+              exit 4
+            }}
+            Add-UpdateLog ('payload copied, robocopy exit code ' + $copyCode)
 
             if ($sourceIsStandalone -and -not (Test-InstalledStandalone $dst)) {{
               Add-UpdateLog 'standalone validation failed after overlay, retrying top-level runtime files'
@@ -673,12 +728,32 @@ class UpdatesManager:
             Set-Content -LiteralPath (Join-Path $identityDir 'app_release_identity.json') -Value '{identity_json.replace("'", "''")}' -Encoding UTF8
             Add-UpdateLog 'installed release identity saved'
 
-            Start-Sleep -Milliseconds 400
+            Start-Sleep -Milliseconds 250
             $launch = Join-Path $dst 'zapret_hub.exe'
-            Start-Process -FilePath $launch -WorkingDirectory $dst
-            Add-Content -LiteralPath $logPath -Value ('[' + (Get-Date -Format s) + '] relaunched app')
+            $restarted = $false
+            for ($attempt = 1; $attempt -le 3; $attempt++) {{
+              try {{
+                $newProcess = Start-Process -FilePath $launch -WorkingDirectory $dst -PassThru -ErrorAction Stop
+                Start-Sleep -Milliseconds 1200
+                if (-not $newProcess.HasExited) {{
+                  $restarted = $true
+                  Add-UpdateLog ('relaunched app on attempt ' + $attempt)
+                  break
+                }}
+                Add-UpdateLog ('relaunch attempt ' + $attempt + ' exited with code ' + $newProcess.ExitCode)
+              }} catch {{
+                Add-UpdateLog ('relaunch attempt ' + $attempt + ' failed: ' + $_.Exception.Message)
+              }}
+              Start-Sleep -Milliseconds 750
+            }}
+            if (-not $restarted) {{
+              Add-UpdateLog 'failed to relaunch app after 3 attempts'
+              if ($ownsMutex) {{ $mutex.ReleaseMutex() }}
+              exit 5
+            }}
             Remove-Item $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            if ($ownsMutex) {{ $mutex.ReleaseMutex() }}
             Start-Sleep -Milliseconds 500
             Remove-Item '{str(script_path).replace("'", "''")}' -Force -ErrorAction SilentlyContinue
             """

@@ -108,6 +108,10 @@ class SettingsManager:
             settings.zapret_control_mode = "manual"
             changed = True
 
+        if raw.get("zapret2_control_mode") not in {"manual", "auto"}:
+            settings.zapret2_control_mode = "manual"
+            changed = True
+
         strategy_id = str(raw.get("zapret2_strategy_id", getattr(settings, "zapret2_strategy_id", "balanced")) or "balanced")
         if strategy_id not in {"balanced", "fake_heavy", "multisplit"}:
             settings.zapret2_strategy_id = "balanced"

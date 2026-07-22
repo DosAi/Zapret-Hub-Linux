@@ -20,6 +20,11 @@ let store: Store = { queue: EMPTY, completedFlash: false };
 const listeners = new Set<() => void>();
 let wired = false;
 let flashTimer: number | undefined;
+const terminalTimers = new Map<string, number>();
+
+function isWorking(item: MarketplaceQueueItem) {
+  return ["queued", "downloading", "paused", "installing", "starting"].includes(String(item.status || ""));
+}
 
 function emitStore() {
   for (const listener of listeners) listener();
@@ -42,7 +47,7 @@ function normalize(status: Partial<MarketplaceQueueStatus> | null | undefined): 
 }
 
 function applyQueue(next: MarketplaceQueueStatus) {
-  const hadActive = store.queue.items.length > 0 || store.queue.busy;
+  const hadActive = store.queue.busy || store.queue.items.some(isWorking);
   const idle = next.items.length === 0 && !next.busy;
   if (hadActive && idle) {
     setStore({ queue: next, completedFlash: true });
@@ -93,7 +98,11 @@ function ensureWired() {
   const bridge = getBridge();
   pollQueueOnce();
   bridge.subscribe("marketplace.queue", (payload) => {
-    applyQueue(normalize(payload));
+    const next = normalize(payload);
+    const retainedErrors = store.queue.items.filter(
+      (item) => item.status === "error" && !next.items.some((candidate) => candidate.slug === item.slug),
+    );
+    applyQueue({ ...next, items: [...next.items, ...retainedErrors] });
     armQueuePoll();
   });
   bridge.subscribe("marketplace.download-progress", (payload) => {
@@ -115,7 +124,7 @@ function ensureWired() {
       bytesTotal: Number(payload.bytesTotal ?? (idx >= 0 ? items[idx].bytesTotal : 0) ?? 0),
       error: payload.error,
     };
-    if (status === "done" || status === "error" || status === "cancelled") {
+    if (status === "done" || status === "cancelled") {
       if (idx >= 0) items.splice(idx, 1);
       if (status === "done") {
         if (Array.isArray(payload.mods) && Array.isArray(payload.mods2)) {
@@ -124,6 +133,23 @@ function ensureWired() {
           void refreshMarketplaceMods(slug).catch(() => undefined);
         }
       }
+    } else if (status === "error") {
+      if (idx >= 0) items[idx] = { ...items[idx], ...nextItem };
+      else items.push(nextItem);
+      window.clearTimeout(terminalTimers.get(slug));
+      terminalTimers.set(
+        slug,
+        window.setTimeout(() => {
+          terminalTimers.delete(slug);
+          setStore({
+            queue: {
+              ...store.queue,
+              items: store.queue.items.filter((item) => !(item.slug === slug && item.status === "error")),
+              pending: store.queue.pending.filter((entry) => entry !== slug),
+            },
+          });
+        }, 12_000),
+      );
     } else if (idx >= 0) {
       items[idx] = { ...items[idx], ...nextItem };
     } else {
@@ -135,7 +161,7 @@ function ensureWired() {
       ? Math.max(0, Math.min(1, (active.bytesDone || 0) / active.bytesTotal))
       : active
         ? Math.max(0.02, Number(active.progress || 0.02))
-        : items.length
+        : items.some(isWorking)
           ? 0.02
           : 0;
     applyQueue({
@@ -166,7 +192,9 @@ export function useMarketplaceQueue() {
 
   const bySlug = useMemo(() => {
     const map = new Map<string, MarketplaceQueueItem>();
-    for (const item of snap.queue.items) map.set(item.slug, item);
+    for (const item of snap.queue.items) {
+      if (isWorking(item)) map.set(item.slug, item);
+    }
     return map;
   }, [snap.queue.items]);
 
@@ -221,7 +249,7 @@ export function useMarketplaceQueue() {
       iconUrl?: string;
       projectUrl?: string;
     }) => {
-      if (!store.queue.items.some((entry) => entry.slug === item.slug)) {
+      if (!store.queue.items.some((entry) => entry.slug === item.slug && isWorking(entry))) {
         applyQueue({
           ...store.queue,
           busy: store.queue.busy || store.queue.items.length === 0,
@@ -240,6 +268,15 @@ export function useMarketplaceQueue() {
               bytesTotal: 0,
             },
           ],
+        });
+      }
+      if (store.queue.items.some((entry) => entry.slug === item.slug && entry.status === "error")) {
+        window.clearTimeout(terminalTimers.get(item.slug));
+        terminalTimers.delete(item.slug);
+        applyQueue({
+          ...store.queue,
+          items: store.queue.items.filter((entry) => !(entry.slug === item.slug && entry.status === "error")),
+          pending: store.queue.pending.filter((slug) => slug !== item.slug),
         });
       }
       try {

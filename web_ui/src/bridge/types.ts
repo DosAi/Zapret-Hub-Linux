@@ -122,6 +122,7 @@ export interface Settings {
     generals: { id: string; name: string }[];
   };
   zapret2: {
+    controlMode: "manual" | "auto";
     tcpPorts: string;
     udpPorts: string;
     rawFilter: string;
@@ -271,6 +272,7 @@ export type Commands = {
       sort?: "relevance" | "popular" | "downloads" | "updated" | "newest";
       page?: number;
       limit?: number;
+      refresh?: boolean;
     };
     out: MarketplaceListResult;
   };
@@ -289,7 +291,10 @@ export type Commands = {
     };
     out: { queued: boolean; slug: string; jobId?: string; pending: string[]; alreadyQueued?: boolean };
   };
-  "marketplace.remove": { in: { slug: string }; out: { ok: boolean; slug: string; removed: string[] } };
+  "marketplace.remove": {
+    in: { slug: string };
+    out: { ok: boolean; slug: string; removed: string[]; mods: Mod[]; mods2: Mod[] };
+  };
   "marketplace.queue": { in: void; out: MarketplaceQueueStatus };
   "marketplace.cancel": { in: { slug?: string; jobId?: string }; out: MarketplaceQueueStatus };
   "marketplace.pause": { in: { slug?: string; jobId?: string }; out: MarketplaceQueueStatus };
@@ -314,7 +319,7 @@ export type Commands = {
   "onboarding.configure": { in: { selected?: string[] } | void; out: void };
   "onboarding.cancel": { in: void; out: void };
   "orchestrator.status": { in: void; out: OrchestratorStatus };
-  "orchestrator.setMode": { in: { mode: "manual" | "auto" }; out: OrchestratorStatus };
+  "orchestrator.setMode": { in: { mode: "manual" | "auto"; backend?: "zapret" | "zapret2" }; out: OrchestratorStatus };
   /** Auto onboarding bootstrap (YT+Discord probes, trusted general). Backend runs async. */
   "orchestrator.bootstrap": {
     in: { youtube?: boolean; discord?: boolean } | void;
@@ -368,6 +373,14 @@ export type Events = {
     htmlUrl: string;
     isHotfix?: boolean;
     demo?: boolean;
+  };
+  "app.update-progress": {
+    phase: "download" | "verify" | "extract" | "ready";
+    percent: number;
+    downloadedBytes?: number;
+    totalBytes?: number;
+    messageRu: string;
+    messageEn: string;
   };
   "vpn.setup-required": {
     reason?: string;

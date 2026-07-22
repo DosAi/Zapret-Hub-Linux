@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocale } from "@/hooks/useLocale";
 import { useBridge } from "@/hooks/useBridgeState";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
@@ -24,6 +24,17 @@ export function AppUpdateModal({
   const bridge = useBridge();
   const ru = locale === "ru";
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState({ percent: 0, messageRu: "", messageEn: "", downloadedBytes: 0, totalBytes: 0 });
+
+  useEffect(() => bridge.subscribe("app.update-progress", (value) => {
+    setProgress({
+      percent: Math.max(0, Math.min(100, Number(value.percent || 0))),
+      messageRu: String(value.messageRu || ""),
+      messageEn: String(value.messageEn || ""),
+      downloadedBytes: Number(value.downloadedBytes || 0),
+      totalBytes: Number(value.totalBytes || 0),
+    });
+  }), [bridge]);
 
   const applyNow = async () => {
     if (!prompt || prompt.demo || busy) {
@@ -31,6 +42,7 @@ export function AppUpdateModal({
       return;
     }
     setBusy(true);
+    setProgress({ percent: 1, messageRu: "Подготовка обновления", messageEn: "Preparing update", downloadedBytes: 0, totalBytes: 0 });
     try {
       await bridge.call("app.apply-update", { scheduleNextLaunch: false });
       // App should quit for overlay install; keep modal until then.
@@ -99,8 +111,23 @@ export function AppUpdateModal({
                 </div>
               )}
               {busy && (
-                <div className="text-[11px] text-fg-dim">
-                  {ru ? "Скачиваем и готовим обновление…" : "Downloading and preparing the update…"}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3 text-[11px] text-fg-dim">
+                    <span>{ru ? (progress.messageRu || "Подготовка обновления") : (progress.messageEn || "Preparing update")}</span>
+                    <span className="tabular-nums text-fg-mute">{Math.round(progress.percent)}%</span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-bg-3">
+                    <motion.div
+                      className="h-full rounded-full bg-fg"
+                      animate={{ width: `${Math.max(2, progress.percent)}%` }}
+                      transition={{ duration: 0.2, ease: "easeOut" }}
+                    />
+                  </div>
+                  {progress.totalBytes > 0 && (
+                    <div className="text-[10px] tabular-nums text-fg-mute">
+                      {(progress.downloadedBytes / 1048576).toFixed(1)} / {(progress.totalBytes / 1048576).toFixed(1)} MB
+                    </div>
+                  )}
                 </div>
               )}
             </div>

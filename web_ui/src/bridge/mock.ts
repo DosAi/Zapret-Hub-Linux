@@ -223,7 +223,7 @@ const initialState: AppState = {
         { id: "general|general (ALT11).bat", name: "general (ALT11).bat" },
       ],
     },
-    zapret2: { tcpPorts: "80,443", udpPorts: "443", rawFilter: "", luaStrategy: "", strategyId: "balanced" },
+    zapret2: { controlMode: "manual", tcpPorts: "80,443", udpPorts: "443", rawFilter: "", luaStrategy: "", strategyId: "balanced" },
     vpn: {
       subscriptionUrl: "",
       subscriptionState: "empty",
@@ -785,7 +785,7 @@ export function createMockBridge(): ZapretHubBridge {
         state.mods = state.mods.filter((mod) => mod.marketplaceSlug !== slug);
         state.mods2 = (state.mods2 || []).filter((mod) => mod.marketplaceSlug !== slug);
         pushState();
-        return { ok: true, slug, removed } as Commands[K]["out"];
+        return { ok: true, slug, removed, mods: state.mods, mods2: state.mods2 || [] } as Commands[K]["out"];
       }
       case "marketplace.queue":
         return mockQueueSnapshot() as Commands[K]["out"];
