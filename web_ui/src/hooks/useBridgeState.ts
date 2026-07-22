@@ -359,7 +359,41 @@ export function patchOptimistic(patch: Optimistic) {
   notify();
 }
 
+type Mods = NonNullable<AppState["mods"]>;
+type MarketplaceModsOverride = { mods: Mods; mods2: Mods };
+
+let marketplaceModsOverride: MarketplaceModsOverride | null = null;
+
+function marketplaceOnly(mods: Mods) {
+  return mods.filter((mod) => Boolean(String(mod.marketplaceSlug || "").trim()));
+}
+
+function marketplaceSignature(mods: Mods) {
+  return marketplaceOnly(mods)
+    .map((mod) => `${mod.id}:${mod.marketplaceSlug}:${mod.version || ""}`)
+    .sort()
+    .join("|");
+}
+
+function mergeMarketplaceMods(current: Mods, authoritative: Mods) {
+  return [...current.filter((mod) => !String(mod.marketplaceSlug || "").trim()), ...marketplaceOnly(authoritative)];
+}
+
 function setBaseState(next: AppState, urgent = false) {
+  if (marketplaceModsOverride) {
+    const caughtUp =
+      marketplaceSignature(next.mods || []) === marketplaceSignature(marketplaceModsOverride.mods)
+      && marketplaceSignature(next.mods2 || []) === marketplaceSignature(marketplaceModsOverride.mods2);
+    if (caughtUp) {
+      marketplaceModsOverride = null;
+    } else {
+      next = {
+        ...next,
+        mods: mergeMarketplaceMods(next.mods || [], marketplaceModsOverride.mods),
+        mods2: mergeMarketplaceMods(next.mods2 || [], marketplaceModsOverride.mods2),
+      };
+    }
+  }
   baseState = next;
   optimistic = pruneOptimistic(next, optimistic);
   notify();
@@ -482,8 +516,19 @@ export async function refreshAppState(): Promise<AppState | null> {
 }
 
 export function applyMarketplaceMods(mods: AppState["mods"], mods2: AppState["mods2"]) {
-  if (!baseState) return;
-  setBaseState({ ...baseState, mods, mods2 }, true);
+  const nextMods = mods || [];
+  const nextMods2 = mods2 || [];
+  const override = { mods: marketplaceOnly(nextMods), mods2: marketplaceOnly(nextMods2) };
+  marketplaceModsOverride = override;
+  if (!baseState) {
+    return;
+  }
+  setBaseState({
+    ...baseState,
+    mods: mergeMarketplaceMods(baseState.mods || [], nextMods),
+    mods2: mergeMarketplaceMods(baseState.mods2 || [], nextMods2),
+  }, true);
+  marketplaceModsOverride = override;
 }
 
 export async function refreshMarketplaceMods(slug = "", timeoutMs = 60_000): Promise<boolean> {

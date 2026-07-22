@@ -96,7 +96,7 @@ export function AppUpdateModal({
               <p className="whitespace-pre-line text-[12px] leading-relaxed text-fg-dim">
                 {prompt.isHotfix
                   ? (ru
-                    ? `Для Zapret Hub ${prompt.currentVersion} найден hotfix.\nHotfix — необязательное обновление, но оно может содержать важные исправления, поэтому настоятельно рекомендуем обновиться.`
+                    ? `Для Zapret Hub ${prompt.currentVersion} найден hotfix.\nHotfix - необязательное обновление, но оно может содержать важные исправления, поэтому настоятельно рекомендуем обновиться.`
                     : `A hotfix is available for Zapret Hub ${prompt.currentVersion}.\nA hotfix is optional, but it may contain important fixes, so updating is strongly recommended.`)
                   : (ru
                     ? `Вышла новая версия Zapret Hub.\nТекущая: ${prompt.currentVersion} · Новая: ${prompt.latestVersion}`

@@ -81,15 +81,10 @@ jobs:
             --release-dir ".\release_$version" `
             --version $version `
             --uninstaller-x64 .\dist_installer\uninstall_zaprethub.exe
-          Copy-Item .\dist_installer\uninstall_zaprethub.exe `
-            ".\release_$version\uninstall_zaprethub_${version}_win_x64.exe" -Force
-
       - uses: actions/upload-artifact@v6
         with:
           name: release-portable-win-x64
-          path: |
-            release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_x64.zip
-            release_${{ steps.meta.outputs.version }}/uninstall_zaprethub_${{ steps.meta.outputs.version }}_win_x64.exe
+          path: release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_x64.zip
           if-no-files-found: error
 
   portable-arm64:
@@ -145,15 +140,10 @@ jobs:
             --release-dir ".\release_$version" `
             --version $version `
             --uninstaller-arm64 .\dist_installer\uninstall_zaprethub.exe
-          Copy-Item .\dist_installer\uninstall_zaprethub.exe `
-            ".\release_$version\uninstall_zaprethub_${version}_win_arm64.exe" -Force
-
       - uses: actions/upload-artifact@v6
         with:
           name: release-portable-win-arm64
-          path: |
-            release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_arm64.zip
-            release_${{ steps.meta.outputs.version }}/uninstall_zaprethub_${{ steps.meta.outputs.version }}_win_arm64.exe
+          path: release_${{ steps.meta.outputs.version }}/zapret_hub_${{ steps.meta.outputs.version }}_portable_win_arm64.zip
           if-no-files-found: error
 
   installer:
@@ -281,20 +271,6 @@ jobs:
             Write-Host "Staged $name ($([math]::Round($found.Length/1MB,1)) MB)"
           }
 
-          $optional = @(
-            "uninstall_zaprethub_${version}_win_x64.exe",
-            "uninstall_zaprethub_${version}_win_arm64.exe"
-          )
-          foreach ($name in $optional) {
-            $found = Get-ChildItem .\.artifacts -Recurse -File -Filter $name | Select-Object -First 1
-            if ($found) {
-              Copy-Item $found.FullName (Join-Path $releaseDir $name) -Force
-              Write-Host "Staged optional $name ($([math]::Round($found.Length/1MB,1)) MB)"
-            } else {
-              Write-Warning "Optional standalone uninstaller is absent: $name"
-            }
-          }
-
       - name: Optional Authenticode signing
         shell: pwsh
         env:
@@ -315,11 +291,6 @@ jobs:
           [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX_BASE64))
           $env:WINDOWS_SIGNING_PFX_PATH = $certificatePath
           $targets = @((Join-Path $releaseDir "install_zaprethub_${version}_universal.exe"))
-          $optionalTargets = @(
-            (Join-Path $releaseDir "uninstall_zaprethub_${version}_win_x64.exe"),
-            (Join-Path $releaseDir "uninstall_zaprethub_${version}_win_arm64.exe")
-          )
-          $targets += $optionalTargets | Where-Object { Test-Path -LiteralPath $_ }
           .\scripts\sign_windows_artifacts.ps1 -Files $targets -RequireSignature
 
       - name: Generate WinGet portable manifests
@@ -354,12 +325,32 @@ jobs:
               "## Assets",
               "- ``install_zaprethub_${version}_universal.exe`` - slim installer (downloads app from goshkow.ru)",
               "- ``zapret_hub_${version}_portable_win_x64.zip`` / ``_win_arm64.zip`` - portable builds",
-              "- ``uninstall_zaprethub_${version}_win_x64.exe`` / ``_win_arm64.exe`` - standalone uninstallers"
+              "- ``winget-manifests-${version}.zip`` - WinGet manifests"
             ) -join "`n"
           }
           "body<<__ZAPRET_HUB_NOTES__" >> $env:GITHUB_OUTPUT
           $body >> $env:GITHUB_OUTPUT
           "__ZAPRET_HUB_NOTES__" >> $env:GITHUB_OUTPUT
+
+      - name: Remove legacy standalone uninstaller assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.release_meta.outputs.tag }}"
+          $assets = @(gh release view $tag --json assets --jq '.assets[].name' 2>$null)
+          if ($LASTEXITCODE -eq 0) {
+            $version = "${{ steps.release_meta.outputs.version }}"
+            @(
+              "uninstall_zaprethub_${version}_win_x64.exe",
+              "uninstall_zaprethub_${version}_win_arm64.exe"
+            ) | ForEach-Object {
+              if ($assets -contains $_) {
+                gh release delete-asset $tag $_ --yes
+                if ($LASTEXITCODE -ne 0) { throw "Failed to remove legacy release asset: $_" }
+              }
+            }
+          }
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -371,5 +362,4 @@ jobs:
             release_${{ steps.release_meta.outputs.version }}/install_zaprethub_${{ steps.release_meta.outputs.version }}_universal.exe
             release_${{ steps.release_meta.outputs.version }}/zapret_hub_${{ steps.release_meta.outputs.version }}_portable_win_x64.zip
             release_${{ steps.release_meta.outputs.version }}/zapret_hub_${{ steps.release_meta.outputs.version }}_portable_win_arm64.zip
-            release_${{ steps.release_meta.outputs.version }}/uninstall_zaprethub_${{ steps.release_meta.outputs.version }}_win_*.exe
             release_${{ steps.release_meta.outputs.version }}/winget-manifests-${{ steps.release_meta.outputs.version }}.zip

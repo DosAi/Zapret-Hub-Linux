@@ -989,17 +989,14 @@ export function MarketplacePage({
                     className="grid h-7 w-7 place-items-center rounded-full border border-line-1 bg-bg-1 text-fg-dim transition hover:border-line-2 hover:bg-bg-3 hover:text-fg disabled:opacity-50"
                   >
                     <svg
-                      viewBox="0 0 24 24"
+                      viewBox="0 0 12 12"
                       aria-hidden="true"
-                      className={`h-3.5 w-3.5 fill-none stroke-current ${loading ? "animate-spin" : ""}`}
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
+                      className={`h-4 w-4 fill-none stroke-current ${loading ? "animate-spin" : ""}`}
                     >
-                      <path d="M20 7v5h-5" />
-                      <path d="M4 17v-5h5" />
-                      <path d="M6.1 8.2A7 7 0 0 1 18.8 7L20 12" />
-                      <path d="M17.9 15.8A7 7 0 0 1 5.2 17L4 12" />
+                      <path
+                        d="M10 4c-.8-1.1-2-2.5-4.1-2.5-2.5 0-4.4 2-4.4 4.5s2 4.5 4.4 4.5c1.3 0 2.5-.6 3.3-1.5m1.3-7.5V4c0 .3-.2.5-.5.5H7.5"
+                        strokeLinecap="round"
+                      />
                     </svg>
                   </button>
                   <FilterSelect

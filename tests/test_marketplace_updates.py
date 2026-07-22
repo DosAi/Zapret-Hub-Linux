@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import hashlib
 import threading
+import time
 import urllib.request
 import zipfile
 
@@ -168,6 +169,18 @@ def test_download_queue_completes_download_and_install(monkeypatch, tmp_path: Pa
     assert mods.installed[0].path.exists()
     assert any(name == "marketplace.download-progress" and data.get("status") == "installing" for name, data in events)
     assert any(name == "marketplace.download-progress" and data.get("status") == "done" for name, data in events)
+    deadline = time.monotonic() + 2
+    snapshot = service.queue_status()
+    while snapshot["busy"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+        snapshot = service.queue_status()
+    assert snapshot["installRevision"] == 1
+    assert snapshot["lastCompleted"] == {
+        "revision": 1,
+        "slug": "market-test",
+        "modId": "market-test",
+        "compatibility": "zapret",
+    }
 
 
 def test_remove_installed_marketplace_mod(tmp_path: Path) -> None:
@@ -196,6 +209,36 @@ def test_remove_installed_marketplace_mod(tmp_path: Path) -> None:
 
     assert result == {"ok": True, "slug": "market-test", "removed": ["mod-1"]}
     assert mods.installed == []
+
+
+def test_enqueue_rejects_already_installed_marketplace_mod(tmp_path: Path) -> None:
+    class Paths:
+        data_dir = tmp_path / "data"
+        cache_dir = tmp_path / "cache"
+
+    class Logging:
+        def log(self, *_args, **_kwargs) -> None:
+            return None
+
+    installed = SimpleNamespace(
+        id="mod-1",
+        name="Installed",
+        author="",
+        description="",
+        icon_url="",
+        source_url="",
+        version="1.0.0",
+        marketplace_slug="market-test",
+    )
+    mods = SimpleNamespace(list_installed=lambda: [installed])
+    service = MarketplaceService(storage_paths=Paths(), logging=Logging(), mods=mods)
+
+    result = service.enqueue_download("market-test")
+
+    assert result["queued"] is False
+    assert result["alreadyInstalled"] is True
+    assert result["modId"] == "mod-1"
+    assert service.queue_status()["items"] == []
 
 
 def test_ticket_http_error_uses_verified_public_download(monkeypatch, tmp_path: Path) -> None:

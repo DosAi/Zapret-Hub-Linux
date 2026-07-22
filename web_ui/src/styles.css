@@ -613,3 +613,8 @@ textarea {
     transition-duration: revert !important;
   }
 }
+@property --download-progress {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
