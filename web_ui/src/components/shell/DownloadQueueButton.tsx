@@ -18,6 +18,13 @@ function isWorkingStatus(status: string) {
   return ["queued", "downloading", "paused", "installing", "starting"].includes(String(status || ""));
 }
 
+function itemProgress(item: MarketplaceQueueItem) {
+  const byteProgress = item.bytesTotal && item.bytesTotal > 0
+    ? Number(item.bytesDone || 0) / item.bytesTotal
+    : 0;
+  return Math.max(0, Math.min(1, Math.max(Number(item.progress || 0), byteProgress)));
+}
+
 function MiniCover({ url, title }: { url?: string; title: string }) {
   const [failed, setFailed] = useState(false);
   if (!url || failed) {
@@ -118,7 +125,7 @@ function ActiveRow({
   const ru = locale === "ru";
   const paused = item.status === "paused";
   const queued = item.status === "queued";
-  const progress = Math.max(0, Math.min(1, Number(item.progress || 0)));
+  const progress = itemProgress(item);
   const [visualProgress, setVisualProgress] = useState(0);
   useEffect(() => {
     const frame = requestAnimationFrame(() => setVisualProgress(progress));

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import urllib.error
@@ -51,6 +52,7 @@ class MarketplaceService:
     CONNECT_DEADLINE_SEC = 15.0
     DOWNLOAD_STALL_SEC = 45.0
     DOWNLOAD_WALL_SEC = 300.0
+    MIN_FREE_SPACE_BYTES = 1024 ** 3
 
     storage_paths: Any
     logging: Any
@@ -550,6 +552,7 @@ class MarketplaceService:
                     if job.status in {"queued", "downloading", "paused", "installing"}
                 ],
             }
+        self._ensure_install_space(compatibility)
         with self._lock:
             for existing in self._jobs:
                 if existing.slug == slug and existing.status in {"queued", "downloading", "paused", "installing"}:
@@ -824,6 +827,7 @@ class MarketplaceService:
         self._raise_if_stopped(job)
         filename = str(ticket.get("filename") or f"{job.slug}.zip")
         size = int(ticket.get("size") or 0)
+        self._ensure_install_space(job.compatibility, incoming_bytes=size)
         sha256 = str(ticket.get("sha256") or "").lower().removeprefix("sha256:")
         direct = str(ticket.get("direct_url") or "")
         fallback = str(ticket.get("fallback_url") or "")
@@ -904,6 +908,36 @@ class MarketplaceService:
         job.message = installed_id or job.slug
         job.compatibility = compat
         job.mod_id = installed_id
+
+    def _install_root(self, compatibility: str) -> Path:
+        if str(compatibility or "").strip().lower() == "zapret2":
+            manager_root = getattr(self.mods2, "mods_dir", None)
+            if manager_root:
+                return Path(manager_root)
+            configured_root = getattr(self.storage_paths, "mods_zapret2_dir", None)
+            if configured_root:
+                return Path(configured_root)
+        configured_root = getattr(self.storage_paths, "mods_dir", None)
+        if configured_root:
+            return Path(configured_root)
+        return Path(self.storage_paths.data_dir) / "mods"
+
+    def _ensure_install_space(self, compatibility: str, *, incoming_bytes: int = 0) -> None:
+        root = self._install_root(compatibility)
+        probe = root
+        while not probe.exists() and probe.parent != probe:
+            probe = probe.parent
+        try:
+            free = int(shutil.disk_usage(probe).free)
+        except OSError as error:
+            self._log("warning", "Failed to check Marketplace free disk space", path=str(probe), error=str(error))
+            return
+        required = self.MIN_FREE_SPACE_BYTES + max(0, int(incoming_bytes or 0))
+        if free < required:
+            raise MarketplaceError(
+                "insufficient_disk_space",
+                f"insufficient_disk_space:{free}:{required}",
+            )
 
     def _raise_if_stopped(self, job: DownloadJob) -> None:
         with self._lock:
