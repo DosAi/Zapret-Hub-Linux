@@ -217,6 +217,7 @@ export type Commands = {
   "state.get": { in: void; out: AppState };
   "window.minimize": { in: void; out: void };
   "window.startDrag": { in: void; out: void };
+  "window.edit": { in: { action: "cut" | "copy" | "paste" | "select-all" }; out: void };
   "window.close": { in: void; out: void };
   "onboarding.open": { in: { mode: RuntimeId }; out: void };
   "runtime.select": { in: { id: RuntimeId; keepPower?: boolean }; out: void };
@@ -290,7 +291,15 @@ export type Commands = {
       iconUrl?: string;
       projectUrl?: string;
     };
-    out: { queued: boolean; slug: string; jobId?: string; pending: string[]; alreadyQueued?: boolean };
+    out: {
+      queued: boolean;
+      slug: string;
+      jobId?: string;
+      modId?: string;
+      pending: string[];
+      alreadyQueued?: boolean;
+      alreadyInstalled?: boolean;
+    };
   };
   "marketplace.remove": {
     in: { slug: string };
@@ -454,6 +463,13 @@ export interface MarketplaceQueueStatus {
   overallProgress?: number;
   pending: string[];
   items: MarketplaceQueueItem[];
+  installRevision?: number;
+  lastCompleted?: {
+    revision: number;
+    slug: string;
+    modId?: string;
+    compatibility?: string;
+  };
 }
 
 export interface MarketplaceCard {

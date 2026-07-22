@@ -15,7 +15,7 @@ from typing import Any, Callable
 from PySide6.QtCore import QObject, QPropertyAnimation, QEasingCurve, QRect, QTimer, Qt, QUrl, QUrlQuery, Signal, Slot
 from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineCore import QWebEngineSettings
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QSystemTrayIcon
 
@@ -270,6 +270,7 @@ class WebBridge(QObject):
         "window.minimize",
         "window.startDrag",
         "window.close",
+        "window.edit",
         "orchestrator.status",
         # Need a real result / dialog before the Promise resolves.
         "mods.import",
@@ -979,7 +980,9 @@ class WebBridge(QObject):
                 return cached
             return self.build_state()
         if command == "marketplace.installed":
-            return self._build_marketplace_mods_payload()
+            installed = self._build_marketplace_mods_payload()
+            self._merge_marketplace_mods_cache(installed)
+            return installed
         if command == "window.minimize":
             minimize = getattr(self.window, "fade_minimize", None)
             minimize() if callable(minimize) else self.window.showMinimized()
@@ -1544,6 +1547,19 @@ class WebBridge(QObject):
             component_id = str((payload or {}).get("id", ""))
             self._run_component_update(component_id)
             return None
+        if command == "window.edit":
+            action_name = str((payload or {}).get("action") or "").strip().lower()
+            actions = {
+                "cut": QWebEnginePage.WebAction.Cut,
+                "copy": QWebEnginePage.WebAction.Copy,
+                "paste": QWebEnginePage.WebAction.Paste,
+                "select-all": QWebEnginePage.WebAction.SelectAll,
+            }
+            action = actions.get(action_name)
+            view = getattr(self.window, "view", None)
+            if action is not None and view is not None:
+                view.page().triggerAction(action)
+            return None
         if command == "dns.select-profile":
             profile = str((payload or {}).get("profile", "xbox"))
             self._run_background(lambda: self.context.processes.select_dns_profile(profile))
@@ -1594,6 +1610,12 @@ class WebBridge(QObject):
                     "Уже в очереди загрузки." if self._ru() else "Already in download queue.",
                     kind="info",
                     toast_id=f"mp-queue-{result.get('slug')}",
+                )
+            elif result.get("alreadyInstalled"):
+                self._emit_toast(
+                    "\u041c\u043e\u0434\u0438\u0444\u0438\u043a\u0430\u0446\u0438\u044f \u0443\u0436\u0435 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0430." if self._ru() else "This modification is already installed.",
+                    kind="info",
+                    toast_id=f"mp-installed-{result.get('slug')}",
                 )
             elif len(pending) > 1:
                 self._emit_toast(

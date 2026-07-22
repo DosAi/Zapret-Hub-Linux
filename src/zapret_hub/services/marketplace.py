@@ -69,6 +69,8 @@ class MarketplaceService:
     _pause_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _update_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _dismissals: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _install_revision: int = field(default=0, init=False, repr=False)
+    _last_completed: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._device_id = self._load_or_create_device_id()
@@ -532,6 +534,19 @@ class MarketplaceService:
         slug = str(slug or "").strip()
         if not slug:
             raise MarketplaceError("invalid_slug", "Empty slug")
+        installed = next((item for item in self._list_marketplace_mods() if item.get("slug") == slug), None)
+        if installed is not None:
+            return {
+                "queued": False,
+                "alreadyInstalled": True,
+                "slug": slug,
+                "modId": str(installed.get("modId") or ""),
+                "pending": [
+                    job.slug
+                    for job in self._jobs
+                    if job.status in {"queued", "downloading", "paused", "installing"}
+                ],
+            }
         with self._lock:
             for existing in self._jobs:
                 if existing.slug == slug and existing.status in {"queued", "downloading", "paused", "installing"}:
@@ -696,6 +711,8 @@ class MarketplaceService:
             "overallProgress": overall,
             "pending": [j["slug"] for j in items],
             "items": items,
+            "installRevision": self._install_revision,
+            "lastCompleted": dict(self._last_completed),
         }
 
     def _emit_job(self, job: DownloadJob) -> None:
@@ -742,6 +759,13 @@ class MarketplaceService:
                         elif job.status != "cancelled":
                             job.status = "done"
                             job.progress = 1.0
+                            self._install_revision += 1
+                            self._last_completed = {
+                                "revision": self._install_revision,
+                                "slug": job.slug,
+                                "modId": job.mod_id,
+                                "compatibility": job.compatibility,
+                            }
                     self._emit_job(job)
                 except Exception as error:
                     try:

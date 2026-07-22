@@ -22,6 +22,7 @@ const listeners = new Set<() => void>();
 let wired = false;
 let flashTimer: number | undefined;
 const terminalTimers = new Map<string, number>();
+let observedInstallRevision = 0;
 
 function isWorking(item: MarketplaceQueueItem) {
   return ["queued", "downloading", "paused", "installing", "starting"].includes(String(item.status || ""));
@@ -51,10 +52,29 @@ function normalize(status: Partial<MarketplaceQueueStatus> | null | undefined): 
     overallProgress: Number(status?.overallProgress || 0),
     pending: Array.isArray(status?.pending) ? status!.pending.map(String) : items.map((i) => i.slug),
     items,
+    installRevision: Number(status?.installRevision || 0),
+    lastCompleted: status?.lastCompleted,
   };
 }
 
+function reconcileCompletedInstall(next: MarketplaceQueueStatus) {
+  const completed = next.lastCompleted;
+  const revision = Number(completed?.revision || next.installRevision || 0);
+  const slug = String(completed?.slug || "");
+  if (!slug || revision <= observedInstallRevision) return;
+  observedInstallRevision = revision;
+  const recentlyInstalled = new Set(store.recentlyInstalled);
+  recentlyInstalled.add(slug);
+  setStore({ recentlyInstalled });
+  void refreshMarketplaceMods(slug)
+    .then((confirmed) => {
+      if (confirmed) clearRecentlyInstalled(slug);
+    })
+    .catch(() => undefined);
+}
+
 function applyQueue(next: MarketplaceQueueStatus) {
+  reconcileCompletedInstall(next);
   const hadActive = store.queue.busy || store.queue.items.some(isWorking);
   const idle = next.items.length === 0 && !next.busy;
   if (hadActive && idle) {
@@ -308,6 +328,16 @@ export function useMarketplaceQueue() {
           iconUrl: item.iconUrl,
           projectUrl: item.projectUrl,
         });
+        if (result.alreadyInstalled) {
+          const recentlyInstalled = new Set(store.recentlyInstalled);
+          recentlyInstalled.add(item.slug);
+          setStore({ recentlyInstalled });
+          void refreshMarketplaceMods(item.slug)
+            .then((confirmed) => {
+              if (confirmed) clearRecentlyInstalled(item.slug);
+            })
+            .catch(() => undefined);
+        }
         armQueuePoll();
         const snapQueue = await getBridge().call("marketplace.queue", undefined);
         applyQueue(normalize(snapQueue));

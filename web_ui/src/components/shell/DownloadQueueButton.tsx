@@ -166,7 +166,7 @@ function ActiveRow({
       </div>
       <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-bg-3">
         <div
-          className="h-full rounded-full bg-[rgb(var(--page-accent-rgb))] transition-[width] duration-200"
+          className="h-full rounded-full bg-[rgb(var(--page-accent-rgb))] transition-[width] duration-1000 ease-linear"
           style={{ width: `${Math.max(paused ? 0 : 2, progress * 100)}%` }}
         />
       </div>
@@ -310,14 +310,16 @@ export function DownloadQueueButton({
         <span
           className="absolute inset-[6px] rounded-full"
           style={{
+            "--download-progress": `${deg}deg`,
             background: completedFlash
               ? "transparent"
               : hasError
                 ? "transparent"
-              : `conic-gradient(rgb(var(--page-accent-rgb)) ${deg}deg, color-mix(in srgb, var(--fg-mute) 28%, transparent) 0deg)`,
+              : "conic-gradient(rgb(var(--page-accent-rgb)) var(--download-progress), color-mix(in srgb, var(--fg-mute) 28%, transparent) 0deg)",
+            transition: "--download-progress 1000ms linear",
             WebkitMask: "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
             mask: "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
-          }}
+          } as CSSProperties}
           aria-hidden
         />
         {hasError ? (
