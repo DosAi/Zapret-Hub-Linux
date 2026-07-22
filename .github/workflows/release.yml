@@ -17,11 +17,11 @@ on:
       tag:
         description: "Git tag or release version (for example v3.0.0)"
         required: true
-        default: "v3.0.1"
+        default: "v3.0.0"
       release_name:
         description: "Release title"
         required: true
-        default: "Zapret Hub 3.0.1"
+        default: "Zapret Hub 3.0.0"
       changelog:
         description: "Release changelog (optional; otherwise .github/release-notes/$version.md)"
         required: false
@@ -56,7 +56,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.1" }
+          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.0" }
           $version = $tag.TrimStart("v")
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -115,7 +115,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.1" }
+          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.0" }
           $version = $tag.TrimStart("v")
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -179,7 +179,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.1" }
+          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.0" }
           $version = $tag.TrimStart("v")
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -233,7 +233,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.1" }
+          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.0" }
           $version = $tag.TrimStart("v")
           $name = "${{ inputs.release_name }}"
           if (-not $name) { $name = "Zapret Hub $version" }
