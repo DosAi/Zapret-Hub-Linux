@@ -63,6 +63,8 @@ export function OnboardingFlow({
   /** First-run Zapret: Manual (services grid) vs Auto (orchestrator bootstrap). */
   const [setupMode, setSetupMode] = useState<"manual" | "auto">("manual");
   const [vpnKey, setVpnKey] = useState("");
+  const [vpnSubmitting, setVpnSubmitting] = useState(false);
+  const [vpnError, setVpnError] = useState("");
   const [gameOpen, setGameOpen] = useState(false);
   const serviceScrollerRef = useRef<HTMLDivElement>(null);
   const onboardingRootRef = useRef<HTMLDivElement>(null);
@@ -87,6 +89,8 @@ export function OnboardingFlow({
       const next = Math.max(startStep, previewStep);
       setSelectedMode(initialMode);
       setSetupMode("manual");
+      setVpnSubmitting(false);
+      setVpnError("");
       goToStep(setStep, next);
       readySoundPlayed.current = false;
       setGameOpen(false);
@@ -247,14 +251,15 @@ export function OnboardingFlow({
     }
     if (step === 2 && selectedMode === "goshkow-vpn" && !reconfigure) {
       const key = vpnKey.trim();
-      if (!key) return;
-      const vpn = state.settings.vpn;
-      pauseStatePushes(720);
-      goToStep(setStep, 4);
-      // settings.apply after the blur slide — emit/status must not join the transition.
-      bridgeAfterTransition(() => {
-        void bridge.call("settings.apply", { patch: { vpn: { ...vpn, subscriptionUrl: key } } });
-      }, 650);
+      if (!key || vpnSubmitting) return;
+      setVpnSubmitting(true);
+      setVpnError("");
+      void bridge.call("vpn.import-subscription", { url: key }).then(() => {
+        pauseStatePushes(720);
+        goToStep(setStep, 4);
+      }).catch((error: unknown) => {
+        setVpnError(error instanceof Error ? error.message : (ru ? "Не удалось подключить подписку." : "Could not connect the subscription."));
+      }).finally(() => setVpnSubmitting(false));
       return;
     }
     if (step === 2) {
@@ -516,6 +521,7 @@ export function OnboardingFlow({
                     placeholder={ru ? "Ключ подписки - затем нажмите «Далее»" : "Subscription key - then press Next"}
                     className="h-10 w-full rounded-xl border border-line-2 bg-bg-2 px-3 text-left text-[12px] text-fg outline-none transition-colors placeholder:text-fg-mute focus:border-fg-dim"
                   />
+                  {vpnError && <div className="rounded-xl border border-[color-mix(in_srgb,var(--err)_42%,var(--line-1))] bg-[color-mix(in_srgb,var(--err)_8%,var(--bg-1))] px-3 py-2 text-left text-[10px] leading-relaxed text-[var(--err)]">{vpnError}</div>}
                   <div className="flex items-center gap-2">
                     <button type="button" onClick={() => bridge.call("component.open-external", { id: "goshkow-vpn" })} className="h-10 flex-1 rounded-xl border border-line-2 bg-bg-2 px-3 text-[12px] font-medium text-fg transition-colors hover:bg-bg-3">{ru ? "Перейти на сайт" : "Open website"}</button>
                     <button type="button" onClick={() => bridge.call("component.open-external", { id: "goshkow-vpn" })} className="h-10 flex-1 rounded-xl border border-line-2 bg-bg-2 px-3 text-[12px] font-medium text-fg transition-colors hover:bg-bg-3">{ru ? "Получить 10 дней бесплатно" : "Get 10 days free"}</button>
@@ -667,7 +673,7 @@ export function OnboardingFlow({
           </div>
           {flowSteps.indexOf(step) > 0 && <button onClick={goBack} className="rounded-xl border border-line-1 px-4 py-2 text-[12px] text-fg-dim transition-colors hover:bg-bg-3 hover:text-fg">{t("onboarding.back")}</button>}
           {reconfigure && step === 2 && <button onClick={saveReconfigure} className="rounded-xl border border-line-2 bg-transparent px-5 py-2 text-[12px] font-semibold text-fg transition-colors hover:bg-bg-3">{ru ? "Сохранить" : "Save"}</button>}
-          <button disabled={(step === 3 && configuration.status === "running") || serviceSelectionRequired || vpnKeyRequired} onClick={next} className="rounded-xl border border-line-2 bg-fg px-5 py-2 text-[12px] font-semibold text-bg-0 transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-35">{reconfigure && step === 2 ? (ru ? "Сохранить и протестировать" : "Save and test") : step === 4 ? t("onboarding.finish") : t("onboarding.next")}</button>
+          <button disabled={(step === 3 && configuration.status === "running") || serviceSelectionRequired || vpnKeyRequired || vpnSubmitting} onClick={next} className="rounded-xl border border-line-2 bg-fg px-5 py-2 text-[12px] font-semibold text-bg-0 transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-35">{vpnSubmitting ? (ru ? "Подключение..." : "Connecting...") : reconfigure && step === 2 ? (ru ? "Сохранить и протестировать" : "Save and test") : step === 4 ? t("onboarding.finish") : t("onboarding.next")}</button>
         </motion.div>
       </footer>
       <SurfGameModal

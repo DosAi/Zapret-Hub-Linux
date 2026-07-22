@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DndContext,
   PointerSensor,
@@ -10,11 +10,13 @@ import {
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { getBridge } from "@/bridge";
-import { useAppState, useBridge, patchOptimistic } from "@/hooks/useBridgeState";
+import { applyMarketplaceMods, useAppState, useBridge, patchOptimistic } from "@/hooks/useBridgeState";
 import { useLocale } from "@/hooks/useLocale";
 import { Segmented } from "@/components/ui/Segmented";
 import { IosToggle } from "@/components/ui/IosToggle";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
+import { ScrollGlassHeader } from "@/components/ui/ScrollGlassHeader";
+import { useToast } from "@/components/shell/ToastHost";
 import type { MarketplaceCompatibility, Mod } from "@/bridge/types";
 
 type InstalledView = "zapret" | "zapret2";
@@ -152,11 +154,13 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
   const bridge = useBridge();
   const state = useAppState();
   const { locale } = useLocale();
+  const toast = useToast();
   const ru = locale === "ru";
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const [view, setView] = useState<InstalledView>("zapret");
   const [queued, setQueued] = useState<Set<string>>(new Set());
-  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string; prefix: "mods" | "mods2" } | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; slug: string; name: string; prefix: "mods" | "mods2" } | null>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const off = getBridge().subscribe("marketplace.download-progress", (payload) => {
@@ -229,30 +233,9 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
   };
 
   return (
-    <div className="relative flex h-full flex-col">
-      <div className="border-b border-line-1 px-6 pb-3 pt-5">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-[15px] font-semibold text-fg">{ru ? "Установленные модификации" : "Installed mods"}</h2>
-            <p className="mt-0.5 text-[11px] text-fg-dim">
-              {ru
-                ? "Модификации, установленные из Zapret Marketplace"
-                : "Mods installed from Zapret Marketplace"}
-            </p>
-          </div>
-          <Segmented
-            value={view}
-            onChange={setView}
-            size="sm"
-            options={[
-              { value: "zapret", label: ru ? "Zapret" : "Zapret" },
-              { value: "zapret2", label: "Zapret 2" },
-            ]}
-          />
-        </div>
-      </div>
-
-      <div className="scroll-area min-h-0 flex-1 overflow-auto px-6 py-3">
+    <div className="relative h-full overflow-hidden">
+      <div ref={scrollerRef} className="scroll-area h-full overflow-auto">
+      <div className="scroll-content px-6 pb-3 pt-[94px]">
         {list.length === 0 ? (
           <div className="grid h-40 place-content-center justify-items-center gap-3 text-center">
             <p className="text-[12px] text-fg-mute">
@@ -290,7 +273,7 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
                       if (mod.sourceUrl) void bridge.call("marketplace.open-url", { url: mod.sourceUrl });
                     }}
                     onDelete={() => {
-                      setPendingDelete({ id: mod.id, name: mod.name, prefix });
+                      setPendingDelete({ id: mod.id, slug: String(mod.marketplaceSlug || ""), name: mod.name, prefix });
                     }}
                   />
                 ))}
@@ -299,6 +282,28 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
           </DndContext>
         )}
       </div>
+      </div>
+      <ScrollGlassHeader scrollerRef={scrollerRef} contentKey={view} className="absolute inset-x-0 top-0 z-20 border-b border-line-1 px-6 pb-3 pt-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-[15px] font-semibold text-fg">{ru ? "Установленные модификации" : "Installed mods"}</h2>
+            <p className="mt-0.5 text-[11px] text-fg-dim">
+              {ru
+                ? "Модификации, установленные из Zapret Marketplace"
+                : "Mods installed from Zapret Marketplace"}
+            </p>
+          </div>
+          <Segmented
+            value={view}
+            onChange={setView}
+            size="sm"
+            options={[
+              { value: "zapret", label: ru ? "Zapret" : "Zapret" },
+              { value: "zapret2", label: "Zapret 2" },
+            ]}
+          />
+        </div>
+      </ScrollGlassHeader>
       <ConfirmModal
         open={Boolean(pendingDelete)}
         title={ru ? "Удаление модификации" : "Remove modification"}
@@ -308,7 +313,18 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
         onConfirm={() => {
           const target = pendingDelete;
           setPendingDelete(null);
-          if (target) void bridge.call(`${target.prefix}.delete`, { id: target.id });
+          if (!target || !state) return;
+          const previousMods = state.mods || [];
+          const previousMods2 = state.mods2 || [];
+          const nextMods = target.prefix === "mods" ? previousMods.filter((mod) => mod.id !== target.id) : previousMods;
+          const nextMods2 = target.prefix === "mods2" ? previousMods2.filter((mod) => mod.id !== target.id) : previousMods2;
+          applyMarketplaceMods(nextMods, nextMods2);
+          void bridge.call("marketplace.remove", { slug: target.slug }).then((result) => {
+            applyMarketplaceMods(result.mods || [], result.mods2 || []);
+          }).catch(() => {
+            applyMarketplaceMods(previousMods, previousMods2);
+            toast.push({ message: ru ? "Не удалось удалить модификацию" : "Could not remove the modification", kind: "error" });
+          });
         }}
         onCancel={() => setPendingDelete(null)}
       />

@@ -232,6 +232,7 @@ export type Commands = {
   "app.apply-update": { in: { scheduleNextLaunch?: boolean }; out: void };
   "zapret.rebuild-runtime": { in: void; out: void };
   "vpn.refresh-subscription": { in: void; out: void };
+  "vpn.import-subscription": { in: { url: string }; out: { subscriptionState: string } };
   "vpn.select-server": { in: { id: string }; out: void };
   "dns.select-profile": { in: { profile: Settings["dns"]["profile"] }; out: void };
   "clipboard.read": { in: void; out: string };
@@ -252,14 +253,14 @@ export type Commands = {
   "mods.toggle": { in: { id: string; on: boolean }; out: void };
   "mods.edit": { in: { id: string; patch: Partial<Mod> }; out: void };
   "mods.export": { in: { id: string }; out: void };
-  "mods.delete": { in: { id: string }; out: void };
+  "mods.delete": { in: { id: string }; out: { mods: Mod[]; mods2: Mod[] } };
   "mods.reorder": { in: { orderedIds: string[] }; out: void };
   "mods2.import": { in: { source: Mod["source"]; ref?: string }; out: Mod };
   "mods2.create": { in: { name: string }; out: Mod };
   "mods2.toggle": { in: { id: string; on: boolean }; out: void };
   "mods2.edit": { in: { id: string; patch: Partial<Mod> }; out: void };
   "mods2.export": { in: { id: string }; out: void };
-  "mods2.delete": { in: { id: string }; out: void };
+  "mods2.delete": { in: { id: string }; out: { mods: Mod[]; mods2: Mod[] } };
   "mods2.reorder": { in: { orderedIds: string[] }; out: void };
   "logs.clear": { in: { source?: LogSource }; out: void };
   "logs.export": { in: { source?: LogSource }; out: void };

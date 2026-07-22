@@ -405,15 +405,8 @@ function Shell() {
     for (const key of mountedPages) {
       if (key === "quick") {
         nodes.quick = <QuickAccessPage onOpenComponent={(id) => { setFocusedComponent(id); setNav("components"); }} onConnectVpn={() => {
-          setSettingsChild(null);
-          setSettingsTab("vpn");
-          setMountedPages((prev) => {
-            if (prev.has("settings")) return prev;
-            const next = new Set(prev);
-            next.add("settings");
-            return next;
-          });
-          setNav("settings");
+          setForcedOnboardingMode("goshkow-vpn");
+          setForcedOnboarding(true);
         }} />;
       } else if (key === "components") {
         nodes.components = <ComponentsPage focusId={focusedComponent} onFocusHandled={() => setFocusedComponent(null)} onConfigure={(id) => {
@@ -423,15 +416,8 @@ function Shell() {
           setForcedOnboardingMode("zapret");
           setForcedOnboarding(true);
         }} onConnectVpn={() => {
-          setSettingsChild(null);
-          setSettingsTab("vpn");
-          setMountedPages((prev) => {
-            if (prev.has("settings")) return prev;
-            const next = new Set(prev);
-            next.add("settings");
-            return next;
-          });
-          setNav("settings");
+          setForcedOnboardingMode("goshkow-vpn");
+          setForcedOnboarding(true);
         }} />;
       } else if (key === "mods") {
         nodes.mods = <ModsPage

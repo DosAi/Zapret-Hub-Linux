@@ -43,6 +43,9 @@ function createNativeBridge(native: NativeObject): ZapretHubBridge {
       "marketplace.get",
       "marketplace.remove",
       "marketplace.check-updates",
+      "vpn.import-subscription",
+      "mods.delete",
+      "mods2.delete",
     ]);
 
   return {
