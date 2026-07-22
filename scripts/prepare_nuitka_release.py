@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 
 def _should_skip_path(path: Path, source_dir: Path) -> bool:

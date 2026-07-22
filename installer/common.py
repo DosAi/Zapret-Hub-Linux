@@ -32,7 +32,7 @@ def _is_ru() -> bool:
 
 RU = _is_ru()
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ZapretHub"
-INSTALLER_VERSION = "3.0.0"
+INSTALLER_VERSION = "3.0.1"
 INSTALLER_LOG_PATH = Path(tempfile.gettempdir()) / "zapret_hub_installer.log"
 UNINSTALLER_LOG_PATH = Path(tempfile.gettempdir()) / "zapret_hub_uninstaller.log"
 

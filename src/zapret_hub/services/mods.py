@@ -244,15 +244,32 @@ class ModsManager:
         return result
 
     def set_enabled(self, mod_id: str, enabled: bool) -> InstalledMod:
+        installed = self.set_enabled_states({mod_id: enabled})
+        return next(item for item in installed if item.id == mod_id)
+
+    def set_enabled_states(self, states: dict[str, bool]) -> list[InstalledMod]:
         installed = self.list_installed()
-        entry = next(item for item in installed if item.id == mod_id)
-        entry.enabled = enabled
+        wanted = {str(mod_id): bool(enabled) for mod_id, enabled in states.items()}
+        found: set[str] = set()
+        changed: list[str] = []
+        for entry in installed:
+            if entry.id not in wanted:
+                continue
+            found.add(entry.id)
+            enabled = wanted[entry.id]
+            if bool(entry.enabled) == enabled:
+                continue
+            entry.enabled = enabled
+            changed.append(entry.id)
+        missing = set(wanted) - found
+        if missing:
+            raise KeyError(f"Unknown modifications: {', '.join(sorted(missing))}")
         self.storage.write_json(self._installed_path, [asdict(item) for item in installed])
         enabled_ids = {item.id for item in installed if item.enabled}
         self.settings.update(enabled_mod_ids=sorted(enabled_ids))
         self.merge.rebuild()
-        self.logging.log("info", "Mod state changed", mod_id=mod_id, enabled=enabled)
-        return entry
+        self.logging.log("info", "Mod states changed", mod_ids=changed, count=len(changed))
+        return installed
 
     def remove(self, mod_id: str) -> None:
         installed = [item for item in self.list_installed() if item.id != mod_id]

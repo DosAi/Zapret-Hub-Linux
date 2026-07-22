@@ -338,9 +338,10 @@ class WebBridge(QObject):
         self._services_set_desired: list[str] | None = None
         self._services_set_running = False
         self._runtime_reconfigure_lock = threading.Lock()
-        self._mod_toggle_lock = threading.Lock()
-        self._mod_toggle_desired: dict[tuple[str, str], bool] = {}
-        self._mod_toggle_running: set[tuple[str, str]] = set()
+        self._mod_apply_lock = threading.Lock()
+        self._mod_apply_pending: dict[str, dict[str, bool]] = {}
+        self._mod_apply_refresh: set[str] = set()
+        self._mod_apply_running: set[str] = set()
         self._power_lock = threading.Lock()
         self._power_desired: bool | None = None
         self._power_runtime_id = "zapret"
@@ -402,6 +403,8 @@ class WebBridge(QObject):
                 try:
                     installed = self._build_marketplace_mods_payload()
                     payload = {**payload, **installed}
+                    compatibility = str(payload.get("compatibility") or "zapret").strip().lower()
+                    self._queue_mod_runtime_refresh("zapret2" if compatibility == "zapret2" else "zapret")
                     self._schedule_on_gui(lambda value=installed: self._merge_marketplace_mods_cache(value))
                     installed_encoded = json.dumps(installed, ensure_ascii=False)
                     self._schedule_on_gui(
@@ -1322,12 +1325,14 @@ class WebBridge(QObject):
             return asdict(item)
         if command == "mods.delete":
             mod_id = str((payload or {}).get("id", ""))
+            self._discard_queued_mod_toggle("zapret", mod_id)
             self._reconfigure_runtimes(("zapret",), lambda: self.context.mods.remove(mod_id))
             self.emit_state(force=True)
             return self._build_marketplace_mods_payload()
         if command == "mods.reorder":
             ordered = [str(item) for item in ((payload or {}).get("orderedIds") or [])]
             self.context.mods.reorder(ordered)
+            self._queue_mod_runtime_refresh("zapret")
             self.emit_state(force=True)
             return None
         if command == "mods.edit":
@@ -1365,6 +1370,7 @@ class WebBridge(QObject):
                 if not selected:
                     return None
                 item = self.context.mods.import_from_path(selected)
+            self._queue_mod_runtime_refresh("zapret")
             self.emit_state()
             return asdict(item)
         if command == "mods.export":
@@ -1385,6 +1391,7 @@ class WebBridge(QObject):
             return asdict(item)
         if command == "mods2.delete":
             mod_id = str((payload or {}).get("id", ""))
+            self._discard_queued_mod_toggle("zapret2", mod_id)
             self._reconfigure_runtimes(("zapret2",), lambda: self.context.mods2.remove(mod_id))
             self._cached_file2_entries = None
             self.emit_state(force=True)
@@ -1392,6 +1399,7 @@ class WebBridge(QObject):
         if command == "mods2.reorder":
             ordered = [str(item) for item in ((payload or {}).get("orderedIds") or [])]
             self.context.mods2.reorder(ordered)
+            self._queue_mod_runtime_refresh("zapret2")
             self._cached_file2_entries = None
             self.emit_state(force=True)
             return None
@@ -1429,6 +1437,7 @@ class WebBridge(QObject):
                 if not selected:
                     return None
                 item = self.context.mods2.import_from_path(selected)
+            self._queue_mod_runtime_refresh("zapret2")
             self._cached_file2_entries = None
             self.emit_state()
             return asdict(item)
@@ -1442,11 +1451,13 @@ class WebBridge(QObject):
             return None
         if command in {"files.save", "files.create", "files.rename"}:
             self._handle_file_command(command, dict(payload or {}))
+            self._queue_mod_runtime_refresh("zapret")
             self._cached_file_entries = None
             self.emit_state()
             return None
         if command in {"files2.save", "files2.create", "files2.rename"}:
             self._handle_file2_command(command, dict(payload or {}))
+            self._queue_mod_runtime_refresh("zapret2")
             self._cached_file2_entries = None
             self.emit_state()
             return None
@@ -1842,27 +1853,65 @@ class WebBridge(QObject):
     def _queue_mod_toggle(self, backend: str, mod_id: str, enabled: bool) -> None:
         if not mod_id:
             return
-        key = (backend, mod_id)
-        with self._mod_toggle_lock:
-            self._mod_toggle_desired[key] = enabled
-            if key in self._mod_toggle_running:
+        self._queue_mod_runtime_apply(backend, {mod_id: enabled})
+
+    def _queue_mod_runtime_refresh(self, backend: str) -> None:
+        self._queue_mod_runtime_apply(backend, {}, force_refresh=True)
+
+    def _discard_queued_mod_toggle(self, backend: str, mod_id: str) -> None:
+        with self._mod_apply_lock:
+            pending = self._mod_apply_pending.get(backend)
+            if pending is not None:
+                pending.pop(mod_id, None)
+
+    def _queue_mod_runtime_apply(
+        self,
+        backend: str,
+        changes: dict[str, bool],
+        *,
+        force_refresh: bool = False,
+    ) -> None:
+        normalized_backend = "zapret2" if backend == "zapret2" else "zapret"
+        with self._mod_apply_lock:
+            pending = self._mod_apply_pending.setdefault(normalized_backend, {})
+            pending.update({str(mod_id): bool(enabled) for mod_id, enabled in changes.items() if str(mod_id)})
+            if force_refresh:
+                self._mod_apply_refresh.add(normalized_backend)
+            if normalized_backend in self._mod_apply_running:
                 return
-            self._mod_toggle_running.add(key)
+            self._mod_apply_running.add(normalized_backend)
 
         def worker() -> None:
             while True:
-                with self._mod_toggle_lock:
-                    desired = self._mod_toggle_desired.pop(key, None)
-                    if desired is None:
-                        self._mod_toggle_running.discard(key)
+                # Collect rapid UI changes into one registry write and one runtime restart.
+                time.sleep(0.2)
+                with self._mod_apply_lock:
+                    desired = dict(self._mod_apply_pending.pop(normalized_backend, {}))
+                    refresh = normalized_backend in self._mod_apply_refresh
+                    self._mod_apply_refresh.discard(normalized_backend)
+                    if not desired and not refresh:
+                        self._mod_apply_running.discard(normalized_backend)
                         return
                 try:
-                    manager = self.context.mods2 if backend == "zapret2" else self.context.mods
+                    manager = self.context.mods2 if normalized_backend == "zapret2" else self.context.mods
+
+                    def apply() -> None:
+                        existing = {str(item.id) for item in manager.list_installed()}
+                        valid = {mod_id: enabled for mod_id, enabled in desired.items() if mod_id in existing}
+                        if valid:
+                            manager.set_enabled_states(valid)
+                        elif normalized_backend == "zapret2":
+                            manager.rebuild_merge()
+                        else:
+                            self.context.merge.rebuild()
+                            self.context.files._invalidate_collection_cache()
+                            self.context.files.rebuild_materialized_collections()
+
                     self._reconfigure_runtimes(
-                        (backend,),
-                        lambda value=desired: manager.set_enabled(mod_id, value),
+                        (normalized_backend,),
+                        apply,
                     )
-                    if backend == "zapret2":
+                    if normalized_backend == "zapret2":
                         self._cached_file2_entries = None
                     else:
                         self._cached_file_entries = None
@@ -1871,12 +1920,16 @@ class WebBridge(QObject):
                     self.context.logging.log(
                         "error",
                         "Modification reconfiguration failed",
-                        backend=backend,
-                        mod_id=mod_id,
+                        backend=normalized_backend,
+                        mod_ids=sorted(desired),
                         error=str(error),
                     )
 
-        threading.Thread(target=worker, daemon=True, name=f"zapret-hub-{backend}-mod-toggle").start()
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name=f"zapret-hub-{normalized_backend}-mod-apply",
+        ).start()
 
     def _safe_abort_diagnostics(self) -> None:
         if self.context is None:
@@ -3490,7 +3543,7 @@ class WebMainWindow(QMainWindow):
 
         payload = {
             "currentVersion": str(__version__),
-            "latestVersion": "3.0.0",
+            "latestVersion": "3.0.1",
             "changelog": (
                 "• Улучшения интерфейса быстрого доступа\n"
                 "• Исправления стабильности переключения страниц\n"

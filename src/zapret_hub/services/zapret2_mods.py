@@ -192,14 +192,31 @@ class Zapret2ModsManager:
         return entry
 
     def set_enabled(self, mod_id: str, enabled: bool) -> InstalledMod:
+        installed = self.set_enabled_states({mod_id: enabled})
+        return next(item for item in installed if item.id == mod_id)
+
+    def set_enabled_states(self, states: dict[str, bool]) -> list[InstalledMod]:
         installed = self.list_installed()
-        entry = next(item for item in installed if item.id == mod_id)
-        entry.enabled = enabled
+        wanted = {str(mod_id): bool(enabled) for mod_id, enabled in states.items()}
+        found: set[str] = set()
+        changed: list[str] = []
+        for entry in installed:
+            if entry.id not in wanted:
+                continue
+            found.add(entry.id)
+            enabled = wanted[entry.id]
+            if bool(entry.enabled) == enabled:
+                continue
+            entry.enabled = enabled
+            changed.append(entry.id)
+        missing = set(wanted) - found
+        if missing:
+            raise KeyError(f"Unknown Zapret2 modifications: {', '.join(sorted(missing))}")
         self._save(installed)
         self._sync_enabled(installed)
         self.rebuild_merge()
-        self.logging.log("info", "Zapret2 mod state changed", mod_id=mod_id, enabled=enabled)
-        return entry
+        self.logging.log("info", "Zapret2 mod states changed", mod_ids=changed, count=len(changed))
+        return installed
 
     def remove(self, mod_id: str) -> None:
         installed = [item for item in self.list_installed() if item.id != mod_id]
@@ -373,9 +390,7 @@ class Zapret2ModsManager:
         return zip_path
 
     def rebuild_merge(self) -> None:
-        # Custom mods first (higher), marketplace last (below hub/vanilla lines).
+        # Registry order is the user-visible layer order and must stay deterministic.
         enabled = [item for item in self.list_installed() if item.enabled]
-        custom = [item for item in enabled if not str(getattr(item, "marketplace_slug", "") or "").strip()]
-        marketplace = [item for item in enabled if str(getattr(item, "marketplace_slug", "") or "").strip()]
-        roots = [Path(item.path) for item in [*custom, *marketplace]]
+        roots = [Path(item.path) for item in enabled]
         zapret2_hub.merge_mod_overlays(self.storage.paths.configs_dir, roots)
