@@ -304,15 +304,15 @@ def test_download_tries_absolute_fallback_after_marketplace_error(monkeypatch, t
     monkeypatch.setattr(service, "_log", lambda *_args, **_kwargs: None)
 
     service._download_file(
-        "https://download.goshkow.ru/file.zip",
+        "https://download.goshkow.com/file.zip",
         "/zapret-hub/marketplace/download/4",
         tmp_path / "mod.zip",
         expected_size=0,
     )
 
     assert calls == [
-        ("https://download.goshkow.ru/file.zip", 0),
-        ("https://goshkow.ru/zapret-hub/marketplace/download/4", 0),
+        ("https://download.goshkow.com/file.zip", 0),
+        ("https://goshkow.com/zapret-hub/marketplace/download/4", 0),
     ]
 
 
@@ -346,7 +346,7 @@ def test_marketplace_image_uses_content_signature_and_disk_cache(monkeypatch, tm
 
     service = MarketplaceService(storage_paths=Paths(), logging=Logging())
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    url = "https://goshkow.ru/zapret-hub/marketplace/media/project/2/icon"
+    url = "https://goshkow.com/zapret-hub/marketplace/media/project/2/icon"
 
     first = service.load_image_data_url(url)
     second = service.load_image_data_url(url)

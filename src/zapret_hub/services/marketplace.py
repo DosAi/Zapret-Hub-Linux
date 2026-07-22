@@ -46,7 +46,7 @@ class DownloadJob:
 class MarketplaceService:
     """Public Marketplace API client + sequential download queue."""
 
-    BASE_URL = "https://goshkow.ru/api/marketplace/v1"
+    BASE_URL = "https://goshkow.com/api/marketplace/v1"
     USER_AGENT = "Zapret-Hub"
     CONNECT_DEADLINE_SEC = 15.0
     DOWNLOAD_STALL_SEC = 45.0
@@ -337,7 +337,7 @@ class MarketplaceService:
             if remaining <= 0:
                 raise MarketplaceError(
                     "timeout",
-                    "Не удалось подключиться к goshkow.ru за 15 секунд. Проверьте сеть и попробуйте снова.",
+                    "Не удалось подключиться к goshkow.com за 15 секунд. Проверьте сеть и попробуйте снова.",
                 )
             if done.wait(timeout=min(0.25, remaining)):
                 break
@@ -351,18 +351,18 @@ class MarketplaceService:
             text = str(error).strip()
             return text or error.code
         if isinstance(error, TimeoutError):
-            return "goshkow.ru не отвечает (таймаут). Проверьте сеть и попробуйте снова."
+            return "goshkow.com не отвечает (таймаут). Проверьте сеть и попробуйте снова."
         if isinstance(error, urllib.error.HTTPError):
             code = int(getattr(error, "code", 0) or 0)
             if code == 404:
-                return "Модификация не найдена на goshkow.ru (HTTP 404)."
+                return "Модификация не найдена на goshkow.com (HTTP 404)."
             if code == 429:
                 return "Слишком много запросов к маркетплейсу. Подождите немного."
             if 500 <= code <= 599:
-                return f"Маркетплейс goshkow.ru временно недоступен (HTTP {code})."
+                return f"Маркетплейс goshkow.com временно недоступен (HTTP {code})."
             return f"Ошибка маркетплейса (HTTP {code})."
         if isinstance(error, (urllib.error.URLError, OSError)):
-            return "Не удалось подключиться к маркетплейсу goshkow.ru. Проверьте сеть."
+            return "Не удалось подключиться к маркетплейсу goshkow.com. Проверьте сеть."
         text = str(error).strip()
         return text or "Сетевая ошибка маркетплейса."
 
@@ -943,12 +943,12 @@ class MarketplaceService:
         latest_id = int(latest.get("versionId") or 0) or None
         selected_id = int(version_id or 0) or latest_id
         if selected_id and selected_id != latest_id:
-            download_url = f"https://goshkow.ru/zapret-hub/marketplace/download/{selected_id}"
+            download_url = f"https://goshkow.com/zapret-hub/marketplace/download/{selected_id}"
             size = 0
             sha256 = ""
         else:
             download_url = (
-                "https://goshkow.ru/zapret-hub/marketplace/projects/"
+                "https://goshkow.com/zapret-hub/marketplace/projects/"
                 f"{urllib.parse.quote(slug)}/download/latest"
             )
             size = int(latest.get("size") or 0)
@@ -975,7 +975,7 @@ class MarketplaceService:
         source = str(url or "").strip()
         parsed = urllib.parse.urlparse(source)
         host = str(parsed.hostname or "").lower()
-        allowed = host == "goshkow.ru" or host.endswith(".goshkow.ru") or host == "i.imgur.com"
+        allowed = host == "goshkow.com" or host.endswith(".goshkow.com") or host == "i.imgur.com"
         if parsed.scheme != "https" or not allowed:
             raise MarketplaceError("invalid_image_url", "Unsupported Marketplace image URL")
 
@@ -1051,7 +1051,7 @@ class MarketplaceService:
             if not url:
                 continue
             if url.startswith("/"):
-                url = urllib.parse.urljoin("https://goshkow.ru", url)
+                url = urllib.parse.urljoin("https://goshkow.com", url)
             if url not in candidates:
                 candidates.append(url)
         last_error: BaseException | None = None
