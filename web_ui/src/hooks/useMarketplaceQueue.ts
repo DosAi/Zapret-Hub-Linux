@@ -14,9 +14,10 @@ const EMPTY: MarketplaceQueueStatus = {
 type Store = {
   queue: MarketplaceQueueStatus;
   completedFlash: boolean;
+  recentlyInstalled: Set<string>;
 };
 
-let store: Store = { queue: EMPTY, completedFlash: false };
+let store: Store = { queue: EMPTY, completedFlash: false, recentlyInstalled: new Set() };
 const listeners = new Set<() => void>();
 let wired = false;
 let flashTimer: number | undefined;
@@ -33,6 +34,13 @@ function emitStore() {
 function setStore(next: Partial<Store>) {
   store = { ...store, ...next };
   emitStore();
+}
+
+function clearRecentlyInstalled(slug: string) {
+  if (!store.recentlyInstalled.has(slug)) return;
+  const recentlyInstalled = new Set(store.recentlyInstalled);
+  recentlyInstalled.delete(slug);
+  setStore({ recentlyInstalled });
 }
 
 function normalize(status: Partial<MarketplaceQueueStatus> | null | undefined): MarketplaceQueueStatus {
@@ -127,11 +135,17 @@ function ensureWired() {
     if (status === "done" || status === "cancelled") {
       if (idx >= 0) items.splice(idx, 1);
       if (status === "done") {
+        const recentlyInstalled = new Set(store.recentlyInstalled);
+        recentlyInstalled.add(slug);
+        setStore({ recentlyInstalled });
         if (Array.isArray(payload.mods) && Array.isArray(payload.mods2)) {
           applyMarketplaceMods(payload.mods, payload.mods2);
-        } else {
-          void refreshMarketplaceMods(slug).catch(() => undefined);
         }
+        void refreshMarketplaceMods(slug)
+          .then((confirmed) => {
+            if (confirmed) clearRecentlyInstalled(slug);
+          })
+          .catch(() => undefined);
       }
     } else if (status === "error") {
       if (idx >= 0) items[idx] = { ...items[idx], ...nextItem };
@@ -238,6 +252,10 @@ export function useMarketplaceQueue() {
     applyQueue(normalize(result));
   }, []);
 
+  const markUninstalled = useCallback((slug: string) => {
+    clearRecentlyInstalled(slug);
+  }, []);
+
   const enqueue = useCallback(
     async (item: {
       slug: string;
@@ -317,10 +335,12 @@ export function useMarketplaceQueue() {
     visible,
     progress,
     completedFlash: snap.completedFlash,
+    recentlyInstalled: snap.recentlyInstalled,
     cancel,
     pause,
     resume,
     reorder,
+    markUninstalled,
     enqueue,
   };
 }

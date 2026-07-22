@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import base64
 import hashlib
 import json
 import os
@@ -935,6 +936,68 @@ class MarketplaceService:
             "fallback_url": "",
             "ticket": "",
         }
+
+    def load_image_data_url(self, url: str) -> dict[str, str]:
+        """Fetch a Marketplace image and return a browser-safe data URL.
+
+        The Marketplace media endpoint currently serves images as
+        application/octet-stream with nosniff, which Chromium correctly
+        refuses to render in an <img>. Cache the bytes locally and determine
+        the real image type from their signature instead of trusting headers.
+        """
+        source = str(url or "").strip()
+        parsed = urllib.parse.urlparse(source)
+        host = str(parsed.hostname or "").lower()
+        allowed = host == "goshkow.ru" or host.endswith(".goshkow.ru") or host == "i.imgur.com"
+        if parsed.scheme != "https" or not allowed:
+            raise MarketplaceError("invalid_image_url", "Unsupported Marketplace image URL")
+
+        cache_root = Path(self.storage_paths.cache_dir) / "marketplace_images"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_root / hashlib.sha256(source.encode("utf-8")).hexdigest()
+        payload = b""
+        if cache_path.exists():
+            try:
+                payload = cache_path.read_bytes()
+            except OSError:
+                payload = b""
+        if not payload:
+            request = urllib.request.Request(
+                source,
+                headers={"Accept": "image/avif,image/webp,image/png,image/jpeg,image/*", "User-Agent": self.USER_AGENT},
+            )
+
+            def _load() -> bytes:
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    data = response.read(5 * 1024 * 1024 + 1)
+                if len(data) > 5 * 1024 * 1024:
+                    raise MarketplaceError("image_too_large", "Marketplace image is too large")
+                return data
+
+            try:
+                payload = self._run_with_deadline(_load, timeout=16.0)  # type: ignore[assignment]
+            except Exception as error:
+                raise MarketplaceError("image_download_failed", self._friendly_network_message(error)) from error
+            cache_path.write_bytes(payload)
+
+        mime = self._detect_image_mime(payload)
+        if not mime:
+            cache_path.unlink(missing_ok=True)
+            raise MarketplaceError("invalid_image", "Marketplace returned an unsupported image")
+        encoded = base64.b64encode(payload).decode("ascii")
+        return {"url": source, "dataUrl": f"data:{mime};base64,{encoded}"}
+
+    @staticmethod
+    def _detect_image_mime(payload: bytes) -> str:
+        if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if payload.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if payload.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if len(payload) >= 12 and payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
+            return "image/webp"
+        return ""
 
     def _complete_ticket(self, ticket: str, *, success: bool, bytes_sent: int) -> None:
         self._request_json(

@@ -277,6 +277,7 @@ export type Commands = {
     out: MarketplaceListResult;
   };
   "marketplace.get": { in: { slug: string }; out: MarketplaceProjectResult };
+  "marketplace.image": { in: { url: string }; out: { url: string; dataUrl: string } };
   "marketplace.installed": { in: void; out: { mods: Mod[]; mods2: Mod[] } };
   "marketplace.download": {
     in: {
@@ -408,6 +409,7 @@ export type Events = {
     mods2?: Mod[];
   };
   "marketplace.queue": MarketplaceQueueStatus;
+  "marketplace.mods-changed": { mods: Mod[]; mods2: Mod[] };
   "marketplace.result": {
     requestId: string;
     ok: boolean;

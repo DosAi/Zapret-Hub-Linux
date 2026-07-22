@@ -5,6 +5,7 @@ import { useLocale } from "@/hooks/useLocale";
 import { useMarketplaceQueue } from "@/hooks/useMarketplaceQueue";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
+import { getBridge } from "@/bridge";
 import type {
   MarketplaceCard,
   MarketplaceCompatibility,
@@ -71,11 +72,28 @@ function ProjectCover({
   const ref = useRef<HTMLDivElement | null>(null);
   const [visible, setVisible] = useState(eager);
   const [failed, setFailed] = useState(false);
-  const [attempt, setAttempt] = useState(0);
+  const [resolvedUrl, setResolvedUrl] = useState("");
 
   useEffect(() => {
     setFailed(false);
-    setAttempt(0);
+    setResolvedUrl("");
+    if (!url) return;
+    if (!url.startsWith("https://")) {
+      setResolvedUrl(url);
+      return;
+    }
+    let cancelled = false;
+    void getBridge()
+      .call("marketplace.image", { url })
+      .then((result) => {
+        if (!cancelled) setResolvedUrl(String(result?.dataUrl || ""));
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [url]);
 
   useEffect(() => {
@@ -98,10 +116,7 @@ function ProjectCover({
     return () => io.disconnect();
   }, [eager, visible]);
 
-  const showImage = Boolean(url) && visible && !failed;
-  const imageUrl = attempt > 0 && url
-    ? `${url}${url.includes("?") ? "&" : "?"}zh_retry=${attempt}`
-    : url;
+  const showImage = Boolean(resolvedUrl) && visible && !failed;
   return (
     <div
       ref={ref}
@@ -112,20 +127,14 @@ function ProjectCover({
     >
       {showImage ? (
         <img
-          key={`${url}-${attempt}`}
-          src={imageUrl}
+          key={resolvedUrl}
+          src={resolvedUrl}
           alt=""
           loading={eager ? "eager" : "lazy"}
           decoding="async"
           referrerPolicy="no-referrer"
           className="absolute inset-0 h-full w-full object-cover object-center"
-          onError={() => {
-            if (attempt < 2) {
-              window.setTimeout(() => setAttempt((value) => value + 1), 500 * (attempt + 1));
-            } else {
-              setFailed(true);
-            }
-          }}
+          onError={() => setFailed(true)}
         />
       ) : (
         <div className="grid h-full w-full place-items-center text-[15px] font-semibold text-fg-mute">
@@ -798,13 +807,13 @@ export function MarketplacePage({
   }, [openSlug, autoInstall, openVersionId, bridge, enqueueDownload]);
 
   const installedSlugs = useMemo(() => {
-    const slugs = new Set<string>();
+    const slugs = new Set<string>(queueApi.recentlyInstalled);
     for (const mod of [...(state?.mods || []), ...(state?.mods2 || [])]) {
       const slug = String(mod.marketplaceSlug || "").trim();
       if (slug) slugs.add(slug);
     }
     return slugs;
-  }, [state?.mods, state?.mods2]);
+  }, [state?.mods, state?.mods2, queueApi.recentlyInstalled]);
 
   const removeInstalled = useCallback(
     (slug: string, title: string) => {
@@ -821,11 +830,12 @@ export function MarketplacePage({
       try {
         const result = await bridge.call("marketplace.remove", { slug: target.slug });
         applyMarketplaceMods(result.mods || [], result.mods2 || []);
+        queueApi.markUninstalled(target.slug);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [bridge, pendingRemoval],
+    [bridge, pendingRemoval, queueApi],
   );
 
   const compatOptions = useMemo(

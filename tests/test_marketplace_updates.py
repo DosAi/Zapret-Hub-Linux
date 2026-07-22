@@ -256,3 +256,43 @@ def test_download_tries_absolute_fallback_after_marketplace_error(monkeypatch, t
         ("https://download.goshkow.ru/file.zip", 0),
         ("https://goshkow.ru/zapret-hub/marketplace/download/4", 0),
     ]
+
+
+def test_marketplace_image_uses_content_signature_and_disk_cache(monkeypatch, tmp_path: Path) -> None:
+    class Paths:
+        data_dir = tmp_path / "data"
+        cache_dir = tmp_path / "cache"
+
+    class Logging:
+        def log(self, *_args, **_kwargs) -> None:
+            return None
+
+    png = b"\x89PNG\r\n\x1a\n" + b"payload"
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size: int = -1) -> bytes:
+            return png
+
+    calls = 0
+
+    def urlopen(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return Response()
+
+    service = MarketplaceService(storage_paths=Paths(), logging=Logging())
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    url = "https://goshkow.ru/zapret-hub/marketplace/media/project/2/icon"
+
+    first = service.load_image_data_url(url)
+    second = service.load_image_data_url(url)
+
+    assert first == second
+    assert first["dataUrl"].startswith("data:image/png;base64,")
+    assert calls == 1

@@ -391,6 +391,10 @@ function ensureBridgeStore() {
   };
 
   bridge.subscribe("state.changed", (payload) => apply(payload));
+  bridge.subscribe("marketplace.mods-changed", (payload) => {
+    if (!baseState || !payload) return;
+    setBaseState({ ...baseState, mods: payload.mods || [], mods2: payload.mods2 || [] }, true);
+  });
   bridge.subscribe("runtime.status", (payload) => {
     if (!payload?.status || !baseState) return;
     // Power status must never be dropped during onboarding/nav quiet windows —

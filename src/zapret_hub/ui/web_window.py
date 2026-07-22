@@ -300,8 +300,10 @@ class WebBridge(QObject):
     })
     _ASYNC_RESULT_COMMANDS = frozenset({
         "marketplace.installed",
+        "marketplace.image",
         "marketplace.list",
         "marketplace.get",
+        "marketplace.remove",
         "marketplace.check-updates",
     })
 
@@ -393,8 +395,17 @@ class WebBridge(QObject):
                     installed = self._build_marketplace_mods_payload()
                     payload = {**payload, **installed}
                     self._schedule_on_gui(lambda value=installed: self._merge_marketplace_mods_cache(value))
-                except Exception:
-                    pass
+                    installed_encoded = json.dumps(installed, ensure_ascii=False)
+                    self._schedule_on_gui(
+                        lambda value=installed_encoded: self.event.emit("marketplace.mods-changed", value)
+                    )
+                except Exception as error:
+                    try:
+                        self.context.logging.log(
+                            "error", "Marketplace installed-state refresh failed", error=str(error)
+                        )
+                    except Exception:
+                        pass
             try:
                 encoded = json.dumps(payload, ensure_ascii=False)
             except Exception:
@@ -1561,6 +1572,8 @@ class WebBridge(QObject):
             slug = str((payload or {}).get("slug") or "")
             lang = str(self.context.settings.get().language or "ru")
             return self.context.marketplace.get_project(slug, lang=lang if lang in {"ru", "en"} else "ru")
+        if command == "marketplace.image":
+            return self.context.marketplace.load_image_data_url(str((payload or {}).get("url") or ""))
         if command == "marketplace.download":
             data = dict(payload or {})
             version_id = data.get("versionId")

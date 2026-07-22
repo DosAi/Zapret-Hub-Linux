@@ -36,7 +36,14 @@ function createNativeBridge(native: NativeObject): ZapretHubBridge {
     return () => listeners.get(event)?.delete(callback as (payload: unknown) => void);
   };
 
-    const ASYNC_RESULT = new Set(["marketplace.list", "marketplace.get", "marketplace.check-updates"]);
+    const ASYNC_RESULT = new Set([
+      "marketplace.installed",
+      "marketplace.image",
+      "marketplace.list",
+      "marketplace.get",
+      "marketplace.remove",
+      "marketplace.check-updates",
+    ]);
 
   return {
     call(command, payload) {
