@@ -94,6 +94,7 @@ $nuitkaArgs = @(
   "--include-data-dir=sample_data=sample_data",
   "--include-data-files=sample_data\default_services\gaming\bin\*.bin=sample_data\default_services\gaming\bin\",
   "--include-data-dir=ui_assets=ui_assets",
+  "--include-data-files=docs\legal\ZAPRET_HUB_TERMS_RU.txt=docs\legal\ZAPRET_HUB_TERMS_RU.txt",
   "--include-data-dir=$webUiDistStage=web_ui\dist",
   "--include-package=zapret_hub",
   "--include-package=cryptography",
@@ -132,6 +133,10 @@ if (Test-Path $runtimeTarget) {
     Remove-Item $runtimeTarget -Recurse -Force
 }
 Copy-Item $runtimeStage $runtimeTarget -Recurse -Force
+
+# Keep the agreement visible at the root of every portable package as well.
+Copy-Item -LiteralPath (Join-Path $root "docs\legal\ZAPRET_HUB_TERMS_RU.txt") `
+  -Destination (Join-Path $distDir.FullName "ZAPRET_HUB_TERMS_RU.txt") -Force
 
 $uninstallerCandidates = @()
 if ($UninstallerSource) {

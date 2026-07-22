@@ -44,7 +44,7 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
     zapret: "Zapret",
     "goshkow-vpn": "goshkow VPN",
     zapret2: "Zapret 2",
-    none: locale === "ru" ? "Без обхода" : "No bypass",
+    none: locale === "ru" ? "Без основного компонента" : "No primary component",
   };
   const [previewMode, setPreviewMode] = useState<RuntimeId | null>(null);
   const [pendingPower, setPendingPower] = useState<"starting" | "stopping" | null>(null);

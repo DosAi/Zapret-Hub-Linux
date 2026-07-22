@@ -22,13 +22,13 @@ const ru = {
   "power.error": "Ошибка",
 
   "status.app": "Приложение",
-  "status.bypass": "Обход",
+  "status.bypass": "Соединение",
   "status.tgproxy": "TG Proxy",
   "status.mods": "Модификации",
   "status.theme": "Тема",
 
   "services.title": "Сервисы",
-  "services.desc": "Выберите сервисы, для которых применяется обход",
+  "services.desc": "Выберите сервисы, для которых применяются сетевые настройки",
   "services.selected": "Выбрано",
   "services.selectAll": "Выбрать все",
   "services.clear": "Сбросить",
@@ -152,7 +152,7 @@ const ru = {
   "notif.dismiss": "Скрыть",
 
   "onboarding.welcome.title": "Добро пожаловать в Zapret Hub",
-  "onboarding.welcome.body": "Быстрый обход блокировок для Windows",
+  "onboarding.welcome.body": "Управление сетевыми подключениями для Windows",
   "onboarding.control.title": "Как настроить Zapret?",
   "onboarding.control.body": "Можно выбрать сервисы вручную или доверить подбор оркестратору",
   "onboarding.control.manual": "Выберу сервисы сам",
@@ -209,13 +209,13 @@ const en: Record<keyof typeof ru, string> = {
   "power.error": "Error",
 
   "status.app": "App",
-  "status.bypass": "Bypass",
+  "status.bypass": "Connection",
   "status.tgproxy": "TG Proxy",
   "status.mods": "Mods",
   "status.theme": "Theme",
 
   "services.title": "Services",
-  "services.desc": "Pick services to route through the bypass",
+  "services.desc": "Pick services for the network configuration",
   "services.selected": "Selected",
   "services.selectAll": "Select all",
   "services.clear": "Clear",
@@ -339,7 +339,7 @@ const en: Record<keyof typeof ru, string> = {
   "notif.dismiss": "Dismiss",
 
   "onboarding.welcome.title": "Welcome to Zapret Hub",
-  "onboarding.welcome.body": "Fast bypass toolkit for Windows",
+  "onboarding.welcome.body": "Network connection manager for Windows",
   "onboarding.control.title": "How should Zapret be set up?",
   "onboarding.control.body": "Pick services yourself or let the orchestrator handle it",
   "onboarding.control.manual": "I'll pick services myself",

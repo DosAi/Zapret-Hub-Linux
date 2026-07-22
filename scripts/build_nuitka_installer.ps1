@@ -187,7 +187,8 @@ $nuitkaArgs = @(
   "--output-dir=$OutputDir",
   "--output-filename=$installerName",
   "--include-data-dir=ui_assets=ui_assets",
-  "--include-data-dir=installer_web=installer_web"
+  "--include-data-dir=installer_web=installer_web",
+  "--include-data-files=docs\legal\ZAPRET_HUB_TERMS_RU.txt=docs\legal\ZAPRET_HUB_TERMS_RU.txt"
 ) + $installerDataFiles + @(
   "--include-package=installer",
   "--nofollow-import-to=tkinter",

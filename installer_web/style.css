@@ -41,6 +41,7 @@ html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 button, input { font: inherit; }
 button { color: inherit; cursor: pointer; }
 input { user-select: text; }
+pre { font: inherit; }
 
 .window {
   position: relative;
@@ -138,6 +139,32 @@ input { user-select: text; }
   color: var(--mute);
   font-size: 11px;
 }
+
+.agreement-view { overflow: hidden; }
+.terms-document {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 14px 16px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  user-select: text;
+}
+.terms-accept {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #edf1f8;
+  font-size: 11px;
+  cursor: pointer;
+}
+.terms-accept input { accent-color: var(--accent); }
 
 .steps {
   display: flex;

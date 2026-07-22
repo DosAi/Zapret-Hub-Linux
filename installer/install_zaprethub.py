@@ -109,6 +109,17 @@ def resource_root() -> Path:
     return _resource_candidates()[0]
 
 
+def terms_text() -> str:
+    for candidate in _resource_candidates():
+        path = candidate / "docs" / "legal" / "ZAPRET_HUB_TERMS_RU.txt"
+        if path.exists():
+            try:
+                return path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+    return ""
+
+
 def payload_root() -> Path:
     for candidate in _resource_candidates():
         if (candidate / "installer_payload").exists():
@@ -1327,6 +1338,7 @@ class WebInstallerBridge(QObject):
             "createStartMenu": self.create_start_menu,
             "launchAfter": self.launch_after,
             "error": str(self._snapshot.get("error") or ""),
+            "termsText": terms_text(),
         }
 
     def build_snapshot(self) -> dict[str, object]:

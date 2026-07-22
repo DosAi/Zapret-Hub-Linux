@@ -26,6 +26,8 @@
     launchAfter: true,
     error: "",
     failed: false,
+    termsText: "",
+    termsAccepted: false,
   };
 
   const L = (ru, en) => state.locale === "ru" ? ru : en;
@@ -62,19 +64,20 @@
     return /подключ|connect|метаданн|metadata|запуск загрузки|starting download|запрос|requesting/i.test(status) || progress < 6;
   };
 
-  /** Fresh install: 3 steps. Already installed: 4 (extra maintenance / confirm step). */
-  const totalSteps = () => (state.installed ? 4 : 3);
+  /** Both flows have four steps; only a fresh install requires agreement acceptance. */
+  const totalSteps = () => 4;
 
   const stepIndex = () => {
-    // 3: welcome → path → progress/done
-    // 4: welcome → maintenance → path|confirm|uninstall → progress/done
+    // Fresh: welcome → agreement → path → progress/done.
+    // Existing: welcome → maintenance → path|confirm|uninstall → progress/done.
     if (state.page === "welcome") return 0;
+    if (state.page === "agreement") return 1;
     if (state.page === "maintenance") return 1;
     if (state.page === "path" || state.page === "confirm" || state.page === "uninstall") {
-      return state.installed ? 2 : 1;
+      return 2;
     }
     if (state.page === "progress" || state.page === "done") {
-      return state.installed ? 3 : 2;
+      return 3;
     }
     return 0;
   };
@@ -240,13 +243,15 @@
       ${buttons ? `<footer class="footer">${buttons}</footer>` : `<footer class="footer"></footer>`}
     </div>`;
 
-  const btn = (label, action, cls = "") => `<button class="button ${cls}" data-action="${action}">${label}</button>`;
+  const btn = (label, action, cls = "", disabled = false) => `<button class="button ${cls}" data-action="${action}" ${disabled ? "disabled" : ""}>${label}</button>`;
 
   function render() {
     let body = "";
     let buttons = "";
     if (state.page === "welcome") {
       ({ body, buttons } = welcomePage());
+    } else if (state.page === "agreement") {
+      ({ body, buttons } = agreementPage());
     } else if (state.page === "maintenance") {
       ({ body, buttons } = maintenancePage());
     } else if (state.page === "path") {
@@ -272,13 +277,30 @@
         <div class="welcome-center">
           <h1>${L("Установщик Zapret Hub", "Zapret Hub Installer")}</h1>
           <p>${L(
-            "Zapret Hub — приложение, которое помогает обходить сетевые ограничения и удобнее пользоваться привычными сервисами.",
-            "Zapret Hub helps you work around network restrictions and use everyday services more comfortably."
+            "Zapret Hub — инструмент управления сетевыми подключениями, DNS и совместимыми компонентами.",
+            "Zapret Hub manages network connections, DNS settings, and compatible components."
           )}</p>
           <div class="meta-quiet">${L("Установщик", "Installer")} ${esc(state.version)}${state.remoteVersion ? ` · ${L("на сайте", "online")} ${esc(state.remoteVersion)}` : ""}</div>
         </div>
       </main>`,
     buttons: btn(L("Далее", "Next"), "welcome.next", "primary"),
+  });
+
+  const agreementPage = () => ({
+    body: `
+      <main class="view agreement-view">
+        ${stepsBar()}
+        <div class="page-head">
+          <h2>${L("Пользовательское соглашение", "Terms of use")}</h2>
+          <p>${L("Прочитайте условия перед продолжением установки.", "Read the terms before continuing.")}</p>
+        </div>
+        <pre class="terms-document">${esc(state.termsText || L("Текст соглашения недоступен. Закройте установщик и загрузите его заново из официального источника.", "The terms could not be loaded. Close the installer and download it again from the official source."))}</pre>
+        <label class="terms-accept">
+          <input id="terms-accepted" type="checkbox" ${state.termsAccepted ? "checked" : ""}>
+          <span>${L("Я прочитал(а) и принимаю пользовательское соглашение", "I have read and accept the terms of use")}</span>
+        </label>
+      </main>`,
+    buttons: btn(L("Назад", "Back"), "back") + btn(L("Далее", "Next"), "agreement.next", "primary", !state.termsAccepted || !state.termsText),
   });
 
   const maintenancePage = () => {
@@ -463,6 +485,11 @@
     if (event.button === 0 && event.target.closest("[data-drag]") && !event.target.closest("button")) call("window.startDrag");
   });
   root.addEventListener("input", (event) => {
+    if (event.target.id === "terms-accepted") {
+      state.termsAccepted = event.target.checked;
+      render();
+      return;
+    }
     if (event.target.id === "install-path") {
       clearTimeout(window.__pathTimer);
       const value = event.target.value;
@@ -487,7 +514,7 @@
     const action = element.dataset.action || element.dataset.command;
     try {
       if (action === "welcome.next") {
-        state.page = state.installed ? "maintenance" : "path";
+        state.page = state.installed ? "maintenance" : "agreement";
       } else if (action === "back" || action === "progress.back") {
         clearProgressWatch();
         try { await call("install.abort"); } catch (_) {}
@@ -497,6 +524,7 @@
           state.page = state.selectedAction === "remove" ? "uninstall" : state.selectedAction === "reinstall" ? "confirm" : "path";
         }
         else if (state.page === "path" && state.installed) state.page = "maintenance";
+        else if (state.page === "path") state.page = "agreement";
         else state.page = "welcome";
         state.error = "";
         state.failed = false;
@@ -505,6 +533,9 @@
         return;
       } else if (action === "maintenance.next") {
         state.page = state.selectedAction === "remove" ? "uninstall" : "path";
+      } else if (action === "agreement.next") {
+        if (!state.termsAccepted || !state.termsText) return;
+        state.page = state.installed ? "maintenance" : "path";
       } else if (action === "path.browse") {
         syncPathOptions();
         const preview = await call("folder.choose", { path: state.selectedPath });
@@ -635,6 +666,7 @@
             createStartMenu: true,
             launchAfter: true,
             error: "",
+            termsText: "ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАШЕНИЕ ZAPRET HUB\n\nТестовый текст соглашения для предпросмотра установщика.",
           };
         } else if (command === "install.snapshot") {
           value = { ...mockSnap };

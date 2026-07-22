@@ -32,7 +32,7 @@ class StorageManager:
             {
                 "id": "zapret",
                 "name": "Zapret",
-                "description": "Основной модуль обхода блокировок для сайтов и сервисов.",
+                "description": "Основной модуль локальной обработки сетевого трафика.",
                 "version": zapret_version,
                 "source": "https://github.com/Flowseal/zapret-discord-youtube",
                 "command": ["cmd.exe", "/c", "general.bat"],

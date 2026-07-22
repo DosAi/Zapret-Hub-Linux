@@ -48,6 +48,8 @@ version_info = VSVersionInfo(
 datas = [
     (str(project_root / "installer_payload"), "installer_payload"),
     (str(project_root / "ui_assets"), "ui_assets"),
+    (str(project_root / "installer_web"), "installer_web"),
+    (str(project_root / "docs" / "legal" / "ZAPRET_HUB_TERMS_RU.txt"), "docs/legal"),
 ]
 
 a = Analysis(
