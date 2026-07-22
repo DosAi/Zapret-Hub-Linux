@@ -152,15 +152,15 @@ class UpdatesManager:
         installed_version = str(installed_identity.get("version") or "").strip()
         is_newer_version = self._version_key(latest_version) > self._version_key(__version__)
         same_version = self._version_key(latest_version) == self._version_key(__version__)
-        if same_version and installed_version == latest_version and installed_digest and remote_digest:
-            is_same_version_hotfix = installed_digest != remote_digest
-        else:
-            is_same_version_hotfix = (
-                same_version
-                and latest_release_stamp is not None
-                and installed_stamp is not None
-                and latest_release_stamp.timestamp() > installed_stamp.timestamp() + 300
-            )
+        # Hotfixes are same version + different archive digest. Do NOT fall back to
+        # exe mtime vs mirror timestamps: Copy-Item keeps zip mtimes, so a just-applied
+        # update still looks "older" than binary_updated_at and loops forever.
+        is_same_version_hotfix = False
+        if same_version and remote_digest:
+            if installed_digest:
+                is_same_version_hotfix = installed_digest != remote_digest
+            elif installed_version and installed_version != latest_version:
+                is_same_version_hotfix = True
         status = "available" if is_newer_version or is_same_version_hotfix else "up-to-date"
         newer_releases = [
             {
@@ -416,14 +416,62 @@ class UpdatesManager:
         return max(stamps) if stamps else None
 
     def _installed_release_identity(self) -> dict[str, str]:
+        """Load archive SHA256 identity for this install.
+
+        Written by the slim installer and in-app updater after verifying the
+        portable zip against mirror ``assets.*.digest``. Product version may stay
+        3.0.0 across hotfixes; the digest is what distinguishes builds.
+        """
+        candidates: list[Path] = []
         try:
-            path = self.storage.paths.data_dir / "app_release_identity.json"
-            payload = self.storage.read_json(path, default={})
+            candidates.append(self.storage.paths.data_dir / "app_release_identity.json")
         except Exception:
-            return {}
-        if not isinstance(payload, dict):
-            return {}
-        return {str(key): str(value) for key, value in payload.items() if value is not None}
+            pass
+        try:
+            candidates.append(self.storage.paths.install_root / "data" / "app_release_identity.json")
+        except Exception:
+            pass
+        try:
+            # Packaged/unpacked portable folder stamp from prepare_nuitka_release.
+            candidates.append(self.storage.paths.install_root / "build_info.json")
+        except Exception:
+            pass
+        try:
+            candidates.append(Path(sys.executable).resolve().parent / "build_info.json")
+        except Exception:
+            pass
+        for path in candidates:
+            try:
+                payload = self.storage.read_json(path, default={})
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict) or not payload:
+                continue
+            normalized = {str(key): str(value) for key, value in payload.items() if value is not None}
+            digest = str(normalized.get("digest") or "").strip().lower().removeprefix("sha256:")
+            if not digest:
+                continue
+            normalized["digest"] = digest
+            return normalized
+        return {}
+
+    def _write_installed_release_identity(self, *, version: str, digest: str, updated_at: str = "") -> None:
+        payload = {
+            "version": str(version or "").strip(),
+            "digest": str(digest or "").strip().lower().removeprefix("sha256:"),
+            "updated_at": str(updated_at or "").strip(),
+        }
+        targets = [
+            self.storage.paths.data_dir / "app_release_identity.json",
+            self.storage.paths.install_root / "data" / "app_release_identity.json",
+            self.storage.paths.install_root / "build_info.json",
+        ]
+        for path in targets:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self.storage.write_json(path, payload)
+            except Exception:
+                continue
 
     def _parse_github_datetime(self, value: str) -> datetime | None:
         text = str(value or "").strip()
@@ -542,6 +590,21 @@ class UpdatesManager:
             },
             ensure_ascii=False,
         )
+        # Persist identity into the real work data dir before relaunch. Packaged
+        # builds use %LOCALAPPDATA%\Zapret_Hub\data, not install_root\data.
+        try:
+            self._write_installed_release_identity(
+                version=str(prepared_update.get("version") or ""),
+                digest=str(prepared_update.get("asset_digest") or ""),
+                updated_at=str(prepared_update.get("release_updated_at") or ""),
+            )
+        except Exception:
+            pass
+        data_dir = self.storage.paths.data_dir
+        identity_dirs_ps = [
+            str(data_dir).replace("'", "''"),
+            str((install_root / "data")).replace("'", "''"),
+        ]
 
         script = textwrap.dedent(
             f"""
@@ -723,9 +786,15 @@ class UpdatesManager:
               exit 2
             }}
 
-            $identityDir = Join-Path $dst 'data'
-            New-Item -ItemType Directory -Path $identityDir -Force | Out-Null
-            Set-Content -LiteralPath (Join-Path $identityDir 'app_release_identity.json') -Value '{identity_json.replace("'", "''")}' -Encoding UTF8
+            $identityDirs = @(
+              '{identity_dirs_ps[0]}',
+              '{identity_dirs_ps[1]}'
+            )
+            foreach ($identityDir in $identityDirs) {{
+              if (-not $identityDir) {{ continue }}
+              New-Item -ItemType Directory -Path $identityDir -Force | Out-Null
+              Set-Content -LiteralPath (Join-Path $identityDir 'app_release_identity.json') -Value '{identity_json.replace("'", "''")}' -Encoding UTF8
+            }}
             Add-UpdateLog 'installed release identity saved'
 
             Start-Sleep -Milliseconds 250

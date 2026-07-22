@@ -7,11 +7,18 @@ import { MarkdownContent } from "@/components/ui/MarkdownContent";
 export type AppUpdatePrompt = {
   currentVersion: string;
   latestVersion: string;
+  currentDigest?: string;
+  latestDigest?: string;
   changelog: string;
   htmlUrl: string;
   isHotfix?: boolean;
   demo?: boolean;
 };
+
+function formatBuildLabel(version: string, digest?: string): string {
+  const short = String(digest || "").trim();
+  return short ? `${version} (${short})` : version;
+}
 
 export function AppUpdateModal({
   prompt,
@@ -96,11 +103,11 @@ export function AppUpdateModal({
               <p className="whitespace-pre-line text-[12px] leading-relaxed text-fg-dim">
                 {prompt.isHotfix
                   ? (ru
-                    ? `Для Zapret Hub ${prompt.currentVersion} найден hotfix.\nHotfix - необязательное обновление, но оно может содержать важные исправления, поэтому настоятельно рекомендуем обновиться.`
-                    : `A hotfix is available for Zapret Hub ${prompt.currentVersion}.\nA hotfix is optional, but it may contain important fixes, so updating is strongly recommended.`)
+                    ? `Для Zapret Hub ${prompt.currentVersion} найден hotfix.\nHotfix — необязательное обновление, но оно может содержать важные исправления, поэтому настоятельно рекомендуем обновиться.\nСейчас: ${formatBuildLabel(prompt.currentVersion, prompt.currentDigest)}\nБудет установлено: ${formatBuildLabel(prompt.latestVersion, prompt.latestDigest)}`
+                    : `A hotfix is available for Zapret Hub ${prompt.currentVersion}.\nA hotfix is optional, but it may contain important fixes, so updating is strongly recommended.\nCurrent: ${formatBuildLabel(prompt.currentVersion, prompt.currentDigest)}\nInstalling: ${formatBuildLabel(prompt.latestVersion, prompt.latestDigest)}`)
                   : (ru
-                    ? `Вышла новая версия Zapret Hub.\nТекущая: ${prompt.currentVersion} · Новая: ${prompt.latestVersion}`
-                    : `A new Zapret Hub version is available.\nCurrent: ${prompt.currentVersion} · New: ${prompt.latestVersion}`)}
+                    ? `Вышла новая версия Zapret Hub.\nСейчас: ${formatBuildLabel(prompt.currentVersion, prompt.currentDigest)}\nБудет установлено: ${formatBuildLabel(prompt.latestVersion, prompt.latestDigest)}`
+                    : `A new Zapret Hub version is available.\nCurrent: ${formatBuildLabel(prompt.currentVersion, prompt.currentDigest)}\nInstalling: ${formatBuildLabel(prompt.latestVersion, prompt.latestDigest)}`)}
               </p>
               <MarkdownContent className="max-h-[180px] overflow-y-auto rounded-[12px] border border-line-1 bg-bg-1 p-3 text-[11px] leading-relaxed text-fg-dim">
                 {prompt.changelog || (ru ? "Список изменений недоступен." : "Changelog is unavailable.")}

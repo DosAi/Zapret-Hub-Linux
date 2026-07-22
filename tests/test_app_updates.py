@@ -131,6 +131,24 @@ def test_same_version_same_digest_is_up_to_date(monkeypatch) -> None:
     assert status["is_hotfix"] is False
 
 
+def test_same_version_without_identity_does_not_false_hotfix(monkeypatch) -> None:
+    """Mirror timestamps + preserved zip mtimes must not loop forever as hotfixes."""
+    mgr = UpdatesManager.__new__(UpdatesManager)
+    mgr.REPO_URL = UpdatesManager.REPO_URL
+    monkeypatch.setattr("zapret_hub.services.updates.__version__", "2.1.2")
+    monkeypatch.setattr(
+        UpdatesManager,
+        "_installed_build_timestamp",
+        lambda self: datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(UpdatesManager, "_installed_release_identity", lambda self: {})
+
+    status = UpdatesManager._build_application_release_status(mgr, MIRROR_FIXTURE)
+
+    assert status["status"] == "up-to-date"
+    assert status["is_hotfix"] is False
+
+
 def test_find_payload_exe_accepts_title_case(tmp_path) -> None:
     mgr = UpdatesManager.__new__(UpdatesManager)
     root = tmp_path / "payload"
@@ -177,10 +195,11 @@ def test_update_helper_uses_fast_literal_copy_and_restart_retries(tmp_path, monk
     script_root = tmp_path / "scripts"
 
     mgr = UpdatesManager.__new__(UpdatesManager)
-    mgr.storage = SimpleNamespace(paths=SimpleNamespace(install_root=install_root))
+    mgr.storage = SimpleNamespace(paths=SimpleNamespace(install_root=install_root, data_dir=install_root / "data"))
     mgr.logging = SimpleNamespace(log=lambda *_args, **_kwargs: None)
     monkeypatch.setattr("zapret_hub.services.updates.tempfile.gettempdir", lambda: str(script_root.parent))
     monkeypatch.setattr("zapret_hub.services.updates.subprocess.Popen", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(UpdatesManager, "_write_installed_release_identity", lambda *_args, **_kwargs: None)
 
     mgr.launch_update(
         {

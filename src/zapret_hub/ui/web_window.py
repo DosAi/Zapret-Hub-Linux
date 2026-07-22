@@ -568,9 +568,15 @@ class WebBridge(QObject):
             for key in ("asset_url", "asset_name", "asset_digest", "asset_size", "body", "html_url", "latest_version", "current_version", "status"):
                 if key in release:
                     self._pending_app_release[key] = str(release.get(key) or "")
+            def _short_digest(value: object) -> str:
+                text = str(value or "").strip().lower().removeprefix("sha256:")
+                return text[:12] if text else ""
+
             payload = {
                 "currentVersion": current,
                 "latestVersion": latest,
+                "currentDigest": _short_digest(release.get("installed_build_digest")),
+                "latestDigest": _short_digest(release.get("asset_digest")),
                 "changelog": str(release.get("body") or ""),
                 "htmlUrl": str(release.get("html_url") or ""),
                 "isHotfix": bool(release.get("is_hotfix")),

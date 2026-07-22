@@ -381,6 +381,8 @@ export type Events = {
   "app.update-available": {
     currentVersion: string;
     latestVersion: string;
+    currentDigest?: string;
+    latestDigest?: string;
     changelog: string;
     htmlUrl: string;
     isHotfix?: boolean;
