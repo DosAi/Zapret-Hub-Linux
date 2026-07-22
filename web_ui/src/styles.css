@@ -301,10 +301,8 @@ textarea {
 
   .scroll-header {
     overflow: hidden;
-    /* Hide the sharp source before painting the mirrored, blurred copy. */
-    background-color: color-mix(in srgb, var(--bg-1) 82%, transparent);
-    backdrop-filter: blur(36px) saturate(1.42);
-    -webkit-backdrop-filter: blur(36px) saturate(1.42);
+    /* The opaque surface hides the sharp source; only its blurred mirror is painted above it. */
+    background-color: var(--bg-1);
     box-shadow: 0 12px 26px color-mix(in srgb, var(--bg-1) 10%, transparent);
   }
 
@@ -322,8 +320,7 @@ textarea {
     filter: blur(6px) saturate(1.16);
     opacity: 0.8;
     pointer-events: none;
-    transition: opacity 180ms ease;
-    will-change: transform, opacity;
+    will-change: transform;
   }
 
   .scroll-header-mirror-content *,

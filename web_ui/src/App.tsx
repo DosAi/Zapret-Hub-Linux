@@ -355,15 +355,11 @@ function Shell() {
 
   useEffect(() => {
     const off = getBridge().subscribe("vpn.setup-required", () => {
-      setSettingsChild(null);
-      setSettingsTab("vpn");
-      setMountedPages((prev) => {
-        if (prev.has("settings")) return prev;
-        const next = new Set(prev);
-        next.add("settings");
-        return next;
-      });
-      setNav("settings");
+      // A missing subscription is configured in the compact VPN onboarding.
+      // Do not navigate to Settings first: that produces a visible intermediate
+      // screen before the onboarding overlay is mounted.
+      setForcedOnboardingMode("goshkow-vpn");
+      setForcedOnboarding(true);
     });
     return off;
   }, []);
