@@ -47,15 +47,15 @@ class LoggingManager:
         source_id = (source or "").strip().lower()
         if source_id == "zapret":
             return str(self.zapret_log_path)
-        if source_id == "tg-ws-proxy":
+        if source_id in {"tg-ws-proxy", "tg"}:
             return str(self.tg_log_path)
-        if source_id == "goshkow-vpn":
+        if source_id in {"goshkow-vpn", "vpn"}:
             return str(self.vpn_log_path)
         return str(self.log_path)
 
     def log(self, level: str, message: str, **context: Any) -> LogEntry:
         entry = LogEntry(
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now().astimezone().isoformat(timespec="seconds"),
             level=level.upper(),
             message=message,
             context=context,
@@ -80,6 +80,11 @@ class LoggingManager:
 
     def read_source_lines(self, source: str, limit: int = 250) -> list[str]:
         source_id = (source or "app").strip().lower()
+        # Web UI uses short aliases (tg / vpn); process files use component ids.
+        if source_id == "tg":
+            source_id = "tg-ws-proxy"
+        elif source_id == "vpn":
+            source_id = "goshkow-vpn"
         if source_id == "app":
             return self._format_entries(self.read_entries()[-limit:])
         if source_id == "zapret":
@@ -148,7 +153,14 @@ class LoggingManager:
                 useful = {key: value for key, value in entry.context.items() if value not in ("", None, [], {})}
                 if useful:
                     context_suffix = " | " + ", ".join(f"{key}={value}" for key, value in useful.items())
-            stamp = str(entry.timestamp or "").replace("T", " ")[:19]
+            stamp = str(entry.timestamp or "").replace("T", " ")
+            # Drop timezone suffix for display — values are already local wall-clock.
+            for sep in ("+", "-"):
+                # Keep date dashes; only strip offset after time (char 19+).
+                if len(stamp) > 19 and sep in stamp[19:]:
+                    stamp = stamp[:19 + stamp[19:].find(sep)]
+                    break
+            stamp = stamp[:19]
             prefix = f"[{stamp}] " if stamp else ""
             lines.append(f"{prefix}{entry.level}: {entry.message}{context_suffix}")
         return lines

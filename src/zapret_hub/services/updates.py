@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import platform
 import re
@@ -7,27 +9,54 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import time
+import urllib.error
+import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from zapret_hub import __version__
 from zapret_hub.domain import UpdateInfo
-from zapret_hub.services.github_network import GitHubNetworkClient, is_github_rate_limit_error
 from zapret_hub.services.logging_service import LoggingManager
 from zapret_hub.services.storage import StorageManager
 
 
 class UpdatesManager:
     REPO_URL = "https://github.com/goshkow/Zapret-Hub"
-    API_LATEST = "https://api.github.com/repos/goshkow/Zapret-Hub/releases/latest"
-    API_RELEASES = "https://api.github.com/repos/goshkow/Zapret-Hub/releases"
+    MIRROR_BASE_URL = "https://goshkow.ru"
+    MIRROR_UPDATE_URL = MIRROR_BASE_URL + "/zapret-hub/update"
+    MIRROR_INFO_URL = MIRROR_BASE_URL + "/zapret-hub/info"
+    _EXE_NAMES = ("zapret_hub.exe", "Zapret_Hub.exe")
+    # Hard ceilings so UI never sticks on "Скачиваем обновление…" forever.
+    META_DEADLINE_SEC = 15.0
+    DOWNLOAD_DEADLINE_SEC = 180.0
+    DOWNLOAD_STALL_SEC = 45.0
 
-    def __init__(self, storage: StorageManager, logging: LoggingManager, *, processes: object | None = None) -> None:
+    def __init__(
+        self,
+        storage: StorageManager,
+        logging: LoggingManager,
+        *,
+        processes: object | None = None,
+        settings: object | None = None,
+    ) -> None:
         self.storage = storage
         self.logging = logging
-        recovery = getattr(processes, "with_github_connectivity_recovery", None)
-        self.github = GitHubNetworkClient(logging, recovery_runner=recovery if callable(recovery) else None)
+        self.processes = processes
+        self.settings = settings
+
+    def _mirror_urls(self) -> tuple[str, str]:
+        custom = ""
+        try:
+            if self.settings is not None:
+                custom = str(getattr(self.settings.get(), "app_update_url", "") or "").strip()
+        except Exception:
+            custom = ""
+        if custom:
+            return custom, custom
+        return self.MIRROR_UPDATE_URL, self.MIRROR_INFO_URL
 
     def check_updates(self) -> list[UpdateInfo]:
         app_release = self.fetch_latest_application_release()
@@ -60,13 +89,13 @@ class UpdatesManager:
         cache_warning = ""
         if payload is None:
             try:
-                payload = self._request_json(self.API_RELEASES, timeout=10)
+                payload = self._fetch_mirror_update()
                 self._write_release_cache(payload)
             except Exception as error:
                 cached_payload = self._read_release_cache(max_age_seconds=None)
                 if cached_payload is not None:
                     payload = cached_payload
-                    cache_warning = self._friendly_github_error(error)
+                    cache_warning = self._friendly_mirror_error(error)
                     self.logging.log("warning", "Using cached app release metadata", error=str(error))
                 else:
                     self.logging.log("warning", "Failed to fetch latest app release", error=str(error))
@@ -74,7 +103,7 @@ class UpdatesManager:
                         "status": "error",
                         "current_version": __version__,
                         "latest_version": __version__,
-                        "error": self._friendly_github_error(error),
+                        "error": self._friendly_mirror_error(error),
                         "html_url": self.REPO_URL + "/releases",
                     }
         else:
@@ -85,7 +114,7 @@ class UpdatesManager:
                 "status": "error",
                 "current_version": __version__,
                 "latest_version": __version__,
-                "error": "No GitHub release metadata is available.",
+                "error": "Метаданные обновления недоступны.",
                 "html_url": self.REPO_URL + "/releases",
             }
 
@@ -104,7 +133,7 @@ class UpdatesManager:
                 "status": "error",
                 "current_version": __version__,
                 "latest_version": __version__,
-                "error": "No GitHub releases were found.",
+                "error": "Зеркало не вернуло доступный релиз.",
                 "html_url": self.REPO_URL + "/releases",
                 "releases": [],
             }
@@ -143,6 +172,8 @@ class UpdatesManager:
             "body": body,
             "asset_name": str(asset.get("name", "")) if asset else "",
             "asset_url": str(asset.get("browser_download_url", "")) if asset else "",
+            "asset_digest": str(asset.get("digest", "")) if asset else "",
+            "asset_size": str(asset.get("size", "")) if asset else "",
             "is_hotfix": bool(is_same_version_hotfix),
             "release_updated_at": latest_release_stamp.isoformat() if latest_release_stamp else "",
             "installed_build_at": installed_stamp.isoformat() if installed_stamp else "",
@@ -151,21 +182,102 @@ class UpdatesManager:
             "cache_warning": cache_warning,
         }
 
+    @staticmethod
+    def _run_with_deadline(func, *, timeout: float):
+        """Run func() with a hard wall-clock deadline on a daemon thread.
+
+        Avoid ``ThreadPoolExecutor`` + ``future.result(timeout=...)``: on timeout
+        ``shutdown(wait=True)`` can block forever while DNS/connect hangs.
+        """
+        box: dict[str, object] = {}
+        errors: list[BaseException] = []
+        done = threading.Event()
+
+        def _target() -> None:
+            try:
+                box["value"] = func()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                done.set()
+
+        thread = threading.Thread(target=_target, name="zapret-hub-update-net", daemon=True)
+        thread.start()
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("goshkow.ru не отвечает (таймаут)")
+            if done.wait(timeout=min(0.25, remaining)):
+                break
+        if errors:
+            raise errors[0]
+        return box.get("value")
+
     def _request_json(self, url: str, *, timeout: int) -> object:
-        return self.github.github_json(url, timeout=timeout, purpose="app-release-metadata")
+        def _load() -> object:
+            request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "Zapret-Hub"})
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8-sig"))
+
+        return self._run_with_deadline(_load, timeout=max(float(timeout) + 1.0, self.META_DEADLINE_SEC))
+
+    def _fetch_mirror_update(self) -> object:
+        primary, fallback = self._mirror_urls()
+        try:
+            return self._request_json(primary, timeout=12)
+        except Exception as primary_error:
+            if fallback and fallback != primary:
+                try:
+                    return self._request_json(fallback, timeout=12)
+                except Exception:
+                    raise primary_error
+            raise primary_error
 
     def _download_bytes(self, url: str, *, timeout: int) -> bytes:
-        return self.github.github_bytes(url, timeout=timeout, purpose="app-update-download")
+        stall_limit = self.DOWNLOAD_STALL_SEC
+        wall_limit = max(float(timeout), self.DOWNLOAD_DEADLINE_SEC)
+
+        def _load() -> bytes:
+            request = urllib.request.Request(url, headers={"User-Agent": "Zapret-Hub"})
+            started = time.monotonic()
+            last_chunk = started
+            chunks: list[bytes] = []
+            with urllib.request.urlopen(request, timeout=min(60, int(timeout))) as response:
+                while True:
+                    now = time.monotonic()
+                    if now - started >= wall_limit:
+                        raise TimeoutError("Загрузка обновления превысила лимит времени.")
+                    if now - last_chunk >= stall_limit:
+                        raise TimeoutError("Загрузка обновления зависла (нет данных).")
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    last_chunk = time.monotonic()
+                    chunks.append(chunk)
+            return b"".join(chunks)
+
+        return self._run_with_deadline(_load, timeout=wall_limit + 2.0)
 
     def _is_certificate_error(self, error: Exception) -> bool:
         return "CERTIFICATE_VERIFY_FAILED" in str(error).upper()
 
-    def _friendly_github_error(self, error: BaseException) -> str:
-        if is_github_rate_limit_error(error):
-            return "GitHub temporarily limited update checks. Please try again later."
+    def _friendly_mirror_error(self, error: BaseException) -> str:
         if self._is_certificate_error(error):
-            return "Unable to verify GitHub certificates on this system. Please try again later."
-        return str(error)
+            return "Не удалось проверить сертификат зеркала обновлений."
+        if isinstance(error, TimeoutError):
+            text = str(error).strip()
+            return text or "goshkow.ru не отвечает (таймаут)."
+        if isinstance(error, urllib.error.HTTPError):
+            code = int(getattr(error, "code", 0) or 0)
+            if code == 404:
+                return "Обновление не найдено на зеркале goshkow.ru (HTTP 404)."
+            if 500 <= code <= 599:
+                return f"Зеркало обновлений временно недоступно (HTTP {code})."
+            return f"Ошибка зеркала обновлений (HTTP {code})."
+        if isinstance(error, (urllib.error.URLError, OSError)):
+            return "Не удалось подключиться к зеркалу обновлений goshkow.ru. Проверьте сеть."
+        return f"Не удалось связаться с зеркалом обновлений: {error}"
 
     def _release_cache_path(self) -> Path:
         return self.storage.paths.cache_dir / "app_releases_cache.json"
@@ -202,6 +314,26 @@ class UpdatesManager:
             self.logging.log("warning", "Failed to write app release cache", error=str(error))
 
     def _normalize_release_entries(self, payload: object) -> list[dict[str, object]]:
+        if isinstance(payload, dict) and payload.get("version"):
+            mirror_assets = payload.get("assets") if isinstance(payload.get("assets"), dict) else {}
+            assets: list[dict[str, object]] = []
+            for architecture, raw_asset in mirror_assets.items():
+                if not isinstance(raw_asset, dict):
+                    continue
+                asset = dict(raw_asset)
+                asset["architecture"] = str(architecture)
+                asset["browser_download_url"] = str(raw_asset.get("download_url") or "")
+                assets.append(asset)
+            return [
+                {
+                    "version": str(payload.get("version") or "").strip().lstrip("v"),
+                    "body": str(payload.get("changelog") or ""),
+                    "html_url": str(payload.get("github_url") or self.REPO_URL + "/releases"),
+                    "published_at": str(payload.get("published_at") or ""),
+                    "updated_at": str(payload.get("binary_updated_at") or payload.get("published_at") or ""),
+                    "payload": {"assets": assets},
+                }
+            ]
         if not isinstance(payload, list):
             return []
         entries: list[dict[str, object]] = []
@@ -282,7 +414,17 @@ class UpdatesManager:
 
         temp_root = Path(tempfile.mkdtemp(prefix="zapret_hub_update_"))
         zip_path = temp_root / asset_name
-        zip_path.write_bytes(self._download_bytes(asset_url, timeout=60))
+        archive_bytes = self._download_bytes(asset_url, timeout=120)
+        expected_size = int(str(release_info.get("asset_size") or "0") or 0)
+        if expected_size and len(archive_bytes) != expected_size:
+            raise ValueError("Размер загруженного обновления не совпадает с данными зеркала.")
+        expected_digest = str(release_info.get("asset_digest") or "").strip().lower()
+        if expected_digest:
+            expected_digest = expected_digest.removeprefix("sha256:")
+            actual_digest = hashlib.sha256(archive_bytes).hexdigest()
+            if actual_digest != expected_digest:
+                raise ValueError("SHA-256 загруженного обновления не совпадает с данными зеркала.")
+        zip_path.write_bytes(archive_bytes)
 
         extract_root = temp_root / "payload"
         extract_root.mkdir(parents=True, exist_ok=True)
@@ -290,8 +432,8 @@ class UpdatesManager:
             archive.extractall(extract_root)
 
         payload_root = self._resolve_payload_root(extract_root)
-        launch_exe = payload_root / "zapret_hub.exe"
-        if not launch_exe.exists():
+        launch_exe = self._find_payload_exe(payload_root)
+        if launch_exe is None:
             raise FileNotFoundError("The downloaded update package does not contain zapret_hub.exe.")
 
         return {
@@ -301,16 +443,31 @@ class UpdatesManager:
             "version": str(release_info.get("latest_version", "")),
         }
 
+    def _find_payload_exe(self, root: Path) -> Path | None:
+        for name in self._EXE_NAMES:
+            candidate = root / name
+            if candidate.exists():
+                return candidate
+        try:
+            for path in root.iterdir():
+                if path.is_file() and path.name.lower() == "zapret_hub.exe":
+                    return path
+        except Exception:
+            pass
+        return None
+
     def _resolve_payload_root(self, extract_root: Path) -> Path:
-        direct_exe = extract_root / "zapret_hub.exe"
-        if direct_exe.exists():
+        if self._find_payload_exe(extract_root) is not None:
             return extract_root
         named_root = extract_root / "zapret_hub"
-        if (named_root / "zapret_hub.exe").exists():
+        if self._find_payload_exe(named_root) is not None:
             return named_root
-        for candidate in extract_root.iterdir():
-            if candidate.is_dir() and (candidate / "zapret_hub.exe").exists():
-                return candidate
+        try:
+            for candidate in extract_root.iterdir():
+                if candidate.is_dir() and self._find_payload_exe(candidate) is not None:
+                    return candidate
+        except Exception:
+            pass
         return extract_root
 
     def launch_update(self, prepared_update: dict[str, str]) -> None:
@@ -416,11 +573,10 @@ class UpdatesManager:
               }}
             }}
 
-            try {{ sc stop zapret *> $null }} catch {{}}
-            try {{ sc delete zapret *> $null }} catch {{}}
-            foreach ($image in @('zapret_hub.exe', 'TgWsProxy_windows.exe', 'winws.exe')) {{
-              try {{ taskkill /F /T /IM $image *> $null }} catch {{}}
-            }}
+            # The app performs a graceful component shutdown before applying an
+            # update. Do not delete driver services or terminate unrelated
+            # processes here: besides breaking active connections this pattern is
+            # commonly flagged by endpoint protection.
 
             New-Item -ItemType Directory -Path $dst -Force | Out-Null
 
@@ -530,10 +686,27 @@ class UpdatesManager:
     def _pick_release_asset(self, assets: list[dict[str, object]]) -> dict[str, object] | None:
         machine = platform.machine().lower()
         want_arm = "arm" in machine or "aarch64" in machine
-        pattern = re.compile(r"portable.*win_arm64\.zip$", re.IGNORECASE) if want_arm else re.compile(r"portable.*win_x64\.zip$", re.IGNORECASE)
+        arch_key = "arm64" if want_arm else "x64"
+        pattern = (
+            re.compile(r"portable.*win_arm64\.zip$", re.IGNORECASE)
+            if want_arm
+            else re.compile(r"portable.*win_x64\.zip$", re.IGNORECASE)
+        )
+        # Prefer mirror architecture keys (x64 / arm64), then name regex.
+        for asset in assets:
+            if str(asset.get("architecture") or "").lower() == arch_key and str(asset.get("browser_download_url") or "").strip():
+                return asset
         for asset in assets:
             name = str(asset.get("name") or "")
-            if pattern.search(name):
+            if pattern.search(name) and str(asset.get("browser_download_url") or "").strip():
+                return asset
+        # Last resort: any portable zip with a download URL (skip installer).
+        for asset in assets:
+            name = str(asset.get("name") or "").lower()
+            arch = str(asset.get("architecture") or "").lower()
+            if arch == "installer" or "installer" in name:
+                continue
+            if str(asset.get("browser_download_url") or "").strip() and name.endswith(".zip"):
                 return asset
         return None
 

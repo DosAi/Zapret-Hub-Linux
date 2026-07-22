@@ -43,7 +43,7 @@ class GoshkowVpnManager:
             "rules_mode": str(raw.get("rules_mode", "blacklist") or "blacklist"),
             "processes": str(raw.get("processes", "") or ""),
             "processes_exclude_mode": bool(raw.get("processes_exclude_mode", False)),
-            "system_proxy_mode": str(raw.get("system_proxy_mode", "pac") or "pac"),
+            "system_proxy_mode": str(raw.get("system_proxy_mode", "set") or "set"),
             "tun_enabled": bool(raw.get("tun_enabled", True)),
             "auto_reconnect": bool(raw.get("auto_reconnect", True)),
             "last_updated_at": str(raw.get("last_updated_at", "") or ""),
@@ -89,7 +89,7 @@ class GoshkowVpnManager:
         if "rules_mode" in changes and changes["rules_mode"] not in {"blacklist", "whitelist"}:
             changes["rules_mode"] = "blacklist"
         if "system_proxy_mode" in changes and changes["system_proxy_mode"] not in {"clear", "set", "unchanged", "pac"}:
-            changes["system_proxy_mode"] = "pac"
+            changes["system_proxy_mode"] = "set"
         if "selected_server_id" in changes:
             changes["auto_excluded_server_ids"] = []
             if str(changes.get("selected_server_id") or "") != "auto":

@@ -38,10 +38,6 @@ jobs:
         shell: pwsh
         run: .\scripts\build_nuitka.ps1 -Python python -OutputDir dist_nuitka -Compiler msvc
 
-      - name: SignPath placeholder
-        shell: pwsh
-        run: .\scripts\signpath_stub.ps1 -InputPath ".\dist_nuitka\main.dist\zapret_hub.exe"
-
       - name: Upload build artifacts
         uses: actions/upload-artifact@v6
         with:

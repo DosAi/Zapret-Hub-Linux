@@ -8,19 +8,30 @@ from typing import Any
 
 @dataclass(slots=True)
 class AppSettings:
-    theme: str = "oled"
+    theme: str = "night"
+    ui_scale: str = "1"
     language: str = "ru"
     start_in_tray: bool = False
     autostart_windows: bool = False
     auto_run_components: bool = False
     check_updates_on_start: bool = True
+    windows_notifications_enabled: bool = True
     notifications_enabled: bool = True
+    show_tray_hide_notification: bool = True
+    hardware_acceleration_enabled: bool = True
+    sounds_enabled: bool = True
+    sounds_click_enabled: bool = True
+    sounds_volume: str = "normal"
+    sidebar_collapsed: bool = False
+    quick_access_widget: str = "analysis"
+    runtime_scroll_switch_enabled: bool = True
     work_root: str = ""
     active_profile_id: str = "default"
     enabled_component_ids: list[str] = field(default_factory=list)
     autostart_component_ids: list[str] = field(default_factory=list)
     component_selection_initialized: bool = False
     enabled_mod_ids: list[str] = field(default_factory=list)
+    enabled_zapret2_mod_ids: list[str] = field(default_factory=list)
     mods_index_url: str = ""
     app_update_url: str = ""
     tg_proxy_host: str = "127.0.0.1"
@@ -37,21 +48,40 @@ class AppSettings:
     selected_zapret_general: str = ""
     favorite_zapret_generals: list[str] = field(default_factory=list)
     general_autotest_done: bool = False
+    zapret_control_mode: str = "manual"
+    trusted_general: str = ""
     selected_service_ids: list[str] = field(default_factory=list)
     selected_runtime_mode: str = "zapret"
+    runtime_mode_order: list[str] = field(
+        default_factory=lambda: ["zapret", "goshkow-vpn", "zapret2", "none"]
+    )
+    no_bypass_power_enabled: bool = False
     zapret_ipset_mode: str = "loaded"
     zapret_game_filter_mode: str = "disabled"
     zapret_gaming_set: str = "stun-wide-base"
     zapret_udp_exclude_ports: str = ""
+    zapret2_tcp_ports: str = "80,443"
+    zapret2_udp_ports: str = "443"
+    zapret2_raw_filter: str = ""
+    zapret2_lua_strategy: str = ""
+    zapret2_strategy_id: str = "balanced"
     goshkow_vpn_pending_start: bool = False
     zapret_was_running_before_goshkow_vpn: bool = False
     zapret_was_enabled_before_goshkow_vpn: bool = False
     xbox_dns_was_enabled_before_goshkow_vpn: bool = False
+    zapret2_was_running_before_goshkow_vpn: bool = False
+    zapret2_was_enabled_before_goshkow_vpn: bool = False
+    zapret_was_running_before_zapret2: bool = False
+    zapret_was_enabled_before_zapret2: bool = False
+    goshkow_vpn_was_running_before_zapret2: bool = False
+    goshkow_vpn_was_enabled_before_zapret2: bool = False
+    xbox_dns_was_enabled_before_zapret2: bool = False
+    dns_profile: str = "xbox"
     goshkow_vpn_subscription_url: str = ""
     goshkow_vpn_tun_enabled: bool = True
     goshkow_vpn_routing_mode: str = "global"
     goshkow_vpn_rules_mode: str = "blacklist"
-    goshkow_vpn_system_proxy_mode: str = "pac"
+    goshkow_vpn_system_proxy_mode: str = "set"
     goshkow_vpn_processes: str = ""
     goshkow_vpn_processes_exclude_mode: bool = False
     apply_update_on_next_launch: bool = False
@@ -113,6 +143,8 @@ class InstalledMod:
     source_type: str = "generic"
     general_scripts: list[str] = field(default_factory=list)
     emoji: str = ""
+    icon_url: str = ""
+    marketplace_slug: str = ""
     installed_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
@@ -185,6 +217,7 @@ class AppPaths:
     configs_dir: Path
     default_packs_dir: Path
     mods_dir: Path
+    mods_zapret2_dir: Path
     merged_runtime_dir: Path
     backups_dir: Path
     cache_dir: Path

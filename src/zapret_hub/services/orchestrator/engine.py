@@ -1,0 +1,1152 @@
+from __future__ import annotations
+
+import queue
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+from zapret_hub.services.orchestrator.conflicts import ConflictDetector, describe_conflict
+from zapret_hub.services.orchestrator.cutover import CutoverManager
+from zapret_hub.services.orchestrator.learner import HostlistLearner
+from zapret_hub.services.orchestrator.mapper import ServiceMapper
+from zapret_hub.services.orchestrator.memory import WorkingMemory
+from zapret_hub.services.orchestrator.signals import SignalCollector, classify_failure
+from zapret_hub.services.orchestrator.tuner import SmartTuner, TunerStep
+from zapret_hub.services.service_catalog import SERVICE_PRESETS
+from zapret_hub.services.service_rules import SERVICE_RULES
+
+
+OrchestratorStatus = str  # "idle" | "tuning" | "ok"
+
+_STATUS_TEXT = {
+    ("manual", "idle"): ("Вручную", "Manual"),
+    ("manual", "tuning"): ("Вручную", "Manual"),
+    ("manual", "ok"): ("Вручную", "Manual"),
+    ("auto", "idle"): ("Авто · ожидание", "Auto · idle"),
+    ("auto", "tuning"): ("Подбираю конфигурацию…", "Tuning configuration…"),
+    ("auto", "ok"): ("Авто · работает", "Auto · running"),
+}
+
+_LONG_TUNE_S = 30.0
+_FAIL_THRESHOLD = 3
+_SCAN_INTERVAL_S = 3.0
+_MAX_STEPS = 12
+_EXHAUSTED_COOLDOWN_S = 900.0
+_SYN_SENT_MIN_AGE_HINT = 2  # require repeated fails; SYN_SENT alone is normal
+
+
+def _exe_label(process: str) -> str:
+    """Short exe name for status (no IPs/domains/CIDRs)."""
+    raw = str(process or "").strip()
+    if not raw:
+        return ""
+    name = Path(raw.replace("\\", "/")).name
+    return name[:48]
+
+
+class OrchestratorEngine:
+    """Background Auto-mode loop: incidents → classify → tuner → batched cutover → knowledge."""
+
+    def __init__(
+        self,
+        *,
+        on_status: Callable[[dict[str, Any]], None] | None = None,
+        language: Callable[[], str] | None = None,
+    ) -> None:
+        self.context: Any | None = None
+        self._on_status = on_status
+        self._on_notify: Callable[[str, str, str], None] | None = None
+        self._on_toast: Callable[[str, str], None] | None = None
+        self._on_conflict: Callable[[dict[str, Any]], None] | None = None
+        self._on_long_pick: Callable[[dict[str, Any]], None] | None = None
+        self._language = language or (lambda: "ru")
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._mode = "manual"
+        self._status: OrchestratorStatus = "idle"
+        self._detail = ""
+        self._zapret_active = False
+        self._min_incident_interval_s = 12.0
+        self._last_incident_at = 0.0
+        self._loop_interval_s = 1.0
+        self._last_scan_at = 0.0
+        self._mapper = ServiceMapper()
+        self._signals = SignalCollector()
+        self._tuner = SmartTuner()
+        self._memory = WorkingMemory()
+        self._conflicts = ConflictDetector()
+        self._cutover: CutoverManager | None = None
+        self._busy = False
+
+    def _log(self, level: str, message: str, **fields: Any) -> None:
+        if self.context is None:
+            return
+        logging = getattr(self.context, "logging", None)
+        if logging is None:
+            return
+        try:
+            logging.log(level, message, **fields)
+        except Exception:
+            pass
+
+    def attach(self, context: Any) -> None:
+        self.context = context
+        knowledge = getattr(context, "knowledge", None)
+        self._cutover = CutoverManager(context, knowledge=knowledge, signals=self._signals)
+        try:
+            mode = str(getattr(context.settings.get(), "zapret_control_mode", "manual") or "manual")
+        except Exception:
+            mode = "manual"
+        with self._lock:
+            self._mode = "auto" if mode == "auto" else "manual"
+            self._status = "idle"
+        try:
+            self._mapper = ServiceMapper()
+        except Exception:
+            pass
+        self._reload_learned_conflicts()
+
+    def _reload_learned_conflicts(self) -> None:
+        knowledge = getattr(self.context, "knowledge", None) if self.context else None
+        if knowledge is None:
+            return
+        try:
+            rows = knowledge.recent_conflicts(limit=80)
+            self._conflicts.load_learned(rows)
+        except Exception:
+            pass
+
+    def set_mode(self, mode: str) -> dict[str, Any]:
+        normalized = "auto" if str(mode or "").strip().lower() == "auto" else "manual"
+        with self._lock:
+            self._mode = normalized
+            if normalized == "manual":
+                self._status = "idle"
+                self._detail = ""
+                self._drain_queue()
+        if self.context is not None:
+            try:
+                self.context.settings.update(zapret_control_mode=normalized)
+            except Exception:
+                pass
+        self.sync_lifecycle(zapret_active=self._zapret_active)
+        snapshot = self.status_snapshot()
+        self._emit_status(snapshot)
+        return snapshot
+
+    def get_mode(self) -> str:
+        with self._lock:
+            return self._mode
+
+    def sync_lifecycle(self, *, zapret_active: bool) -> dict[str, Any]:
+        with self._lock:
+            self._zapret_active = bool(zapret_active)
+            should_run = self._mode == "auto" and self._zapret_active
+        if should_run:
+            self.start()
+            with self._lock:
+                if self._status == "idle":
+                    self._status = "ok"
+        else:
+            if self._mode != "auto":
+                self.stop()
+            else:
+                with self._lock:
+                    if not self._zapret_active and self._status != "tuning":
+                        self._status = "idle"
+        return self.status_snapshot()
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._loop,
+                name="zapret-hub-orchestrator",
+                daemon=True,
+            )
+            self._thread.start()
+            if self._status == "idle" and self._mode == "auto":
+                self._status = "ok"
+
+    def stop(self) -> None:
+        thread: threading.Thread | None
+        with self._lock:
+            thread = self._thread
+            self._stop.set()
+            self._thread = None
+            if self._mode != "auto":
+                self._status = "idle"
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def enqueue(self, incident: dict[str, Any]) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            if self._mode != "auto":
+                return False
+            if (now - self._last_incident_at) < self._min_incident_interval_s:
+                return False
+            self._last_incident_at = now
+        self._queue.put(dict(incident))
+        return True
+
+    def set_status(self, status: OrchestratorStatus, *, detail: str = "") -> dict[str, Any]:
+        normalized = status if status in {"idle", "tuning", "ok"} else "idle"
+        with self._lock:
+            self._status = normalized
+            self._detail = str(detail or "")
+        snapshot = self.status_snapshot()
+        self._emit_status(snapshot)
+        return snapshot
+
+    def status_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            mode = self._mode
+            status = self._status
+            detail = self._detail
+            running = self._thread is not None and self._thread.is_alive()
+            zapret_active = self._zapret_active
+        language = str(self._language() or "ru").lower()
+        ru_text, en_text = _STATUS_TEXT.get((mode, status), ("—", "—"))
+        status_text = ru_text if language.startswith("ru") else en_text
+        backend = "zapret"
+        try:
+            if self.context is not None:
+                backend = (
+                    "zapret2"
+                    if str(self.context.settings.get().selected_runtime_mode or "") == "zapret2"
+                    else "zapret"
+                )
+        except Exception:
+            backend = "zapret"
+        if mode == "auto" and backend == "zapret2":
+            status_text = (
+                status_text.replace("Авто", "Авто · Zapret 2")
+                if language.startswith("ru")
+                else status_text.replace("Auto", "Auto · Zapret 2")
+            )
+        if detail and mode == "auto" and status == "tuning":
+            status_text = f"{status_text}: {detail}"
+        return {
+            "mode": mode,
+            "status": status,
+            "statusText": status_text,
+            "detail": detail,
+            "isAuto": mode == "auto",
+            "running": running,
+            "zapretActive": zapret_active,
+            "backend": backend,
+        }
+
+    def run_bootstrap(self, *, youtube: bool = True, discord: bool = True) -> dict[str, Any]:
+        if self.context is None:
+            return {"ok": False, "error": "no_context"}
+        self.set_mode("auto")
+        knowledge = getattr(self.context, "knowledge", None)
+        cutover = self._cutover or CutoverManager(self.context, knowledge=knowledge, signals=self._signals)
+        self._cutover = cutover
+
+        settings = self.context.settings.get()
+        runtime = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
+        trusted_existing = str(getattr(settings, "trusted_general", "") or "").strip()
+        strategy_existing = str(getattr(settings, "zapret2_strategy_id", "balanced") or "balanced")
+        already_ready = bool(getattr(settings, "general_autotest_done", False)) and (
+            bool(trusted_existing) if runtime != "zapret2" else True
+        )
+
+        selected = {str(item) for item in (settings.selected_service_ids or [])}
+        if youtube:
+            selected.add("youtube")
+        if discord:
+            selected.add("discord")
+        ordered = [preset.id for preset in SERVICE_PRESETS if preset.id in selected]
+
+        # Resume path: keep accumulated lists/strategy/general — only ensure services + soft start.
+        if already_ready:
+            self.set_status("tuning", detail="resume")
+            try:
+                enabled = {str(item) for item in (settings.enabled_component_ids or [])}
+                if runtime == "zapret2":
+                    enabled.add("zapret2")
+                    from zapret_hub.services.orchestrator import zapret2_hub
+
+                    zapret2_hub.seed_service_lists(
+                        Path(self.context.paths.configs_dir),
+                        ordered,
+                        only_missing=True,
+                    )
+                else:
+                    enabled.add("zapret")
+                    # Classic: append missing harvested domains once, never wipe.
+                    from zapret_hub.services.orchestrator import zapret2_hub
+
+                    learner = HostlistLearner(Path(self.context.paths.configs_dir))
+                    for sid in ordered:
+                        if sid not in {"youtube", "discord"}:
+                            continue
+                        for host in zapret2_hub.harvest_service_domains([sid]):
+                            if not learner.domain_in_merged_lists(host, [Path(self.context.paths.configs_dir)]):
+                                learner.add_domains([host])
+                        learner.add_ips(zapret2_hub.harvest_service_ips([sid]))
+                changes: dict[str, Any] = {
+                    "zapret_control_mode": "auto",
+                    "selected_service_ids": ordered,
+                    "enabled_component_ids": sorted(enabled),
+                }
+                # Preserve current runtime — do not force classic zapret.
+                self.context.settings.update(**changes)
+                if runtime == "zapret2":
+                    try:
+                        if not any(
+                            getattr(s, "component_id", "") == "zapret2" and getattr(s, "status", "") == "running"
+                            for s in self.context.processes.list_states()
+                        ):
+                            self.context.processes.start_component("zapret2")
+                    except Exception as error:
+                        self._log("warning", "Resume zapret2 start failed", error=str(error))
+                else:
+                    try:
+                        self.context.merge.rebuild()
+                        self.context.files._invalidate_collection_cache()
+                        self.context.files.rebuild_materialized_collections()
+                        self.context.processes.rebuild_zapret_runtime_snapshot()
+                    except Exception as error:
+                        self._log("warning", "Resume merge failed", error=str(error))
+                cutover.snapshot()
+                self._zapret_active = True
+                self.set_status("ok")
+                self.sync_lifecycle(zapret_active=True)
+                return {
+                    "ok": True,
+                    "resumed": True,
+                    "mode": "auto",
+                    "backend": runtime if runtime in {"zapret", "zapret2"} else "zapret",
+                    "trustedGeneral": trusted_existing or strategy_existing,
+                    "services": ordered,
+                }
+            except Exception as error:
+                self.set_status("ok")
+                self._log("error", "Bootstrap resume failed", error=str(error))
+                return {"ok": False, "error": str(error), "mode": "auto", "resumed": False}
+
+        self.set_status("tuning", detail="YouTube / Discord" if (youtube or discord) else "bootstrap")
+        cutover.snapshot()
+
+        try:
+            enabled = {str(item) for item in (settings.enabled_component_ids or [])}
+            if runtime == "zapret2":
+                enabled.add("zapret2")
+                from zapret_hub.services.orchestrator import zapret2_hub
+
+                self.context.settings.update(
+                    zapret_control_mode="auto",
+                    selected_service_ids=ordered,
+                    enabled_component_ids=sorted(enabled),
+                    general_autotest_done=True,
+                    zapret2_strategy_id=strategy_existing or "balanced",
+                )
+                zapret2_hub.seed_service_lists(
+                    Path(self.context.paths.configs_dir), ordered, only_missing=True
+                )
+                zapret2_hub.write_hub_strategy_lua(
+                    Path(self.context.paths.configs_dir), strategy_existing or "balanced"
+                )
+                try:
+                    self.context.processes.start_component("zapret2")
+                except Exception as error:
+                    self.set_status("ok")
+                    return {"ok": False, "error": str(error), "mode": "auto", "backend": "zapret2"}
+                if knowledge is not None:
+                    try:
+                        knowledge.set_winner(
+                            "bootstrap",
+                            {
+                                "general": strategy_existing or "balanced",
+                                "services": ["youtube", "discord"],
+                                "score": 10.0,
+                                "symptom": "bootstrap",
+                                "backend": "zapret2",
+                            },
+                        )
+                    except Exception:
+                        pass
+                self._zapret_active = True
+                self.set_status("ok")
+                self.sync_lifecycle(zapret_active=True)
+                return {
+                    "ok": True,
+                    "mode": "auto",
+                    "backend": "zapret2",
+                    "trustedGeneral": strategy_existing or "balanced",
+                    "services": ordered,
+                }
+
+            enabled.add("zapret")
+            self.context.settings.update(
+                zapret_control_mode="auto",
+                zapret_ipset_mode="any",
+                selected_service_ids=ordered,
+                enabled_component_ids=sorted(enabled),
+                # Keep user's runtime if already zapret; only default when empty/none.
+                selected_runtime_mode="zapret" if runtime in {"", "none", "zapret"} else runtime,
+            )
+            try:
+                self.context.merge.rebuild()
+                self.context.files._invalidate_collection_cache()
+                self.context.files.rebuild_materialized_collections()
+                self.context.processes.rebuild_zapret_runtime_snapshot()
+            except Exception as error:
+                self._log("warning", "Bootstrap pre-merge failed", error=str(error))
+
+            # First-time classic: seed YT/Discord catalogs before diagnostics.
+            from zapret_hub.services.orchestrator import zapret2_hub
+
+            learner = HostlistLearner(Path(self.context.paths.configs_dir))
+            learner.add_domains(zapret2_hub.harvest_service_domains(ordered))
+            learner.add_ips(zapret2_hub.harvest_service_ips(ordered))
+
+            chosen: dict[str, Any] | None = None
+            diag_error = ""
+            try:
+                results = self.context.processes.run_general_diagnostics(
+                    progress_callback=lambda current, total, name: self.set_status(
+                        "tuning",
+                        detail=str(name or "").split(" - ", 1)[0][:48],
+                    ),
+                    # Do not tie diagnostics to orchestrator._stop / mode flips — that
+                    # aborted the scan immediately after setMode/sync_lifecycle races.
+                    stop_callback=None,
+                )
+                candidates = [item for item in results if isinstance(item, dict) and item.get("id")]
+                chosen = next((item for item in candidates if item.get("status") == "ok"), None)
+                if chosen is None and candidates:
+                    # Prefer any scored candidate over total failure.
+                    chosen = candidates[0]
+            except Exception as error:
+                diag_error = str(error)
+                self._log("error", "Bootstrap diagnostics failed", error=diag_error)
+
+            if chosen is None:
+                # Soft path: enable Auto with the first available general and let the
+                # orchestrator keep tuning in the background. Hard-failing onboarding
+                # every time probes miss is worse UX than a deferred handoff.
+                generals = []
+                try:
+                    generals = self.context.processes.list_zapret_generals()
+                except Exception:
+                    generals = []
+                fallback_id = str(trusted_existing or "").strip()
+                if not fallback_id and generals:
+                    fallback_id = str(generals[0].get("id") or "").strip()
+                return self._bootstrap_deferred(
+                    ordered=ordered,
+                    trusted=fallback_id,
+                    reason=diag_error or "no_working_general",
+                )
+
+            trusted = str(chosen.get("id") or "")
+            self.context.settings.update(
+                selected_zapret_general=trusted,
+                trusted_general=trusted,
+                zapret_ipset_mode=str(chosen.get("ipset_mode") or "any"),
+                zapret_game_filter_mode=str(
+                    chosen.get("game_mode") or settings.zapret_game_filter_mode or "disabled"
+                ),
+                general_autotest_done=True,
+            )
+
+            probe_services = [sid for sid in ("youtube", "discord") if sid in selected]
+            probe_targets = cutover.probe_for_services(probe_services)
+            required_hosts: list[str] = []
+            if youtube:
+                required_hosts.append("youtube.com")
+                if not any("youtube" in str(t.get("value", "")).lower() for t in probe_targets):
+                    probe_targets.append({"value": "https://www.youtube.com/"})
+            if discord:
+                required_hosts.append("discord.com")
+                if not any("discord" in str(t.get("value", "")).lower() for t in probe_targets):
+                    probe_targets.append({"value": "https://discord.com/"})
+
+            apply_result = cutover.apply_and_start_trusted(
+                general_id=trusted,
+                probe_targets=probe_targets,
+                required_hosts=required_hosts,
+            )
+            if not apply_result.get("ok"):
+                self._log("warning", "Bootstrap apply/probe soft-deferred", error=str(apply_result.get("error") or ""))
+                return self._bootstrap_deferred(
+                    ordered=ordered,
+                    trusted=trusted,
+                    reason=str(apply_result.get("error") or "apply_failed"),
+                )
+
+            if knowledge is not None:
+                try:
+                    knowledge.record_situation(
+                        {"kind": "bootstrap", "services": ordered, "general": trusted, "ok": True}
+                    )
+                    knowledge.set_winner(
+                        "bootstrap",
+                        {
+                            "general": trusted,
+                            "ipset": "any",
+                            "services": ["youtube", "discord"],
+                            "score": 10.0,
+                            "symptom": "bootstrap",
+                        },
+                    )
+                except Exception:
+                    pass
+
+            self._zapret_active = True
+            self.set_status("ok")
+            self.sync_lifecycle(zapret_active=True)
+            return {
+                "ok": True,
+                "mode": "auto",
+                "backend": "zapret",
+                "trustedGeneral": trusted,
+                "services": ordered,
+                "ipset": "any",
+            }
+        except Exception as error:
+            self._log("error", "Bootstrap failed", error=str(error))
+            try:
+                ordered_fallback = [preset.id for preset in SERVICE_PRESETS if preset.id in {"youtube", "discord"}]
+                return self._bootstrap_deferred(
+                    ordered=ordered_fallback,
+                    trusted=str(getattr(self.context.settings.get(), "trusted_general", "") or ""),
+                    reason=str(error),
+                )
+            except Exception:
+                self.set_status("ok")
+                return {"ok": False, "error": str(error), "mode": "auto"}
+
+    def _bootstrap_deferred(
+        self,
+        *,
+        ordered: list[str],
+        trusted: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Enable Auto even when probes/diagnostics did not fully finish."""
+        trusted = str(trusted or "").strip()
+        try:
+            enabled = {str(item) for item in (self.context.settings.get().enabled_component_ids or [])}
+            enabled.add("zapret")
+            changes: dict[str, Any] = {
+                "zapret_control_mode": "auto",
+                "zapret_ipset_mode": "any",
+                "selected_service_ids": ordered,
+                "enabled_component_ids": sorted(enabled),
+                "selected_runtime_mode": "zapret",
+            }
+            if trusted:
+                changes["selected_zapret_general"] = trusted
+                changes["trusted_general"] = trusted
+                # Leave autotest_done False so the live orchestrator can keep searching.
+                changes["general_autotest_done"] = False
+            self.context.settings.update(**changes)
+            try:
+                self.context.merge.rebuild()
+                self.context.files._invalidate_collection_cache()
+                self.context.files.rebuild_materialized_collections()
+                self.context.processes.rebuild_zapret_runtime_snapshot()
+            except Exception as error:
+                self._log("warning", "Deferred bootstrap merge failed", error=str(error))
+            try:
+                self.context.processes.start_component("zapret")
+            except Exception as error:
+                self._log("warning", "Deferred bootstrap start failed", error=str(error))
+            if self._cutover is not None:
+                try:
+                    self._cutover.snapshot()
+                except Exception:
+                    pass
+            self._zapret_active = True
+            self.set_status("ok")
+            self.sync_lifecycle(zapret_active=True)
+            return {
+                "ok": True,
+                "deferred": True,
+                "reason": reason,
+                "mode": "auto",
+                "backend": "zapret",
+                "trustedGeneral": trusted,
+                "services": ordered,
+            }
+        except Exception as error:
+            self.set_status("ok")
+            self._log("error", "Deferred bootstrap failed", error=str(error))
+            return {"ok": False, "error": str(error), "mode": "auto", "deferred": False}
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            incident: dict[str, Any] | None = None
+            try:
+                incident = self._queue.get(timeout=self._loop_interval_s)
+            except queue.Empty:
+                incident = None
+            if self._stop.is_set():
+                break
+            if incident is not None:
+                self._handle_incident(incident)
+                continue
+            now = time.monotonic()
+            if (now - self._last_scan_at) >= _SCAN_INTERVAL_S:
+                self._last_scan_at = now
+                if self._mode == "auto" and self._zapret_active and not self._busy:
+                    try:
+                        self._passive_scan()
+                    except Exception as error:
+                        self._log("warning", "Orchestrator scan failed", error=str(error))
+            self._maybe_long_tune_notify()
+
+    def _passive_scan(self) -> None:
+        if self.context is None:
+            return
+        knowledge = getattr(self.context, "knowledge", None)
+        samples = self._signals.snapshot_connections(limit=60)
+        settings = self.context.settings.get()
+        selected = {str(item) for item in (settings.selected_service_ids or [])}
+        lists_dirs = self._list_dirs()
+        learner = HostlistLearner(Path(self.context.paths.configs_dir))
+
+        batch_domains: list[str] = []
+        batch_ips: list[str] = []
+        batch_missing: list[str] = []
+        batch_services: list[str] = []
+        primary: dict[str, Any] | None = None
+        checked = 0
+
+        for sample in samples:
+            if self._stop.is_set() or self._mode != "auto":
+                return
+            if checked >= 16:
+                break
+            state = (sample.state or "").upper()
+            interesting_tcp = state in {"SYN_SENT", "SYN_RECEIVED"}
+            interesting_udp = sample.proto == "udp" and sample.remote_port in {
+                3478,
+                3479,
+                3480,
+                5222,
+                5060,
+                5062,
+                443,
+            }
+            services = [
+                hit.service_id
+                for hit in self._mapper.map(
+                    host=sample.domain, ip=sample.remote_ip, process=sample.process, use_dns=bool(sample.domain)
+                )
+            ]
+            if not interesting_tcp and not interesting_udp and not services:
+                continue
+            if sample.proto == "tcp" and not interesting_tcp and not sample.domain and not services:
+                continue
+
+            host = sample.domain or ""
+            key = host or sample.remote_ip
+            if not key:
+                continue
+            if knowledge is not None and (
+                knowledge.is_dead_host(key) or knowledge.on_cooldown(f"host:{key}")
+            ):
+                continue
+
+            if not host:
+                if not services or not (interesting_udp or interesting_tcp):
+                    continue
+                fails = self._memory.bump_fail(sample.remote_ip)
+                if fails < _FAIL_THRESHOLD:
+                    continue
+                checked += 1
+                if sample.remote_ip and sample.remote_ip not in batch_ips:
+                    batch_ips.append(sample.remote_ip)
+                for sid in services:
+                    if sid not in batch_services:
+                        batch_services.append(sid)
+                if primary is None:
+                    primary = {
+                        "domain": "",
+                        "ip": sample.remote_ip,
+                        "process": sample.process,
+                        "proto": sample.proto,
+                        "remote_port": sample.remote_port,
+                        "services": list(services),
+                        "symptom": "external_miss" if sample.proto == "udp" else "tcp_timeout",
+                        "selected": list(selected),
+                    }
+                continue
+
+            checked += 1
+            if interesting_tcp:
+                fails = self._memory.bump_fail(host)
+                if fails < _FAIL_THRESHOLD:
+                    continue
+            else:
+                fails = self._memory.bump_fail(f"soft:{host}")
+                if fails < _FAIL_THRESHOLD + 1:
+                    continue
+
+            result = self._signals.probe_host_access(host)
+            if result.ok:
+                self._memory.reset_fail(host)
+                self._memory.reset_fail(f"soft:{host}")
+                continue
+            fails = self._memory.bump_fail(host)
+            if fails < _FAIL_THRESHOLD:
+                continue
+            in_lists = learner.domain_in_merged_lists(host, lists_dirs)
+            symptom = classify_failure(result, domain_in_lists=in_lists)
+            if symptom == "dead_host":
+                if knowledge is not None:
+                    knowledge.mark_dead_host(host)
+                continue
+            if host not in batch_domains:
+                batch_domains.append(host)
+            if not in_lists and host not in batch_missing:
+                batch_missing.append(host)
+            if sample.remote_ip and sample.remote_ip not in batch_ips:
+                batch_ips.append(sample.remote_ip)
+            for sid in services:
+                if sid not in batch_services:
+                    batch_services.append(sid)
+            if primary is None:
+                primary = {
+                    "domain": host,
+                    "ip": sample.remote_ip,
+                    "process": sample.process,
+                    "proto": sample.proto,
+                    "remote_port": sample.remote_port,
+                    "services": list(services),
+                    "symptom": symptom,
+                    "selected": list(selected),
+                }
+            elif symptom == "external_miss" and primary.get("symptom") != "external_miss":
+                primary["symptom"] = "external_miss"
+
+        if primary is None:
+            return
+        primary["domains"] = batch_domains
+        primary["ips"] = batch_ips
+        primary["domains_missing"] = batch_missing
+        if batch_services:
+            merged_services = list(dict.fromkeys([*list(primary.get("services") or []), *batch_services]))
+            primary["services"] = merged_services
+        self._handle_incident(primary)
+
+    def _handle_incident(self, incident: dict[str, Any]) -> None:
+        if self.context is None or self._mode != "auto":
+            return
+        if self._busy:
+            return
+        self._busy = True
+        knowledge = getattr(self.context, "knowledge", None)
+        try:
+            domain = str(incident.get("domain") or "").strip().lower().rstrip(".")
+            ip = str(incident.get("ip") or "").strip()
+            domains = [
+                str(item).strip().lower().rstrip(".")
+                for item in (incident.get("domains") or [])
+                if str(item).strip()
+            ]
+            ips = [str(item).strip() for item in (incident.get("ips") or []) if str(item).strip()]
+            domains_missing = [
+                str(item).strip().lower().rstrip(".")
+                for item in (incident.get("domains_missing") or [])
+                if str(item).strip()
+            ]
+            if domain and domain not in domains:
+                domains.insert(0, domain)
+            if ip and ip not in ips:
+                ips.insert(0, ip)
+            process = str(incident.get("process") or "")
+            proto = str(incident.get("proto") or "")
+            remote_port = int(incident.get("remote_port") or 0)
+            host_key = domain or ip or (domains[0] if domains else "") or (ips[0] if ips else "")
+            if not host_key:
+                return
+            if knowledge is not None and (
+                knowledge.is_dead_host(host_key) or knowledge.on_cooldown(f"host:{host_key}")
+            ):
+                return
+
+            services = list(incident.get("services") or [])
+            if not services:
+                services = [
+                    hit.service_id
+                    for hit in self._mapper.map(host=domain, ip=ip, process=process, use_dns=True)
+                ]
+
+            settings = self.context.settings.get()
+            selected = {str(item) for item in (settings.selected_service_ids or [])}
+            enabled_mods = {str(item) for item in (getattr(settings, "enabled_mod_ids", None) or [])}
+            current = {
+                "general": str(settings.selected_zapret_general or ""),
+                "ipset": str(settings.zapret_ipset_mode or "loaded"),
+                "game_filter": str(settings.zapret_game_filter_mode or "disabled"),
+                "gaming_set": str(getattr(settings, "zapret_gaming_set", "stun-wide-base") or "stun-wide-base"),
+                "configs_dir": str(self.context.paths.configs_dir),
+            }
+            learner = HostlistLearner(Path(self.context.paths.configs_dir))
+            lists_dirs = self._list_dirs()
+            domain_in_merged = learner.domain_in_merged_lists(domain, lists_dirs) if domain else False
+            if not domains_missing:
+                domains_missing = [
+                    item for item in domains if item and not learner.domain_in_merged_lists(item, lists_dirs)
+                ]
+
+            symptom = str(incident.get("symptom") or "")
+            if not symptom:
+                if domain:
+                    probe = self._signals.probe_host_access(domain)
+                    symptom = classify_failure(probe, domain_in_lists=domain_in_merged)
+                    if symptom == "dead_host":
+                        if knowledge is not None:
+                            knowledge.mark_dead_host(domain)
+                        return
+                else:
+                    symptom = "external_miss"
+
+            known_conflict = self._conflicts.detect(
+                process=process,
+                current_gaming_set=str(current.get("gaming_set") or ""),
+                proto=proto,
+                remote_port=remote_port,
+                symptom=symptom,
+            )
+            if known_conflict and symptom != "dead_host":
+                app_key = str(known_conflict.get("app") or process or "app")
+                if self._memory.mark_notified(f"conflict:{app_key}", ttl_s=600.0):
+                    msg_ru = describe_conflict(known_conflict, language="ru")
+                    msg_en = describe_conflict(known_conflict, language="en")
+                    self._emit_conflict(
+                        {
+                            "messageRu": msg_ru,
+                            "messageEn": msg_en,
+                            "domain": domain,
+                            "app": app_key,
+                        }
+                    )
+                    if knowledge is not None:
+                        try:
+                            knowledge.record_conflict(known_conflict)
+                        except Exception:
+                            pass
+
+            detail = _exe_label(process) or (services[0] if services else "подбор")
+            self._memory.set_tuning_started()
+            self.set_status("tuning", detail=detail)
+
+            winner = None
+            winner_symptom = ""
+            winner_app = ""
+            if knowledge is not None:
+                # Prefer per-app profile so Discord vs YouTube (etc.) can switch cleanly.
+                if process:
+                    winner = knowledge.winner_for_app(process)
+                if winner is None:
+                    winner = knowledge.winner_for_host(host_key)
+                if winner:
+                    winner_symptom = str(winner.get("symptom") or "")
+                    winner_app = str(winner.get("app") or "")
+                if known_conflict:
+                    stored = knowledge.find_conflict(str(known_conflict.get("app") or ""))
+                    if stored:
+                        known_conflict = {**known_conflict, **stored}
+
+            ranked = knowledge.ranked_generals() if knowledge is not None else []
+            trusted = str(getattr(settings, "trusted_general", "") or "")
+            backend = (
+                "zapret2"
+                if str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret") == "zapret2"
+                else "zapret"
+            )
+
+            installed_mods: list[Any] = []
+            mod_generals: list[dict[str, str]] = []
+            if backend == "zapret2":
+                from zapret_hub.services.orchestrator import zapret2_hub
+
+                mod_generals = zapret2_hub.strategy_generals()
+                trusted = str(getattr(settings, "zapret2_strategy_id", "balanced") or "balanced")
+                current["general"] = trusted
+                enabled_mods = {str(item) for item in (getattr(settings, "enabled_zapret2_mod_ids", None) or [])}
+            else:
+                try:
+                    mods = getattr(self.context, "mods", None)
+                    if mods is not None:
+                        installed_mods = list(mods.list_installed())
+                except Exception as error:
+                    self._log("warning", "list_installed mods failed", error=str(error))
+                try:
+                    mod_generals = list(self.context.processes.list_zapret_generals())
+                except Exception as error:
+                    self._log("warning", "list_zapret_generals failed", error=str(error))
+
+            steps = self._tuner.plan(
+                symptom=symptom,
+                domain=domain,
+                ip=ip,
+                process=process,
+                proto=proto,
+                service_ids=services,
+                selected_services=selected,
+                current=current,
+                knowledge_winner=winner,
+                known_conflict=known_conflict,
+                ranked_generals=ranked,
+                trusted_general=trusted,
+                domain_in_merged=domain_in_merged,
+                max_steps=_MAX_STEPS,
+                winner_symptom=winner_symptom,
+                winner_app=winner_app,
+                installed_mods=installed_mods,
+                mod_generals=mod_generals,
+                enabled_mod_ids=enabled_mods,
+                domains=domains,
+                ips=ips,
+                domains_missing=domains_missing,
+            )
+            if not steps:
+                if knowledge is not None:
+                    knowledge.set_cooldown(f"host:{host_key}", _EXHAUSTED_COOLDOWN_S)
+                self.set_status("ok")
+                self._memory.clear_tuning_started()
+                return
+
+            probe_targets, required_hosts = self._build_probe_gate(
+                domain, ip, services, extra_domains=domains
+            )
+            cutover = self._ensure_cutover()
+            # Keep status as «Подбираю конфигурацию…: Discord.exe» — not IPs/CIDRs/knobs.
+            self.set_status("tuning", detail=detail)
+            result = cutover.apply_plan(
+                steps,
+                probe_targets=probe_targets,
+                required_hosts=required_hosts,
+            )
+
+            if knowledge is not None:
+                try:
+                    for step in steps:
+                        knowledge.record_situation(
+                            {
+                                "host": host_key,
+                                "step": step.kind,
+                                "value": step.value,
+                                "ok": bool(result.get("ok")),
+                                "symptom": symptom,
+                                "reason": step.reason,
+                                "batched": True,
+                            }
+                        )
+                    if not result.get("ok"):
+                        for step in steps:
+                            if step.kind == "general":
+                                knowledge.rank_general(step.value, -1.0)
+                except Exception as error:
+                    self._log("warning", "Knowledge record failed", error=str(error))
+
+            if result.get("ok"):
+                self._memory.reset_fail(host_key)
+                for item in domains:
+                    self._memory.reset_fail(item)
+                for item in ips:
+                    self._memory.reset_fail(item)
+                settings = self.context.settings.get()
+                payload = {
+                    "general": (
+                        str(getattr(settings, "zapret2_strategy_id", "") or "")
+                        if backend == "zapret2"
+                        else str(settings.selected_zapret_general or "")
+                    ),
+                    "ipset": str(settings.zapret_ipset_mode or ""),
+                    "game_filter": str(settings.zapret_game_filter_mode or ""),
+                    "gaming_set": str(getattr(settings, "zapret_gaming_set", "") or ""),
+                    "services": list(settings.selected_service_ids or []),
+                    "mods": list(
+                        (getattr(settings, "enabled_zapret2_mod_ids", None) or [])
+                        if backend == "zapret2"
+                        else (getattr(settings, "enabled_mod_ids", None) or [])
+                    ),
+                    "score": 3.0,
+                    "symptom": symptom,
+                    "app": process.lower() if process else "",
+                    "backend": backend,
+                }
+                if knowledge is not None:
+                    try:
+                        knowledge.set_host_winner(host_key, payload)
+                        for item in domains[:8]:
+                            knowledge.set_host_winner(item, payload)
+                        if process:
+                            knowledge.set_app_winner(process, payload)
+                        for step in result.get("applied") or []:
+                            if step.get("kind") == "general":
+                                knowledge.rank_general(str(step.get("value") or ""), 2.0)
+                    except Exception as error:
+                        self._log("warning", "Knowledge winner save failed", error=str(error))
+            else:
+                if knowledge is not None:
+                    knowledge.set_cooldown(f"host:{host_key}", _EXHAUSTED_COOLDOWN_S)
+                    for item in domains[:8]:
+                        knowledge.set_cooldown(f"host:{item}", _EXHAUSTED_COOLDOWN_S)
+                self._log("info", "Orchestrator plan failed", host=host_key, symptom=symptom, error=str(result.get("error") or ""))
+
+            self.set_status("ok")
+            self._memory.clear_tuning_started()
+        finally:
+            self._busy = False
+
+    def _build_probe_gate(
+        self,
+        domain: str,
+        ip: str,
+        services: list[str],
+        *,
+        extra_domains: list[str] | None = None,
+    ) -> tuple[list[dict[str, str]], list[str]]:
+        """Incident-focused probes: prefer failing domain/service targets, not unrelated sites."""
+        targets: list[dict[str, str]] = []
+        required: list[str] = []
+        for host in [domain, *(extra_domains or [])]:
+            host = str(host or "").strip().lower().rstrip(".")
+            if not host:
+                continue
+            targets.append({"value": f"https://{host}/"})
+            targets.append({"value": host})
+            if host not in required:
+                required.append(host)
+        for service_id in services:
+            rule = SERVICE_RULES.get(service_id)
+            if rule is None:
+                continue
+            for _name, value in rule.test_targets[:3]:
+                targets.append({"value": value})
+                # Prefer hostnames from service tests as required when no domain.
+                if not domain and "://" in value:
+                    host = value.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
+                    if host and host not in required:
+                        required.append(host)
+                elif not domain and value and not value.upper().startswith("PING:"):
+                    if value not in required:
+                        required.append(value)
+        if not required and ip:
+            # IP-only gaming: require at least one service target if present; else soft-pass on any ok.
+            pass
+        # Dedupe targets
+        seen: set[str] = set()
+        unique: list[dict[str, str]] = []
+        for item in targets:
+            key = item["value"].lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique[:8], required[:4]
+
+    def _list_dirs(self) -> list[Path]:
+        dirs: list[Path] = []
+        if self.context is None:
+            return dirs
+        configs = Path(self.context.paths.configs_dir)
+        dirs.append(configs)
+        active = getattr(self.context.processes, "_current_zapret_runtime", None)
+        if active is not None:
+            lists = Path(active) / "lists"
+            if lists.exists():
+                dirs.append(lists)
+        visible = Path(self.context.paths.merged_runtime_dir) / "zapret" / "lists"
+        if visible.exists():
+            dirs.append(visible)
+        return dirs
+
+    def _ensure_cutover(self) -> CutoverManager:
+        if self._cutover is None:
+            knowledge = getattr(self.context, "knowledge", None) if self.context else None
+            self._cutover = CutoverManager(self.context, knowledge=knowledge, signals=self._signals)
+        return self._cutover
+
+    def _maybe_long_tune_notify(self) -> None:
+        with self._lock:
+            if self._status != "tuning" or self._mode != "auto":
+                return
+            detail = self._detail
+        started = self._memory.tuning_started_at()
+        if not started:
+            return
+        if (time.monotonic() - started) < _LONG_TUNE_S:
+            return
+        if self._memory.long_tune_notified():
+            return
+        self._memory.set_long_tune_notified()
+        target = detail or "сайту"
+        msg_ru = (
+            f"Подбор конфигурации занимает дольше обычного, пожалуйста, подождите — "
+            f"доступ к {target} появится совсем скоро."
+        )
+        msg_en = (
+            f"Configuration tuning is taking longer than usual — please wait, "
+            f"access to {target} will be ready shortly."
+        )
+        self._emit_long_pick({"domain": target, "messageRu": msg_ru, "messageEn": msg_en})
+
+    def _drain_queue(self) -> None:
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _emit_status(self, snapshot: dict[str, Any] | None = None) -> None:
+        payload = snapshot if snapshot is not None else self.status_snapshot()
+        callback = self._on_status
+        if callback is None:
+            return
+        try:
+            callback(payload)
+        except Exception:
+            pass
+
+    def _emit_notify(self, level: str, message_ru: str, message_en: str) -> None:
+        callback = self._on_notify
+        if callback is None:
+            return
+        try:
+            callback(level, message_ru, message_en)
+        except Exception:
+            pass
+
+    def _emit_conflict(self, payload: dict[str, Any]) -> None:
+        callback = self._on_conflict
+        if callback is None:
+            return
+        try:
+            callback(payload)
+        except Exception:
+            pass
+
+    def _emit_long_pick(self, payload: dict[str, Any]) -> None:
+        callback = self._on_long_pick
+        if callback is None:
+            return
+        try:
+            callback(payload)
+        except Exception:
+            pass
+
+    def _emit_toast(self, message: str, kind: str = "info") -> None:
+        callback = self._on_toast
+        if callback is None:
+            return
+        try:
+            callback(message, kind)
+        except Exception:
+            pass

@@ -44,6 +44,7 @@ class ModsManager:
         self._installed_path = self.storage.paths.data_dir / "installed_mods.json"
         if not self._installed_path.exists():
             self.storage.write_json(self._installed_path, [])
+        self._cleanup_missing_installed_mods()
         self._cleanup_installed_duplicate_generals()
 
     def fetch_index(self, *, refresh_remote: bool = False) -> list[ModIndexItem]:
@@ -60,14 +61,25 @@ class ModsManager:
 
     def list_installed(self) -> list[InstalledMod]:
         raw = self.storage.read_json(self._installed_path, default=[]) or []
-        return [InstalledMod(**item) for item in raw]
+        from dataclasses import fields as dc_fields
+
+        allowed = {f.name for f in dc_fields(InstalledMod)}
+        result: list[InstalledMod] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                result.append(InstalledMod(**{k: v for k, v in item.items() if k in allowed}))
+            except Exception:
+                continue
+        return result
 
     def move(self, mod_id: str, direction: int) -> list[InstalledMod]:
         installed = self.list_installed()
         index = next((i for i, item in enumerate(installed) if item.id == mod_id), -1)
         if index < 0:
             return installed
-        target = max(0, min(len(installed) - 1, index + direction))
+        target = max(0, min(len(installed) - 1, index + int(direction)))
         if target == index:
             return installed
         item = installed.pop(index)
@@ -75,6 +87,40 @@ class ModsManager:
         self.storage.write_json(self._installed_path, [asdict(entry) for entry in installed])
         self.merge.rebuild()
         return installed
+
+    def reorder(self, ordered_ids: list[str]) -> list[InstalledMod]:
+        installed = self.list_installed()
+        by_id = {item.id: item for item in installed}
+        requested: list[InstalledMod] = []
+        seen: set[str] = set()
+        for raw_id in ordered_ids:
+            mod_id = str(raw_id or "")
+            if not mod_id or mod_id in seen or mod_id not in by_id:
+                continue
+            requested.append(by_id[mod_id])
+            seen.add(mod_id)
+        # Keep relative slots of untouched mods (custom vs marketplace pages
+        # often send only their subset).
+        ordered: list[InstalledMod] = []
+        req_iter = iter(requested)
+        for item in installed:
+            if item.id in seen:
+                ordered.append(next(req_iter))
+            else:
+                ordered.append(item)
+        self.storage.write_json(self._installed_path, [asdict(entry) for entry in ordered])
+        self.merge.rebuild()
+        return ordered
+
+    def _cleanup_missing_installed_mods(self) -> None:
+        """Remove stale registry entries left behind by interrupted deletions."""
+        installed = self.list_installed()
+        valid = [item for item in installed if Path(item.path).exists()]
+        if len(valid) == len(installed):
+            return
+        self.storage.write_json(self._installed_path, [asdict(item) for item in valid])
+        self.settings.update(enabled_mod_ids=sorted(item.id for item in valid if item.enabled))
+        self.logging.log("warning", "Removed stale modification entries", removed=len(installed) - len(valid))
 
     def set_emoji(self, mod_id: str, emoji: str) -> InstalledMod:
         installed = self.list_installed()
@@ -91,6 +137,9 @@ class ModsManager:
         description: str,
         author: str,
         version: str,
+        icon_url: str | None = None,
+        marketplace_slug: str | None = None,
+        source_url: str | None = None,
     ) -> InstalledMod:
         if mod_id == "unified-by-goshkow":
             raise ValueError("Hub is bundled and cannot be edited.")
@@ -100,6 +149,12 @@ class ModsManager:
         entry.description = description.strip()
         entry.author = author.strip() or entry.author or self.UNKNOWN_AUTHOR
         entry.version = version.strip() or entry.version or datetime.utcnow().strftime("%Y.%m.%d")
+        if icon_url is not None:
+            entry.icon_url = str(icon_url or "").strip()
+        if marketplace_slug is not None:
+            entry.marketplace_slug = str(marketplace_slug or "").strip()
+        if source_url is not None:
+            entry.source_url = str(source_url or "").strip()
         self.storage.write_json(self._installed_path, [asdict(item) for item in installed])
         self._write_mod_metadata_file(entry)
         self.logging.log("info", "Mod metadata updated", mod_id=mod_id)
@@ -202,6 +257,8 @@ class ModsManager:
     def remove(self, mod_id: str) -> None:
         installed = [item for item in self.list_installed() if item.id != mod_id]
         self.storage.write_json(self._installed_path, [asdict(item) for item in installed])
+        enabled_ids = {item.id for item in installed if item.enabled}
+        self.settings.update(enabled_mod_ids=sorted(enabled_ids))
         target_dir = self.storage.paths.mods_dir / mod_id
         if target_dir.exists():
             self.storage.create_backup(target_dir, "pre-remove-mod")

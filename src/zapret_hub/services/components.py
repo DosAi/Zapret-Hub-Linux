@@ -103,9 +103,37 @@ _TORRENT_PROCESS_NAMES = (
 _XBOX_DNS_URL = "https://xbox-dns.ru/"
 _XBOX_DNS_FALLBACK_IPV4 = ("111.88.96.50", "111.88.96.51")
 _XBOX_DNS_FALLBACK_IPV6 = ("2a00:ab00:1233:26::50", "2a00:ab00:1233:26::51")
+_DNS_PROFILES: dict[str, dict[str, Any]] = {
+    "dhcp": {"ipv4": [], "ipv6": [], "source": "system-dhcp"},
+    "cloudflare": {
+        "ipv4": ["1.1.1.1", "1.0.0.1"],
+        "ipv6": ["2606:4700:4700::1111", "2606:4700:4700::1001"],
+        "source": "cloudflare",
+    },
+    "adguard": {
+        "ipv4": ["94.140.14.14", "94.140.15.15"],
+        "ipv6": ["2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff"],
+        "source": "adguard",
+    },
+    "google": {
+        "ipv4": ["8.8.8.8", "8.8.4.4"],
+        "ipv6": ["2001:4860:4860::8888", "2001:4860:4860::8844"],
+        "source": "google",
+    },
+    "yandex": {
+        "ipv4": ["77.88.8.8", "77.88.8.1"],
+        "ipv6": ["2a02:6b8::feed:0ff", "2a02:6b8:0:1::feed:0ff"],
+        "source": "yandex",
+    },
+}
 
 
 class _WindowsJob:
+    """Kill all assigned children when the UI process exits (incl. Task Manager End task)."""
+
+    # PROCESS_SET_QUOTA | PROCESS_TERMINATE — enough for AssignProcessToJobObject
+    _PROCESS_JOB_ACCESS = 0x0100 | 0x0001
+
     def __init__(self) -> None:
         self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self.job = self.kernel32.CreateJobObjectW(None, None)
@@ -157,13 +185,19 @@ class _WindowsJob:
             ctypes.sizeof(info),
         )
 
-    def assign_pid(self, pid: int) -> None:
-        if not self.job:
-            return
-        PROCESS_ALL_ACCESS = 0x1F0FFF
-        handle = self.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
-        if handle:
-            self.kernel32.AssignProcessToJobObject(self.job, handle)
+    def assign_pid(self, pid: int) -> bool:
+        if not self.job or not pid:
+            return False
+        handle = self.kernel32.OpenProcess(self._PROCESS_JOB_ACCESS, False, int(pid))
+        if not handle:
+            # Fallback: some environments still require a wider mask.
+            handle = self.kernel32.OpenProcess(0x1F0FFF, False, int(pid))
+        if not handle:
+            return False
+        try:
+            ok = bool(self.kernel32.AssignProcessToJobObject(self.job, handle))
+            return ok
+        finally:
             self.kernel32.CloseHandle(handle)
 
 
@@ -187,18 +221,63 @@ class ProcessManager:
         self._log_streams: dict[str, Any] = {}
         self._telegram_proxy_launch_info: dict[str, Any] | None = None
         self._diagnostic_runtime_override = False
+        self._diagnostic_abort = threading.Event()
+        self._diagnostic_token = 0
+        self._image_running_cache: dict[str, tuple[float, bool]] = {}
+        self._port_listening_cache: dict[tuple[str, int], tuple[float, bool]] = {}
         self._github_recovery_profile: dict[str, str] | None = None
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
         self.github = GitHubNetworkClient(logging, recovery_runner=self.with_github_connectivity_recovery)
+        # Optional UI hook: (component_id, status, last_error) after optimistic starts fail.
+        self._status_listener: Callable[[str, str, str], None] | None = None
         self._creationflags = 0
         self._startupinfo: subprocess.STARTUPINFO | None = None
         if sys.platform.startswith("win"):
-            self._creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+            # No DETACHED_PROCESS — keep children in the same job tree so Task Manager
+            # "End task" on Zapret Hub also kills winws / TG / VPN / backend workers.
+            self._creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             startup = subprocess.STARTUPINFO()
             startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startup.wShowWindow = 0
             self._startupinfo = startup
             self._repair_zapret_driver_paths_on_startup()
+
+    def set_status_listener(self, listener: Callable[[str, str, str], None] | None) -> None:
+        self._status_listener = listener
+
+    def _emit_component_status(self, component_id: str, status: str, last_error: str = "") -> None:
+        listener = self._status_listener
+        if listener is None:
+            return
+        try:
+            listener(str(component_id), str(status), str(last_error or ""))
+        except Exception:
+            pass
+
+    def assign_pid_to_job(self, pid: int | None) -> bool:
+        """Attach an external process (e.g. backend worker) to the UI kill-on-close job."""
+        if not self._job or not pid:
+            return False
+        try:
+            return bool(self._job.assign_pid(int(pid)))
+        except Exception:
+            return False
+
+    def reap_orphaned_bypass_images(self) -> None:
+        """Best-effort cleanup if a previous Hub was force-killed before job assign."""
+        if not sys.platform.startswith("win"):
+            return
+        for image in (
+            "winws.exe",
+            "winws2.exe",
+            "TgWsProxy_windows.exe",
+            "sing-box.exe",
+        ):
+            try:
+                if self._is_image_running(image):
+                    self._kill_image(image)
+            except Exception:
+                pass
 
     def list_components(self) -> list[ComponentDefinition]:
         raw_items = self.storage.read_json(self.storage.paths.data_dir / "components.json", default=[])
@@ -262,8 +341,37 @@ class ProcessManager:
         self._telegram_proxy_launch_info = None
         return dict(info) if isinstance(info, dict) else None
 
+    def abort_diagnostics(self, *, kill_winws: bool = True) -> None:
+        """Stop general/settings diagnostics immediately."""
+        self._diagnostic_token += 1
+        self._diagnostic_abort.set()
+        self._diagnostic_runtime_override = False
+        if kill_winws:
+            try:
+                self.stop_component("zapret")
+            except Exception:
+                pass
+            try:
+                self._kill_image("winws.exe")
+            except Exception:
+                pass
+        self._invalidate_state_cache()
+
+    def reset_diagnostic_abort(self) -> None:
+        self._diagnostic_abort.clear()
+
+    def diagnostics_aborted(self) -> bool:
+        return self._diagnostic_abort.is_set()
+
+    def prepare_user_power_start(self) -> None:
+        """Cancel leftover diagnostics so an explicit power-on is not fought."""
+        self._diagnostic_token += 1
+        self._diagnostic_abort.set()
+        self._diagnostic_runtime_override = False
+        self._invalidate_state_cache()
+
     def list_states(self) -> list[ComponentState]:
-        if self._state_cache and (time.time() - self._state_cache_at) < 0.7:
+        if self._state_cache and (time.time() - self._state_cache_at) < 0.25:
             return [
                 ComponentState(
                     component_id=state.component_id,
@@ -292,14 +400,34 @@ class ProcessManager:
         for component in self.list_components():
             state = self._states.get(component.id, ComponentState(component_id=component.id))
             if component.id == "zapret":
-                state.status = "running" if self._is_image_running("winws.exe") else "stopped"
-                state.pid = None
-            elif component.id == "tg-ws-proxy":
-                worker = self._processes.get(component.id)
-                listening = self._is_port_listening(settings.tg_proxy_host, int(settings.tg_proxy_port))
-                if (worker and worker.poll() is None) or listening:
+                # Prefer owned Popen — image scan cache can lag right after kill/start.
+                owned = self._processes.get(component.id)
+                if owned is not None and owned.poll() is None:
                     state.status = "running"
-                    state.pid = worker.pid if worker and worker.poll() is None else None
+                    state.pid = owned.pid
+                else:
+                    state.status = "running" if self._is_image_running("winws.exe") else "stopped"
+                    state.pid = None
+            elif component.id == "zapret2":
+                owned = self._processes.get(component.id)
+                if owned is not None and owned.poll() is None:
+                    state.status = "running"
+                    state.pid = owned.pid
+                else:
+                    state.status = "running" if self._is_image_running("winws2.exe") else "stopped"
+                    state.pid = None
+            elif component.id == "tg-ws-proxy":
+                # Prefer owned Popen — never pay a socket timeout while Hub owns the process.
+                worker = self._processes.get(component.id)
+                if worker is not None and worker.poll() is None:
+                    state.status = "running"
+                    state.pid = worker.pid
+                elif self._is_port_listening(settings.tg_proxy_host, int(settings.tg_proxy_port)):
+                    state.status = "running"
+                    state.pid = None
+                elif str(getattr(self._states.get(component.id), "status", "") or "") == "starting":
+                    state.status = "starting"
+                    state.pid = None
                 else:
                     state.status = "stopped"
                     state.pid = None
@@ -330,6 +458,60 @@ class ProcessManager:
     def _invalidate_state_cache(self) -> None:
         self._state_cache = []
         self._state_cache_at = 0.0
+        self._port_listening_cache.clear()
+
+    def stop_running_bypass_copies(self, runtime_id: str) -> None:
+        """Find already-running copies of the selected bypass and stop them.
+
+        Power-on always clears foreign/orphan instances first, then starts a
+        Hub-owned process that list_states can track.
+        """
+        runtime_id = str(runtime_id or "").strip()
+        if runtime_id == "zapret":
+            owned = self._processes.get("zapret")
+            owned_alive = owned is not None and owned.poll() is None
+            image_alive = self._is_image_running("winws.exe")
+            if not owned_alive and not image_alive:
+                return
+            if image_alive:
+                self.logging.log("info", "Found running winws.exe; stopping before power-on")
+            try:
+                self.stop_component("zapret")
+            except Exception:
+                pass
+            if self._is_image_running("winws.exe"):
+                self._kill_image("winws.exe")
+                self._wait_for_image_exit("winws.exe", attempts=8, delay=0.12)
+            self._invalidate_state_cache()
+            return
+        if runtime_id == "zapret2":
+            owned = self._processes.get("zapret2")
+            owned_alive = owned is not None and owned.poll() is None
+            image_alive = self._is_image_running("winws2.exe")
+            if not owned_alive and not image_alive:
+                return
+            if image_alive:
+                self.logging.log("info", "Found running winws2.exe; stopping before power-on")
+            try:
+                self.stop_component("zapret2")
+            except Exception:
+                pass
+            if self._is_image_running("winws2.exe"):
+                self._kill_image("winws2.exe")
+                self._wait_for_image_exit("winws2.exe", attempts=8, delay=0.12)
+            self._invalidate_state_cache()
+            return
+        if runtime_id == "goshkow-vpn":
+            owned = self._processes.get("goshkow-vpn")
+            if owned is None or owned.poll() is not None:
+                return
+            self.logging.log("info", "Found running goshkow vpn; stopping before power-on")
+            try:
+                self.stop_component("goshkow-vpn")
+            except Exception:
+                pass
+            self._invalidate_state_cache()
+            return
 
     def start_component(self, component_id: str) -> ComponentState:
         with self._process_lock:
@@ -339,7 +521,14 @@ class ProcessManager:
         component = next(item for item in self.list_components() if item.id == component_id)
         if component.id == "zapret":
             self.stop_component("goshkow-vpn")
+            self.stop_component("zapret2")
             state = self._start_zapret(component_id)
+            self._invalidate_state_cache()
+            return state
+        if component.id == "zapret2":
+            self.stop_component("zapret")
+            self.stop_component("goshkow-vpn")
+            state = self._start_zapret2(component_id)
             self._invalidate_state_cache()
             return state
         if component.id == "tg-ws-proxy":
@@ -445,6 +634,30 @@ class ProcessManager:
             self.logging.log("info", "goshkow vpn stopped")
             self._invalidate_state_cache()
             return state
+        if component_id == "zapret2":
+            process = self._processes.get(component_id)
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=4)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+            if process and process.pid:
+                self._run_quiet(["taskkill", "/PID", str(process.pid), "/F", "/T"])
+            self._processes.pop(component_id, None)
+            self._kill_image("winws2.exe")
+            self._close_source_log_stream(component_id)
+            state.status = "stopped" if not self._is_image_running("winws2.exe") else "running"
+            state.pid = None
+            state.last_error = "Failed to stop winws2.exe" if state.status != "stopped" else ""
+            self._states[component_id] = state
+            self.logging.log("info", "Zapret2 stopped")
+            self._invalidate_state_cache()
+            return state
         if component_id == "xbox-dns":
             state = self._stop_xbox_dns(component_id)
             self._invalidate_state_cache()
@@ -469,27 +682,50 @@ class ProcessManager:
         self._invalidate_state_cache()
         return state
 
+    def _bypass_ids_allowed_for_autostart(self) -> set[str]:
+        """Only the selected Quick Access mode may autostart as a bypass."""
+        mode = str(self.settings.get().selected_runtime_mode or "zapret")
+        if mode == "none":
+            return set()
+        if mode in {"zapret", "zapret2", "goshkow-vpn"}:
+            return {mode}
+        return {"zapret"}
+
+    def _should_autostart_component(self, component_id: str, *, require_autostart_flag: bool) -> bool:
+        components = {item.id: item for item in self.list_components()}
+        component = components.get(component_id)
+        if component is None or not component.enabled:
+            return False
+        if require_autostart_flag and not component.autostart:
+            return False
+        # Bypass trio is mutually exclusive — never start VPN because it stayed "enabled"
+        # while the user selected Zapret (that flipped UI mode to goshkow-vpn).
+        if component_id in {"zapret", "zapret2", "goshkow-vpn"}:
+            return component_id in self._bypass_ids_allowed_for_autostart()
+        return True
+
     def start_enabled_components(self) -> list[ComponentState]:
         started = []
         for component in self.list_components():
-            if component.enabled:
-                try:
-                    started.append(self.start_component(component.id))
-                except Exception as error:
-                    state = ComponentState(
-                        component_id=component.id,
-                        status="error",
-                        last_error=str(error),
-                    )
-                    self._states[component.id] = state
-                    self.logging.log("error", "Enabled component failed to start", component_id=component.id, error=str(error))
-                    started.append(state)
+            if not self._should_autostart_component(component.id, require_autostart_flag=False):
+                continue
+            try:
+                started.append(self.start_component(component.id))
+            except Exception as error:
+                state = ComponentState(
+                    component_id=component.id,
+                    status="error",
+                    last_error=str(error),
+                )
+                self._states[component.id] = state
+                self.logging.log("error", "Enabled component failed to start", component_id=component.id, error=str(error))
+                started.append(state)
         return started
 
     def start_autostart_components(self) -> list[ComponentState]:
         started = []
         for component in self.list_components():
-            if not (component.enabled and component.autostart):
+            if not self._should_autostart_component(component.id, require_autostart_flag=True):
                 continue
             try:
                 started.append(self.start_component(component.id))
@@ -523,6 +759,12 @@ class ProcessManager:
                     self._prepare_xbox_dns(component_id)
             else:
                 self.stop_component(component_id)
+        elif target.enabled:
+            # Service toggles must behave the same as the component buttons when
+            # the master switch is already on. Previously only Xbox DNS started
+            # immediately, leaving Zapret/VPN in a misleading partial state.
+            if any(item.status == "running" for item in self._compute_states()):
+                self.start_component(component_id)
         elif not target.enabled:
             self.stop_component(component_id)
         self.logging.log("info", "Component enabled state changed", component_id=component_id, enabled=target.enabled)
@@ -588,6 +830,14 @@ class ProcessManager:
                 "source": "fallback",
                 "last_error": str(error),
             }
+
+    def _selected_dns_servers(self) -> dict[str, Any]:
+        profile = str(getattr(self.settings.get(), "dns_profile", "xbox") or "xbox")
+        if profile == "xbox":
+            return {**self._fetch_xbox_dns_servers(), "profile": "xbox"}
+        selected = dict(_DNS_PROFILES.get(profile, _DNS_PROFILES["dhcp"]))
+        selected["profile"] = profile if profile in _DNS_PROFILES else "dhcp"
+        return selected
 
     def _snapshot_windows_dns(self) -> list[dict[str, Any]]:
         script = r"""
@@ -719,9 +969,7 @@ if ($rows.Count -eq 0) {
             previous_adapters = self._snapshot_windows_dns()
         elif not isinstance(previous_adapters, list) or not previous_adapters:
             previous_adapters = self._snapshot_windows_dns()
-        servers = state_payload.get("servers")
-        if not isinstance(servers, dict):
-            servers = self._fetch_xbox_dns_servers()
+        servers = self._selected_dns_servers()
         new_payload = dict(state_payload)
         new_payload.update(
             {
@@ -868,7 +1116,7 @@ foreach ($adapter in @($payload.adapters)) {
             self._states[component_id] = state
             self._write_xbox_dns_state({"active": False, "last_error": state.last_error})
             return state
-        servers = self._fetch_xbox_dns_servers()
+        servers = self._selected_dns_servers()
         try:
             self._apply_windows_dns(previous_adapters, list(servers.get("ipv4", []) or []), list(servers.get("ipv6", []) or []))
         except Exception as error:
@@ -902,7 +1150,7 @@ foreach ($adapter in @($payload.adapters)) {
         )
         state = ComponentState(component_id=component_id, status="running", pid=None, last_error="")
         self._states[component_id] = state
-        self.logging.log("info", "Xbox DNS applied", component_id=component_id, source=str(servers.get("source", "")))
+        self.logging.log("info", "DNS profile applied", component_id=component_id, source=str(servers.get("source", "")))
         return state
 
     def _stop_xbox_dns(self, component_id: str = "xbox-dns") -> ComponentState:
@@ -941,7 +1189,7 @@ foreach ($adapter in @($payload.adapters)) {
         settings = self.settings.get()
         enabled = "xbox-dns" in {str(item) for item in list(settings.enabled_component_ids or [])}
         state_payload = self._read_xbox_dns_state()
-        servers = self._fetch_xbox_dns_servers()
+        servers = self._selected_dns_servers()
         if bool(state_payload.get("active", False)) or (enabled and self._xbox_dns_should_apply_now()):
             state = self._start_xbox_dns("xbox-dns")
             return {"status": state.status, "error": state.last_error, "servers": self._read_xbox_dns_state().get("servers", servers)}
@@ -951,6 +1199,16 @@ foreach ($adapter in @($payload.adapters)) {
         state_payload.update({"servers": servers, "last_error": "", "updated_at": datetime.utcnow().isoformat()})
         self._write_xbox_dns_state(state_payload)
         return {"status": "stopped", "error": "", "servers": servers}
+
+    def select_dns_profile(self, profile: str) -> dict[str, Any]:
+        normalized = profile if profile in {"dhcp", "xbox", "cloudflare", "adguard", "google", "yandex"} else "xbox"
+        self.settings.update(dns_profile=normalized)
+        state_payload = self._read_xbox_dns_state()
+        if bool(state_payload.get("active", False)):
+            state = self._start_xbox_dns("xbox-dns")
+            return {"status": state.status, "profile": normalized, "error": state.last_error}
+        self._prepare_xbox_dns("xbox-dns")
+        return {"status": "prepared", "profile": normalized}
 
     def toggle_component_autostart(self, component_id: str) -> ComponentDefinition:
         components = self.list_components()
@@ -962,8 +1220,35 @@ foreach ($adapter in @($payload.adapters)) {
         return target
 
     def _start_zapret(self, component_id: str) -> ComponentState:
-        # перезапуск без споров со старыми процессами
+        if self._diagnostic_runtime_override and self._diagnostic_abort.is_set():
+            state = ComponentState(
+                component_id=component_id,
+                status="stopped",
+                last_error="cancelled",
+            )
+            self._states[component_id] = state
+            return state
+        if not self._diagnostic_runtime_override:
+            # Explicit user start — don't stay blocked by a stale diagnostic abort.
+            self._diagnostic_abort.clear()
+        # Claim the Quick Access mode so a stale VPN-enabled flag cannot rewrite UI later.
+        try:
+            self.settings.update(selected_runtime_mode="zapret", goshkow_vpn_pending_start=False)
+        except Exception:
+            pass
+        # Always clear existing winws copies, then start a Hub-owned instance.
+        if self._is_image_running("winws.exe"):
+            self.logging.log("info", "Stopping existing winws copies before zapret start")
         self.stop_component(component_id)
+        if not self._purge_stale_zapret_runtime():
+            state = ComponentState(
+                component_id=component_id,
+                status="error",
+                last_error="Не удалось выгрузить прежний драйвер WinDivert Zapret Hub. Перезапустите Windows и повторите попытку.",
+            )
+            self._states[component_id] = state
+            self.logging.log("error", "Zapret start blocked by stale WinDivert runtime")
+            return state
         selected_option = self._resolve_selected_general_option()
         if selected_option is None:
             state = ComponentState(component_id=component_id, status="error", last_error="No general script found.")
@@ -1032,35 +1317,30 @@ foreach ($adapter in @($payload.adapters)) {
             if self._job:
                 self._job.assign_pid(process.pid)
             self._processes[component_id] = process
-            running = False
-            for _ in range(24):
-                if self._is_image_running("winws.exe"):
-                    running = True
-                    break
-                time.sleep(0.25)
-            if running:
-                self._repair_windivert_image_paths(active_root, preferred_driver_path=stable_driver_path)
-                try:
-                    (active_root / ".driver_path_in_use").write_text(datetime.utcnow().isoformat(), encoding="utf-8")
-                except Exception:
-                    pass
-                state = ComponentState(component_id=component_id, status="running", pid=process.pid)
-                self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0])
-            else:
+            # Optimistic: process spawned → report running immediately; confirm in background.
+            if process.poll() is not None:
                 log_hint = self._recent_source_log_error("zapret")
-                if process.poll() is None and self._zapret_log_indicates_capture_started(log_hint):
-                    self._repair_windivert_image_paths(active_root, preferred_driver_path=stable_driver_path)
-                    state = ComponentState(component_id=component_id, status="running", pid=process.pid)
-                    self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0], detected_by_log=True)
-                else:
-                    self._close_source_log_stream("zapret")
-                    error_message = log_hint or "winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert."
-                    state = ComponentState(
-                        component_id=component_id,
-                        status="error",
-                        last_error=error_message,
-                    )
-                    self.logging.log("error", "Zapret failed to start", script=str(active_script), error=error_message)
+                error_message = log_hint or "winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert."
+                state = ComponentState(
+                    component_id=component_id,
+                    status="error",
+                    last_error=error_message,
+                )
+                self.logging.log("error", "Zapret failed to start", script=str(active_script), error=error_message)
+            else:
+                self._image_running_cache["winws.exe"] = (time.time(), True)
+                state = ComponentState(component_id=component_id, status="running", pid=process.pid)
+                self._states[component_id] = state
+                self._invalidate_state_cache()
+                self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0])
+                self._schedule_bypass_start_confirm(
+                    component_id,
+                    process,
+                    image_name="winws.exe",
+                    active_root=active_root,
+                    stable_driver_path=stable_driver_path,
+                )
+                return state
         except OSError as error:
             if getattr(error, "winerror", 0) == 740:
                 state = ComponentState(
@@ -1094,6 +1374,233 @@ foreach ($adapter in @($payload.adapters)) {
             self._current_zapret_runtime = None
         self._states[component_id] = state
         return state
+
+    def _start_zapret2(self, component_id: str) -> ComponentState:
+        try:
+            self.settings.update(selected_runtime_mode="zapret2", goshkow_vpn_pending_start=False)
+        except Exception:
+            pass
+        if self._is_image_running("winws2.exe"):
+            self.logging.log("info", "Stopping existing winws2 copies before zapret2 start")
+        self.stop_component(component_id)
+        if not self._purge_stale_zapret_runtime():
+            state = ComponentState(
+                component_id=component_id,
+                status="error",
+                last_error="Не удалось выгрузить прежний драйвер WinDivert Zapret Hub. Перезапустите Windows и повторите попытку.",
+            )
+            self._states[component_id] = state
+            self.logging.log("error", "Zapret2 start blocked by stale WinDivert runtime")
+            return state
+        try:
+            runtime_root = self._ensure_zapret2_runtime()
+            winws2_path = self._find_zapret2_winws(runtime_root)
+            if winws2_path is None:
+                raise FileNotFoundError("winws2.exe was not found in the Zapret2 runtime.")
+            command = self._build_zapret2_command(winws2_path, runtime_root)
+            process = subprocess.Popen(
+                command,
+                # winws2 resolves cygwin1.dll / WinDivert next to the exe
+                cwd=str(winws2_path.parent),
+                creationflags=self._creationflags,
+                startupinfo=self._startupinfo,
+                stdout=self._open_source_log_stream(component_id),
+                stderr=subprocess.STDOUT,
+            )
+            if self._job:
+                self._job.assign_pid(process.pid)
+            self._processes[component_id] = process
+            if process.poll() is not None:
+                log_hint = self._recent_source_log_error(component_id)
+                self._close_source_log_stream(component_id)
+                state = ComponentState(
+                    component_id=component_id,
+                    status="error",
+                    last_error=log_hint or "winws2 did not start. Run app as Administrator and check WinDivert access.",
+                )
+                self.logging.log("error", "Zapret2 failed to start", error=state.last_error)
+            else:
+                self._image_running_cache["winws2.exe"] = (time.time(), True)
+                state = ComponentState(component_id=component_id, status="running", pid=process.pid)
+                self._states[component_id] = state
+                self._invalidate_state_cache()
+                self.logging.log("info", "Zapret2 started", command=str(winws2_path))
+                self._schedule_bypass_start_confirm(component_id, process, image_name="winws2.exe")
+                return state
+        except OSError as error:
+            if getattr(error, "winerror", 0) == 740:
+                state = ComponentState(
+                    component_id=component_id,
+                    status="error",
+                    last_error="Administrator rights are required for winws2/WinDivert.",
+                )
+            else:
+                state = ComponentState(component_id=component_id, status="error", last_error=str(error))
+            self.logging.log("error", "Zapret2 failed to start", error=state.last_error)
+        except Exception as error:
+            state = ComponentState(component_id=component_id, status="error", last_error=str(error))
+            self.logging.log("error", "Zapret2 failed to start", error=str(error))
+        self._states[component_id] = state
+        self._invalidate_state_cache()
+        return state
+
+    def _ensure_zapret2_runtime(self) -> Path:
+        runtime_root = self.storage.paths.runtime_dir / "zapret2"
+        if self._find_zapret2_winws(runtime_root) is not None:
+            return runtime_root
+        return self._install_zapret2_archive()
+
+    def _install_zapret2_archive(self) -> Path:
+        runtime_root = self.storage.paths.runtime_dir / "zapret2"
+        # Windows binaries are published in zapret-win-bundle; the zapret2
+        # source archive itself does not contain winws2.exe.
+        archive_url = "https://codeload.github.com/bol-van/zapret-win-bundle/zip/refs/heads/master"
+        temp_root = Path(tempfile.mkdtemp(prefix="zapret_hub_zapret2_"))
+        try:
+            zip_path = temp_root / "zapret2-master.zip"
+            self._download_to_file(archive_url, zip_path, timeout=90)
+            extract_root = temp_root / "extract"
+            extract_root.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                archive.extractall(extract_root)
+            source_root = self._find_extracted_zapret2_root(extract_root)
+            if source_root is None:
+                raise FileNotFoundError("Downloaded Zapret2 archive does not contain winws2.exe.")
+            backup = self.storage.create_backup(runtime_root, "pre-update-zapret2") if runtime_root.exists() else None
+            if runtime_root.exists():
+                shutil.rmtree(runtime_root, ignore_errors=True)
+            shutil.copytree(source_root, runtime_root, dirs_exist_ok=True)
+            self.storage.ensure_layout()
+            self.logging.log("info", "Zapret2 runtime installed", backup=str(backup or ""), source=archive_url)
+            return runtime_root
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+    def _find_extracted_zapret2_root(self, extract_root: Path) -> Path | None:
+        candidates = [extract_root]
+        candidates.extend(path for path in extract_root.iterdir() if path.is_dir())
+        for candidate in candidates:
+            if self._find_zapret2_winws(candidate) is not None:
+                return candidate
+        for candidate in extract_root.rglob("*"):
+            if candidate.is_dir() and self._find_zapret2_winws(candidate) is not None:
+                return candidate
+        return None
+
+    def _find_zapret2_winws(self, runtime_root: Path) -> Path | None:
+        if not runtime_root.exists():
+            return None
+        preferred = [
+            runtime_root / "zapret-winws" / "winws2.exe",
+            runtime_root / "zapret-win-bundle-master" / "zapret-winws" / "winws2.exe",
+            runtime_root / "binaries" / "win64" / "winws2.exe",
+            runtime_root / "binaries" / "windows-x86_64" / "winws2.exe",
+            runtime_root / "bin" / "winws2.exe",
+            runtime_root / "winws2.exe",
+        ]
+        for candidate in preferred:
+            if candidate.is_file():
+                return candidate
+        with_dll: list[Path] = []
+        without_dll: list[Path] = []
+        for candidate in runtime_root.rglob("winws2.exe"):
+            if not candidate.is_file():
+                continue
+            # blockcheck ships a bare winws2 without cygwin1.dll — never launch that copy
+            if "blockcheck" in {part.lower() for part in candidate.parts}:
+                continue
+            if (candidate.parent / "cygwin1.dll").is_file():
+                with_dll.append(candidate)
+            else:
+                without_dll.append(candidate)
+        if with_dll:
+            return with_dll[0]
+        if without_dll:
+            return without_dll[0]
+        return None
+
+    def _build_zapret2_command(self, winws2_path: Path, runtime_root: Path) -> list[str]:
+        from zapret_hub.services.orchestrator import zapret2_hub
+
+        settings = self.settings.get()
+        tcp_ports = self._normalize_zapret2_ports(settings.zapret2_tcp_ports, "80,443")
+        udp_ports = self._normalize_zapret2_ports(settings.zapret2_udp_ports, "443")
+        bundle_root = zapret2_hub.bundle_winws_root(winws2_path)
+        lua_lib = self._zapret2_lua_arg(runtime_root, "zapret-lib.lua")
+        lua_antidpi = self._zapret2_lua_arg(runtime_root, "zapret-antidpi.lua")
+        command = [
+            str(winws2_path),
+            f"--wf-tcp-in={tcp_ports}",
+            f"--wf-tcp-out={tcp_ports}",
+            f"--wf-udp-in={udp_ports}",
+            f"--wf-udp-out={udp_ports}",
+            f"--lua-init=@{lua_lib}",
+            f"--lua-init=@{lua_antidpi}",
+        ]
+        auto_lua = zapret2_hub.find_bundle_lua(bundle_root, "zapret-auto.lua")
+        if auto_lua is not None:
+            command.append(f"--lua-init=@{auto_lua}")
+
+        raw_filter = str(settings.zapret2_raw_filter or "").strip()
+        if raw_filter:
+            command.append(f"--wf-raw-part={raw_filter}")
+
+        strategy = str(settings.zapret2_lua_strategy or "").strip()
+        control_mode = str(getattr(settings, "zapret_control_mode", "manual") or "manual")
+        # Manual custom strategy still wins; Auto always uses Hub Lua + hostlists.
+        if strategy and control_mode != "auto":
+            command.extend(shlex.split(strategy, posix=False))
+            return command
+
+        configs_dir = Path(self.storage.paths.configs_dir)
+        strategy_id = str(getattr(settings, "zapret2_strategy_id", "balanced") or "balanced")
+        lists = zapret2_hub.prepare_zapret2_runtime_files(configs_dir, strategy_id)
+        try:
+            selected = [str(item) for item in (settings.selected_service_ids or [])]
+            # Append-only: never wipe; seed only what is still missing.
+            if selected:
+                zapret2_hub.seed_service_lists(configs_dir, selected, only_missing=True)
+            elif control_mode == "auto" and not zapret2_hub.hub_lists_initialized(configs_dir):
+                zapret2_hub.seed_bypass_catalog(configs_dir, only_missing=True)
+        except Exception:
+            pass
+
+        command.append(f"--lua-init=@{lists['lua_targets']}")
+        command.append(f"--lua-init=@{lists['lua_orch']}")
+        command.append(f"--lua-init=@{lists['lua_strategy']}")
+        command.extend(
+            zapret2_hub.build_default_profile_args(
+                lists=lists,
+                bundle_root=bundle_root,
+                tcp_ports=tcp_ports,
+                strategy_id=strategy_id,
+            )
+        )
+        return command
+
+    def _normalize_zapret2_ports(self, value: str, fallback: str) -> str:
+        normalized: list[str] = []
+        for token in re.split(r"[\s,;]+", str(value or "")):
+            match = re.fullmatch(r"(\d{1,5})(?:-(\d{1,5}))?", token.strip())
+            if not match:
+                continue
+            start = int(match.group(1))
+            end = int(match.group(2) or start)
+            if start > end:
+                start, end = end, start
+            if start < 1 or end > 65535:
+                continue
+            normalized.append(str(start) if start == end else f"{start}-{end}")
+        return ",".join(dict.fromkeys(normalized)) or fallback
+
+    def _zapret2_lua_arg(self, runtime_root: Path, filename: str) -> str:
+        for candidate in (runtime_root / "lua" / filename, runtime_root / filename):
+            if candidate.exists():
+                try:
+                    return str(candidate.relative_to(runtime_root))
+                except ValueError:
+                    return str(candidate)
+        return str(Path("lua") / filename)
 
     def _zapret_log_indicates_capture_started(self, text: str | None) -> bool:
         normalized = str(text or "").lower()
@@ -1204,17 +1711,16 @@ foreach ($adapter in @($payload.adapters)) {
             )
             if self._job:
                 self._job.assign_pid(process.pid)
-            for _ in range(8):
-                if process.poll() is not None:
-                    break
-                time.sleep(0.25)
+            # Brief settle only — do not block UI for a multi-second health wait.
+            time.sleep(0.2)
             if process.poll() is not None:
+                # Flush sing-box output before parsing it so real TUN errors are retained.
+                self._close_source_log_stream(component_id)
                 log_error = self._recent_source_log_error(component_id)
                 state.status = "error"
                 state.pid = None
                 state.last_error = log_error or "goshkow vpn завершился сразу после запуска. Проверьте конфигурацию и права администратора."
                 self._states[component_id] = state
-                self._close_source_log_stream(component_id)
                 self.logging.log("error", "goshkow vpn exited early", error=state.last_error, config=str(config_path))
                 return state
             self._processes[component_id] = process
@@ -1222,7 +1728,9 @@ foreach ($adapter in @($payload.adapters)) {
             state.pid = process.pid
             state.last_error = ""
             self._states[component_id] = state
+            self._invalidate_state_cache()
             self.logging.log("info", "goshkow vpn started", pid=process.pid, config=str(config_path))
+            self._schedule_bypass_start_confirm(component_id, process)
             if str(vpn_state.get("selected_server_id", "") or "") == "auto":
                 self._start_goshkow_vpn_auto_monitor(component_id, process, str(selected_server.get("id", "") or ""))
             return state
@@ -2097,9 +2605,11 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._kill_image("TgWsProxy_windows.exe")
         listen_host = settings.tg_proxy_host
         listen_port = int(settings.tg_proxy_port)
+        self._port_listening_cache.pop((str(listen_host or ""), int(listen_port)), None)
         if self._is_port_listening(listen_host, listen_port):
             state = ComponentState(component_id=component_id, status="running", pid=None, last_error="")
             self._states[component_id] = state
+            self._invalidate_state_cache()
             self.logging.log("info", "TG WS Proxy already listening", host=listen_host, port=listen_port)
             return state
         try:
@@ -2128,10 +2638,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             stdout=self._open_source_log_stream("tg-ws-proxy"),
             stderr=subprocess.STDOUT,
         )
+        # Assign to kill-on-close job immediately (before listen wait).
+        if self._job and process.pid:
+            if not self._job.assign_pid(process.pid):
+                self.logging.log("warning", "Failed to assign TG WS Proxy to job object", pid=process.pid)
         ready = False
         for _ in range(16):
             if process.poll() is not None:
                 break
+            self._port_listening_cache.pop((str(listen_host or ""), int(listen_port)), None)
             if self._is_port_listening(listen_host, listen_port):
                 ready = True
                 break
@@ -2141,20 +2656,32 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             worker_error_log = self.storage.paths.logs_dir / "tg_worker_error.log"
             if worker_error_log.exists():
                 error_hint = worker_error_log.read_text(encoding="utf-8")[-1000:]
+            try:
+                if process.poll() is None:
+                    process.kill()
+            except Exception:
+                pass
+            try:
+                self._kill_image("TgWsProxy_windows.exe")
+            except Exception:
+                pass
             state = ComponentState(
                 component_id=component_id,
                 status="error",
                 last_error=error_hint,
             )
             self._states[component_id] = state
+            self._invalidate_state_cache()
             self.logging.log("error", "TG WS Proxy worker failed to start", error=error_hint)
             return state
-        if self._job:
-            self._job.assign_pid(process.pid)
         state = ComponentState(component_id=component_id, status="running", pid=process.pid)
         self._processes[component_id] = process
         self._states[component_id] = state
+        self._port_listening_cache[(str(listen_host or ""), int(listen_port))] = (time.time(), True)
+        self._invalidate_state_cache()
         self.logging.log("info", "TG WS Proxy worker started", pid=process.pid)
+        if not str(settings.tg_proxy_link_prompt_signature or "").strip():
+            self.prompt_telegram_proxy_link()
         return state
 
     def _build_worker_command(self, worker: str, **kwargs: Any) -> list[str]:
@@ -2219,6 +2746,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if isinstance(item, dict)
         }
         installed_raw = self.storage.read_json(self.storage.paths.data_dir / "installed_mods.json", default=[]) or []
+        custom: list[dict[str, Any]] = []
+        marketplace: list[dict[str, Any]] = []
         for raw in installed_raw:
             if raw.get("source_type") != "zapret_bundle":
                 continue
@@ -2231,11 +2760,20 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if mod_id == "unified-by-goshkow":
                 continue
             title = str(raw.get("name") or "").strip() or index_map.get(mod_id) or mod_id
-            bundles.append({"id": mod_id, "title": title, "path": path})
+            entry = {
+                "id": mod_id,
+                "title": title,
+                "path": path,
+                "marketplace": bool(str(raw.get("marketplace_slug") or "").strip()),
+            }
+            (marketplace if entry["marketplace"] else custom).append(entry)
+        # Custom first (higher among mods), marketplace last (below vanilla for bat/bin).
+        bundles.extend(custom)
+        bundles.extend(marketplace)
         if include_hidden_generals and unified_root.exists():
-            bundles.insert(0, {"id": "unified-general", "title": "Hub", "path": unified_root})
+            bundles.insert(0, {"id": "unified-general", "title": "Hub", "path": unified_root, "marketplace": False})
         if base.exists():
-            bundles.append({"id": "base", "title": "", "path": base})
+            bundles.append({"id": "base", "title": "", "path": base, "marketplace": False})
         return bundles
 
     def _general_option_sort_key(self, item: dict[str, str]) -> tuple[int, int, str]:
@@ -2267,6 +2805,227 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
     def _prepare_active_zapret_runtime(self, selected_bundle_root: Path, selected_bundle_id: str, selected_script_name: str) -> Path:
         self._cleanup_inactive_zapret_runtimes()
+        return self._materialize_zapret_runtime(
+            selected_bundle_root=selected_bundle_root,
+            selected_bundle_id=selected_bundle_id,
+            selected_script_name=selected_script_name,
+        )
+
+    def stage_zapret_candidate_runtime(self) -> Path:
+        """Materialize candidate slot B without deleting live A (orchestrator cutover)."""
+        selected_option = self._resolve_selected_general_option()
+        if selected_option is None:
+            raise RuntimeError("No general script found.")
+        selected_script = Path(selected_option["path"])
+        selected_bundle_root = Path(selected_script).parent
+        # Preserve live + any explicitly pinned roots; only prune other orphans.
+        self._cleanup_inactive_zapret_runtimes(preserve_extra=getattr(self, "_orchestrator_preserve_runtimes", None))
+        return self._materialize_zapret_runtime(
+            selected_bundle_root=selected_bundle_root,
+            selected_bundle_id=str(selected_option["bundle_id"]),
+            selected_script_name=selected_script.name,
+        )
+
+    def pin_orchestrator_runtime(self, root: Path | None) -> None:
+        """Keep an extra runtime directory alive during A/B cutover."""
+        preserve = getattr(self, "_orchestrator_preserve_runtimes", None)
+        if preserve is None:
+            preserve = set()
+            self._orchestrator_preserve_runtimes = preserve
+        preserve.clear()
+        if root is not None and Path(root).exists():
+            preserve.add(Path(root).resolve())
+
+    def _soft_stop_zapret_image(self) -> None:
+        """Kill live winws without deleting staged/pinned runtime directories."""
+        owned = self._processes.pop("zapret", None)
+        if owned is not None and owned.poll() is None:
+            try:
+                owned.terminate()
+            except Exception:
+                pass
+            try:
+                owned.wait(timeout=0.8)
+            except Exception:
+                try:
+                    owned.kill()
+                except Exception:
+                    pass
+            if getattr(owned, "pid", None):
+                self._run_quiet(["taskkill", "/PID", str(owned.pid), "/F", "/T"])
+        if self._is_image_running("winws.exe"):
+            self._kill_image("winws.exe")
+            self._wait_for_image_exit("winws.exe", attempts=6, delay=0.08)
+        try:
+            self._close_source_log_stream("zapret")
+        except Exception:
+            pass
+        self._invalidate_state_cache()
+
+    def _soft_stop_zapret2_image(self) -> None:
+        """Kill live winws2 without wiping the Zapret2 runtime tree."""
+        owned = self._processes.pop("zapret2", None)
+        if owned is not None and owned.poll() is None:
+            try:
+                owned.terminate()
+            except Exception:
+                pass
+            try:
+                owned.wait(timeout=0.8)
+            except Exception:
+                try:
+                    owned.kill()
+                except Exception:
+                    pass
+            if getattr(owned, "pid", None):
+                self._run_quiet(["taskkill", "/PID", str(owned.pid), "/F", "/T"])
+        if self._is_image_running("winws2.exe"):
+            self._kill_image("winws2.exe")
+            self._wait_for_image_exit("winws2.exe", attempts=6, delay=0.08)
+        try:
+            self._close_source_log_stream("zapret2")
+        except Exception:
+            pass
+        self._invalidate_state_cache()
+
+    def hot_replace_zapret_runtime(self, active_root: Path) -> ComponentState:
+        """Orchestrator cutover: keep A on disk, kill live winws, start staged B ASAP.
+
+        WinDivert cannot host two captures — true overlap is impossible — but we avoid
+        stop_component (which deletes A) and the long purge/rematerialize path so the
+        gap without bypass stays minimal.
+        """
+        try:
+            self.settings.update(selected_runtime_mode="zapret", goshkow_vpn_pending_start=False)
+        except Exception:
+            pass
+        self._soft_stop_zapret_image()
+        # Light driver cleanup only when services still block a new capture.
+        if self._managed_zapret_driver_services():
+            if not self._purge_stale_zapret_runtime():
+                state = ComponentState(
+                    component_id="zapret",
+                    status="error",
+                    last_error="Не удалось выгрузить прежний драйвер WinDivert Zapret Hub.",
+                )
+                self._states["zapret"] = state
+                return state
+        return self.start_zapret_from_runtime(active_root, assume_clean=True)
+
+    def start_zapret_from_runtime(self, active_root: Path, *, assume_clean: bool = False) -> ComponentState:
+        """Start winws from an already-materialized runtime (no rebuild / no A wipe)."""
+        component_id = "zapret"
+        active_root = Path(active_root)
+        try:
+            self.settings.update(selected_runtime_mode="zapret", goshkow_vpn_pending_start=False)
+        except Exception:
+            pass
+        if not assume_clean:
+            if self._is_image_running("winws.exe"):
+                self._soft_stop_zapret_image()
+            if not self._purge_stale_zapret_runtime():
+                state = ComponentState(
+                    component_id=component_id,
+                    status="error",
+                    last_error="Не удалось выгрузить прежний драйвер WinDivert Zapret Hub.",
+                )
+                self._states[component_id] = state
+                return state
+        selected_option = self._resolve_selected_general_option()
+        if selected_option is None:
+            state = ComponentState(component_id=component_id, status="error", last_error="No general script found.")
+            self._states[component_id] = state
+            return state
+        selected_script_name = Path(selected_option["path"]).name
+        try:
+            self._current_zapret_runtime = active_root
+            self._apply_zapret_runtime_switches(active_root)
+            active_script = active_root / selected_script_name
+            if not active_script.exists():
+                # Fall back to any general*.bat in the slot.
+                bats = sorted(active_root.glob("general*.bat"))
+                if not bats:
+                    raise FileNotFoundError(f"No general script in staged runtime: {active_root}")
+                active_script = bats[0]
+            self._ensure_zapret_user_lists(active_root / "lists")
+            self._materialize_visible_merged_runtime(active_root)
+            bin_dir = active_root / "bin"
+            lists_dir = active_root / "lists"
+            stable_driver_path = self._ensure_stable_windivert_driver(bin_dir)
+            winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
+            if winws_command:
+                winws_command[0] = str(stable_driver_path.parent / "winws.exe")
+            allow_service_command_extensions = str(selected_option.get("bundle_id", "")) == "base"
+            winws_command = self._apply_selected_service_command_extensions(
+                winws_command,
+                lists_dir=lists_dir,
+                bin_dir=bin_dir,
+                enabled=allow_service_command_extensions,
+            )
+            winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
+            winws_command = self._apply_udp_port_exclusions_to_command(winws_command)
+            if not winws_command:
+                raise RuntimeError("Failed to parse winws command from staged runtime.")
+            self._repair_windivert_image_paths(active_root, preferred_driver_path=stable_driver_path)
+            process = subprocess.Popen(
+                winws_command,
+                cwd=str(stable_driver_path.parent),
+                creationflags=self._creationflags,
+                startupinfo=self._startupinfo,
+                stdout=self._open_source_log_stream("zapret"),
+                stderr=subprocess.STDOUT,
+            )
+            if self._job:
+                self._job.assign_pid(process.pid)
+            self._processes[component_id] = process
+            # Brief wait: new winws must be alive before we treat cutover as done.
+            alive = self._wait_for_process_image("winws.exe", process, attempts=10, delay=0.08)
+            if process.poll() is not None and not alive:
+                log_hint = self._recent_source_log_error("zapret")
+                self._close_source_log_stream("zapret")
+                state = ComponentState(
+                    component_id=component_id,
+                    status="error",
+                    last_error=log_hint or "winws did not start from staged runtime",
+                )
+                self._states[component_id] = state
+                return state
+            if process.poll() is not None:
+                log_hint = self._recent_source_log_error("zapret")
+                self._close_source_log_stream("zapret")
+                state = ComponentState(
+                    component_id=component_id,
+                    status="error",
+                    last_error=log_hint or "winws did not start from staged runtime",
+                )
+                self._states[component_id] = state
+                return state
+            self._image_running_cache["winws.exe"] = (time.time(), True)
+            state = ComponentState(component_id=component_id, status="running", pid=process.pid)
+            self._states[component_id] = state
+            self._invalidate_state_cache()
+            self.logging.log("info", "Zapret started from staged runtime", runtime=str(active_root), pid=process.pid)
+            self._schedule_bypass_start_confirm(
+                component_id,
+                process,
+                image_name="winws.exe",
+                active_root=active_root,
+                stable_driver_path=stable_driver_path,
+            )
+            return state
+        except Exception as error:
+            state = ComponentState(component_id=component_id, status="error", last_error=str(error))
+            self._states[component_id] = state
+            self.logging.log("error", "Zapret staged start failed", error=str(error), runtime=str(active_root))
+            return state
+
+    def _materialize_zapret_runtime(
+        self,
+        *,
+        selected_bundle_root: Path,
+        selected_bundle_id: str,
+        selected_script_name: str,
+    ) -> Path:
         active_root = self._next_active_runtime_dir()
         base_root = self.storage.paths.runtime_dir / "zapret-discord-youtube"
         if base_root.exists():
@@ -2286,10 +3045,19 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         for bundle in layered_bundles:
             bundle_id = bundle["id"]
             bundle_root = Path(bundle["path"])
-            include_bin_overlay = not bin_overlay_applied and self._bundle_has_bin_overlay(bundle_root)
+            is_marketplace = bool(bundle.get("marketplace"))
+            include_bin_overlay = (
+                not is_marketplace
+                and not bin_overlay_applied
+                and self._bundle_has_bin_overlay(bundle_root)
+            )
             if bundle_id != "base":
-                self._overlay_zapret_bundle_runtime(active_root, bundle_root, include_bin_overlay=include_bin_overlay)
-                bin_overlay_applied = bin_overlay_applied or include_bin_overlay
+                # Marketplace mods only merge lists — never overwrite vanilla bat/bin.
+                if is_marketplace:
+                    pass
+                else:
+                    self._overlay_zapret_bundle_runtime(active_root, bundle_root, include_bin_overlay=include_bin_overlay)
+                    bin_overlay_applied = bin_overlay_applied or include_bin_overlay
             lists_source = bundle_root / "lists"
             if not lists_source.exists():
                 continue
@@ -2374,13 +3142,58 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         old_root = merged_root / f".zapret_old_{int(time.time() * 1000)}"
         shutil.rmtree(temp_root, ignore_errors=True)
         shutil.copytree(active_root, temp_root, dirs_exist_ok=True, ignore=self._runtime_copy_ignore)
-        if target_root.exists():
-            try:
-                target_root.replace(old_root)
-            except Exception:
-                shutil.rmtree(target_root, ignore_errors=True)
-        temp_root.replace(target_root)
+        if not self._replace_visible_runtime_dir(temp_root, target_root, old_root):
+            self.logging.log(
+                "warning",
+                "Visible merged runtime refresh skipped because Windows denied access",
+                source=str(active_root),
+                target=str(target_root),
+            )
         shutil.rmtree(old_root, ignore_errors=True)
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+    def _replace_visible_runtime_dir(self, temp_root: Path, target_root: Path, old_root: Path) -> bool:
+        for attempt in range(6):
+            try:
+                if target_root.exists():
+                    try:
+                        target_root.replace(old_root)
+                    except PermissionError:
+                        self._force_stop_zapret_runtime()
+                        self._move_or_quarantine_runtime_dir(target_root)
+                    except OSError:
+                        self._move_or_quarantine_runtime_dir(target_root)
+                temp_root.replace(target_root)
+                return True
+            except PermissionError:
+                self._force_stop_zapret_runtime()
+                time.sleep(0.08 + attempt * 0.08)
+            except OSError:
+                time.sleep(0.08 + attempt * 0.08)
+        try:
+            if not target_root.exists():
+                shutil.copytree(temp_root, target_root, dirs_exist_ok=True, ignore=self._runtime_copy_ignore)
+                return True
+        except OSError:
+            pass
+        return target_root.exists()
+
+    def _move_or_quarantine_runtime_dir(self, target_root: Path) -> None:
+        if not target_root.exists():
+            return
+        quarantine_root = Path(tempfile.gettempdir()) / "zapret_hub_runtime_cleanup"
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+        quarantine_target = quarantine_root / f"{target_root.name}_{int(time.time() * 1000)}"
+        try:
+            shutil.move(str(target_root), str(quarantine_target))
+            shutil.rmtree(quarantine_target, ignore_errors=True)
+            return
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(target_root, ignore_errors=True)
+        except Exception:
+            pass
 
     def _runtime_copy_ignore(self, directory: str, names: list[str]) -> set[str]:
         ignored_names = {".git", ".github", "__pycache__", ".mypy_cache", ".pytest_cache"}
@@ -2765,19 +3578,30 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         if not options:
             return []
 
+        self.reset_diagnostic_abort()
         settings_snapshot = self._capture_diagnostic_settings()
         original_running = self._is_image_running("winws.exe")
         results: list[dict[str, str]] = []
         targets = self._load_standard_test_targets()
         per_general_steps = max(2, len(targets) + 1)
         total_steps = len(options) * per_general_steps
+        diagnostic_token = self._diagnostic_token
+
+        def _should_stop() -> bool:
+            if self._diagnostic_abort.is_set():
+                return True
+            if diagnostic_token != self._diagnostic_token:
+                return True
+            if stop_callback is not None and bool(stop_callback()):
+                return True
+            return False
 
         try:
             self._diagnostic_runtime_override = True
             if original_running:
                 self.stop_component("zapret")
             for index, option in enumerate(options, start=1):
-                if stop_callback is not None and stop_callback():
+                if _should_stop():
                     break
                 self.settings.update(
                     selected_zapret_general=option["id"],
@@ -2789,7 +3613,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     progress_callback(base_step + 1, total_steps, option["name"])
                 outcome = self._run_general_connectivity_check(
                     option["id"],
-                    stop_callback=stop_callback,
+                    stop_callback=_should_stop,
                     targets=targets,
                     progress_callback=(
                         lambda completed, total, target_name, *, _base=base_step, _steps=per_general_steps, _option=option: (
@@ -2819,12 +3643,39 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                         "game_mode": str(option.get("game_mode", "tcpudp") or "tcpudp"),
                     }
                 )
-                self.stop_component("zapret")
+                try:
+                    self.stop_component("zapret")
+                except Exception:
+                    pass
+                try:
+                    self._kill_image("winws.exe")
+                except Exception:
+                    pass
+                # Stop after the first working general — probing every script looks endless.
+                if str(outcome.get("status") or "") == "ok":
+                    break
+                if _should_stop():
+                    break
         finally:
+            cancelled = _should_stop()
             self._diagnostic_runtime_override = False
+            try:
+                self.stop_component("zapret")
+            except Exception:
+                pass
+            try:
+                self._kill_image("winws.exe")
+            except Exception:
+                pass
             self._restore_diagnostic_settings(settings_snapshot)
-            if original_running and str(settings_snapshot.get("selected_zapret_general", "")):
-                self.start_component("zapret")
+            # Never leave diagnostic winws running. Restore user power only if
+            # diagnostics finished cleanly and zapret was already on before.
+            if (not cancelled) and original_running and str(settings_snapshot.get("selected_zapret_general", "")):
+                try:
+                    self.start_component("zapret")
+                except Exception:
+                    pass
+            self._invalidate_state_cache()
 
         return results
 
@@ -2890,6 +3741,11 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return {"results": ranked, "best": best, "status": "ok" if ranked else "error"}
 
     def with_github_connectivity_recovery(self, operation: Callable[[], Any], purpose: str) -> Any:
+        """Run a GitHub network op; on timeout/block briefly lift via classic Zapret+GitHub only.
+
+        Must always restore the previous bypass (including Zapret2). Starting classic
+        Zapret stops winws2 — previous recovery forgot to bring Zapret2 back.
+        """
         snapshot = self._capture_github_recovery_snapshot()
         errors: list[str] = []
         try:
@@ -2897,58 +3753,22 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if result[0]:
                 return result[1]
 
-            if bool(snapshot["was_running"]):
-                self.stop_component("zapret")
-                time.sleep(0.8)
-                result = self._try_github_operation(operation, errors, f"{purpose}: stopped")
-                if result[0]:
-                    return result[1]
-
-                self._restore_github_recovery_snapshot(snapshot, restart=True)
-                time.sleep(1.2)
-                result = self._try_github_operation(operation, errors, f"{purpose}: original-restarted")
-                if result[0]:
-                    return result[1]
-
-            cached_profile = self._github_recovery_profile
-            if cached_profile is not None:
-                self.stop_component("zapret")
-                self._apply_github_recovery_settings(
-                    selected_zapret_general=str(cached_profile["general_id"]),
-                    zapret_ipset_mode=str(cached_profile["ipset_mode"]),
-                    zapret_game_filter_mode=str(cached_profile["game_mode"]),
-                    zapret_udp_exclude_ports=str(snapshot["zapret_udp_exclude_ports"]),
-                )
-                state = self.start_component("zapret")
-                if state.status == "running":
-                    time.sleep(1.0)
-                    result = self._try_github_operation(operation, errors, f"{purpose}: cached-stable")
-                    if result[0]:
-                        return result[1]
-
-            for candidate in self._github_recovery_candidates(snapshot):
-                self.stop_component("zapret")
-                self._apply_github_recovery_settings(
-                    selected_zapret_general=str(candidate["general_id"]),
-                    zapret_ipset_mode=str(candidate["ipset_mode"]),
-                    zapret_game_filter_mode=str(candidate["game_mode"]),
-                    zapret_udp_exclude_ports=str(snapshot["zapret_udp_exclude_ports"]),
-                )
-                state = self.start_component("zapret")
-                if state.status != "running":
-                    errors.append(f"{purpose}: failed to start temporary Zapret profile {candidate}")
-                    continue
-                time.sleep(1.0)
-                result = self._try_github_operation(operation, errors, f"{purpose}: {candidate['label']}")
-                if result[0]:
-                    self._github_recovery_profile = {
-                        "general_id": str(candidate["general_id"]),
-                        "ipset_mode": str(candidate["ipset_mode"]),
-                        "game_mode": str(candidate["game_mode"]),
-                    }
-                    return result[1]
+            # Timed out / blocked: one temporary profile only — classic zapret + github
+            # service list. No general roulette, no extra knobs.
+            self.logging.log(
+                "info",
+                "GitHub blocked — temporary Zapret+GitHub for recovery",
+                purpose=purpose,
+                was_zapret2=bool(snapshot.get("was_zapret2_running")),
+                runtime=str(snapshot.get("selected_runtime_mode") or ""),
+            )
+            self._arm_github_only_zapret_profile(snapshot)
+            time.sleep(1.0)
+            result = self._try_github_operation(operation, errors, f"{purpose}: zapret+github")
+            if result[0]:
+                return result[1]
         finally:
-            self._restore_github_recovery_snapshot(snapshot, restart=bool(snapshot["was_running"]))
+            self._restore_github_recovery_snapshot(snapshot)
         raise RuntimeError("; ".join(errors) or "GitHub request failed after Zapret recovery")
 
     def _try_github_operation(self, operation: Callable[[], Any], errors: list[str], label: str) -> tuple[bool, Any]:
@@ -2969,27 +3789,59 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             "zapret_ipset_mode": settings.zapret_ipset_mode,
             "zapret_game_filter_mode": settings.zapret_game_filter_mode,
             "zapret_udp_exclude_ports": settings.zapret_udp_exclude_ports,
+            "selected_service_ids": list(settings.selected_service_ids or []),
+            "selected_runtime_mode": str(settings.selected_runtime_mode or "zapret"),
+            "was_zapret_running": self._is_image_running("winws.exe"),
+            "was_zapret2_running": self._is_image_running("winws2.exe"),
+            # Legacy key kept for any external callers.
             "was_running": self._is_image_running("winws.exe"),
         }
 
-    def _restore_github_recovery_snapshot(self, snapshot: dict[str, object], *, restart: bool) -> None:
+    def _arm_github_only_zapret_profile(self, snapshot: dict[str, object]) -> None:
+        """Start classic Zapret with only the GitHub service selected (ipset any)."""
+        general_id = str(snapshot.get("selected_zapret_general", "") or "").strip()
+        if not general_id:
+            generals = self.list_zapret_generals()
+            general_id = str((generals[0] if generals else {}).get("id", "") or "")
+        # Keep current general if known — only swap services/ipset for GitHub reachability.
+        self.settings.update(
+            selected_zapret_general=general_id,
+            zapret_ipset_mode="any",
+            zapret_game_filter_mode="disabled",
+            selected_service_ids=["github"],
+            selected_runtime_mode="zapret",
+        )
+        try:
+            # start_component("zapret") stops zapret2/vpn — intentional for the brief window.
+            self.start_component("zapret")
+        except Exception as error:
+            self.logging.log("warning", "Failed to start temporary Zapret+GitHub profile", error=str(error))
+
+    def _restore_github_recovery_snapshot(self, snapshot: dict[str, object], *, restart: bool | None = None) -> None:
+        del restart  # always restore from snapshot flags
         self.settings.update(
             selected_zapret_general=str(snapshot.get("selected_zapret_general", "") or ""),
             zapret_ipset_mode=str(snapshot.get("zapret_ipset_mode", "loaded") or "loaded"),
             zapret_game_filter_mode=str(snapshot.get("zapret_game_filter_mode", "disabled") or "disabled"),
             zapret_udp_exclude_ports=str(snapshot.get("zapret_udp_exclude_ports", "")),
+            selected_service_ids=list(snapshot.get("selected_service_ids") or []),
+            selected_runtime_mode=str(snapshot.get("selected_runtime_mode") or "zapret"),
         )
-        if restart:
-            try:
+        want_zapret2 = bool(snapshot.get("was_zapret2_running"))
+        want_zapret = bool(snapshot.get("was_zapret_running")) or bool(snapshot.get("was_running"))
+        try:
+            if want_zapret2:
                 self.stop_component("zapret")
+                self.start_component("zapret2")
+            elif want_zapret:
+                self.stop_component("zapret2")
                 self.start_component("zapret")
-            except Exception as error:
-                self.logging.log("warning", "Failed to restore Zapret after GitHub recovery", error=str(error))
-        else:
-            try:
+            else:
                 self.stop_component("zapret")
-            except Exception:
-                pass
+                if self._is_image_running("winws2.exe"):
+                    self.stop_component("zapret2")
+        except Exception as error:
+            self.logging.log("warning", "Failed to restore bypass after GitHub recovery", error=str(error))
 
     def _apply_github_recovery_settings(self, **changes: str) -> None:
         current = self.settings.get()
@@ -2997,39 +3849,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             setattr(current, key, value)
 
     def _github_recovery_candidates(self, snapshot: dict[str, object]) -> list[dict[str, str]]:
-        current_general = str(snapshot.get("selected_zapret_general", "") or "").strip()
-        base_general = ""
-        for option in self.list_zapret_generals():
-            if str(option.get("name", "")).lower() == "general.bat" and str(option.get("bundle_id", "")) == "base":
-                base_general = str(option.get("id", "") or "")
-                break
-        favorite_general = next((item for item in self.settings.get().favorite_zapret_generals if str(item).strip()), "")
-        general_fallback = favorite_general or base_general
-        raw: list[tuple[str, str, str, str]] = [
-            ("current loaded/disabled", current_general, "loaded", "disabled"),
-            ("current any/disabled", current_general, "any", "disabled"),
-            ("current loaded/tcp+udp", current_general, "loaded", "tcpudp"),
-        ]
-        if general_fallback and general_fallback != current_general:
-            raw.append(("fallback loaded/disabled", general_fallback, "loaded", "disabled"))
-        candidates: list[dict[str, str]] = []
-        seen: set[tuple[str, str, str]] = set()
-        for label, general_id, ipset_mode, game_mode in raw:
-            if not general_id:
-                continue
-            key = (general_id, ipset_mode, game_mode)
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append(
-                {
-                    "label": label,
-                    "general_id": general_id,
-                    "ipset_mode": ipset_mode,
-                    "game_mode": game_mode,
-                }
-            )
-        return candidates
+        del snapshot
+        # Kept as an empty stub — recovery no longer iterates generals.
+        return []
 
     def fetch_latest_zapret_release(self) -> dict[str, str]:
         api_url = "https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest"
@@ -3163,6 +3985,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             return {"status": "updated", "version": version or current_version}
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
+
+    def update_zapret2_runtime(self) -> dict[str, str]:
+        was_running = self._is_image_running("winws2.exe")
+        if was_running:
+            self.stop_component("zapret2")
+        runtime_root = self._install_zapret2_archive()
+        if was_running:
+            self.start_component("zapret2")
+        return {"status": "updated", "version": "master", "path": str(runtime_root)}
 
     def _download_to_file(self, url: str, destination: Path, timeout: int = 60) -> None:
         self.github.github_download(url, destination, timeout=timeout, purpose=f"download:{Path(destination).name}", min_bytes=1024)
@@ -3298,8 +4129,28 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         targets: list[dict[str, str]] | None = None,
         progress_callback: callable | None = None,
     ) -> dict[str, object]:
+        if stop_callback is not None and stop_callback():
+            return {
+                "status": "cancelled",
+                "error": "cancelled",
+                "passed_targets": 0,
+                "total_targets": 0,
+                "failed_targets": [],
+            }
         self.settings.update(selected_zapret_general=general_id)
         state = self._start_zapret("zapret")
+        if stop_callback is not None and stop_callback():
+            try:
+                self.stop_component("zapret")
+            except Exception:
+                pass
+            return {
+                "status": "cancelled",
+                "error": "cancelled",
+                "passed_targets": 0,
+                "total_targets": 0,
+                "failed_targets": [],
+            }
         if state.status != "running":
             return {
                 "status": "error",
@@ -3530,18 +4381,148 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 target.write_text(content, encoding="utf-8")
 
     def _is_image_running(self, image_name: str) -> bool:
+        now = time.time()
+        cached = self._image_running_cache.get(image_name)
+        # Longer TTL: tasklist/toolhelp must never run on a hot GUI path (tray / build_state).
+        if cached is not None and (now - cached[0]) < 1.5:
+            return cached[1]
+        running = self._query_image_running(image_name)
+        self._image_running_cache[image_name] = (now, running)
+        return running
+
+    def _query_image_running(self, image_name: str) -> bool:
+        """Fast process presence check. Prefer Win32 snapshot over spawning tasklist.exe."""
+        target = str(image_name or "").strip().lower()
+        if not target:
+            return False
+        if sys.platform.startswith("win"):
+            try:
+                return self._toolhelp_image_running(target)
+            except Exception:
+                pass
         proc = self._run_quiet(["tasklist", "/FI", f"IMAGENAME eq {image_name}"])
         output = (proc.stdout or "").lower()
-        return image_name.lower() in output
+        return target in output
+
+    def _toolhelp_image_running(self, image_name_lower: str) -> bool:
+        TH32CS_SNAPPROCESS = 0x00000002
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_ulong),
+                ("cntUsage", ctypes.c_ulong),
+                ("th32ProcessID", ctypes.c_ulong),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", ctypes.c_ulong),
+                ("cntThreads", ctypes.c_ulong),
+                ("th32ParentProcessID", ctypes.c_ulong),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.c_ulong),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snapshot or snapshot == INVALID_HANDLE_VALUE:
+            raise OSError("CreateToolhelp32Snapshot failed")
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                return False
+            while True:
+                if str(entry.szExeFile or "").lower() == image_name_lower:
+                    return True
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    return False
+        finally:
+            kernel32.CloseHandle(snapshot)
 
     def _kill_image(self, image_name: str) -> None:
+        self._image_running_cache.pop(image_name, None)
         self._run_quiet(["taskkill", "/IM", image_name, "/F", "/T"])
+        self._image_running_cache[image_name] = (time.time(), False)
 
-    def _wait_for_image_exit(self, image_name: str, *, attempts: int = 10, delay: float = 0.35) -> bool:
-        for _ in range(max(1, attempts)):
+    def _wait_for_process_image(
+        self,
+        image_name: str,
+        process: subprocess.Popen[Any] | None,
+        *,
+        attempts: int = 12,
+        delay: float = 0.1,
+    ) -> bool:
+        """Poll until image is visible or owned process exits. Caps ~1.2s by default."""
+        for _ in range(max(1, int(attempts))):
+            if process is not None and process.poll() is not None:
+                return False
+            if self._is_image_running(image_name):
+                return True
+            time.sleep(max(0.02, float(delay)))
+        return self._is_image_running(image_name)
+
+    def _schedule_bypass_start_confirm(
+        self,
+        component_id: str,
+        process: subprocess.Popen[Any],
+        *,
+        image_name: str | None = None,
+        active_root: Path | None = None,
+        stable_driver_path: Path | None = None,
+    ) -> None:
+        """Finish non-critical start work and flip to error if the process dies early."""
+
+        def worker() -> None:
+            try:
+                if active_root is not None and component_id == "zapret":
+                    try:
+                        self._repair_windivert_image_paths(active_root, preferred_driver_path=stable_driver_path)
+                    except Exception:
+                        pass
+                    try:
+                        (active_root / ".driver_path_in_use").write_text(datetime.utcnow().isoformat(), encoding="utf-8")
+                    except Exception:
+                        pass
+                # Short watch window — UI already shows on; only correct failures.
+                for _ in range(12):
+                    owned = self._processes.get(component_id)
+                    if owned is not process:
+                        return
+                    if process.poll() is not None:
+                        log_hint = self._recent_source_log_error(component_id)
+                        error_message = log_hint or f"{component_id} exited right after start"
+                        try:
+                            self._close_source_log_stream(component_id)
+                        except Exception:
+                            pass
+                        state = ComponentState(
+                            component_id=component_id,
+                            status="error",
+                            last_error=error_message,
+                        )
+                        self._states[component_id] = state
+                        self._invalidate_state_cache()
+                        if image_name:
+                            self._image_running_cache.pop(image_name, None)
+                        self.logging.log("error", "Bypass exited after optimistic start", component_id=component_id, error=error_message)
+                        self._emit_component_status(component_id, "error", error_message)
+                        return
+                    if image_name and self._is_image_running(image_name):
+                        return
+                    time.sleep(0.15)
+            except Exception as error:
+                try:
+                    self.logging.log("warning", "Bypass start confirm failed", component_id=component_id, error=str(error))
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True, name=f"zapret-hub-confirm-{component_id}").start()
+
+    def _wait_for_image_exit(self, image_name: str, *, attempts: int = 8, delay: float = 0.12) -> bool:
+        for _ in range(max(1, int(attempts))):
             if not self._is_image_running(image_name):
                 return True
-            time.sleep(delay)
+            time.sleep(max(0.02, float(delay)))
         return not self._is_image_running(image_name)
 
     def _force_stop_zapret_runtime(self) -> None:
@@ -3549,7 +4530,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         if process and process.poll() is None:
             try:
                 process.terminate()
-                process.wait(timeout=3)
+                process.wait(timeout=2)
             except Exception:
                 try:
                     process.kill()
@@ -3557,18 +4538,53 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     pass
         if process and process.pid:
             self._run_quiet(["taskkill", "/PID", str(process.pid), "/F", "/T"])
-        for _ in range(8):
-            self._kill_image("winws.exe")
-            if self._wait_for_image_exit("winws.exe", attempts=2, delay=0.25):
-                break
+        if self._is_image_running("winws.exe"):
+            for _ in range(6):
+                self._kill_image("winws.exe")
+                if self._wait_for_image_exit("winws.exe", attempts=2, delay=0.12):
+                    break
         for _ in range(3):
             self._cleanup_zapret_driver_services(self._current_zapret_runtime)
             self._cleanup_orphaned_zapret_driver_services()
             if not any(self._service_exists(name) for name in _ZAPRET_DRIVER_SERVICE_NAMES):
                 break
-            time.sleep(0.35)
+            time.sleep(0.2)
         self._processes.pop("zapret", None)
         self._current_zapret_runtime = None
+
+    def _purge_stale_zapret_runtime(self) -> bool:
+        """Terminate old Zapret Hub captures and unload their WinDivert driver."""
+        owned = self._processes.get("zapret")
+        owned_alive = owned is not None and owned.poll() is None
+        image_alive = self._is_image_running("winws.exe") or self._is_image_running("winws2.exe")
+        managed = self._managed_zapret_driver_services()
+        if not owned_alive and not image_alive and not managed:
+            self._processes.pop("zapret", None)
+            return True
+        self._force_stop_zapret_runtime()
+        for _ in range(8):
+            if self._is_image_running("winws.exe"):
+                self._kill_image("winws.exe")
+            if self._is_image_running("winws2.exe"):
+                self._kill_image("winws2.exe")
+            self._cleanup_orphaned_zapret_driver_services()
+            lingering = self._managed_zapret_driver_services()
+            if not lingering and not self._is_image_running("winws.exe") and not self._is_image_running("winws2.exe"):
+                return True
+            for service_name, image_path in lingering:
+                self._delete_zapret_service(service_name, image_path=image_path)
+            time.sleep(0.15)
+        return not self._managed_zapret_driver_services() and not self._is_image_running("winws.exe") and not self._is_image_running("winws2.exe")
+
+    def _managed_zapret_driver_services(self) -> list[tuple[str, str]]:
+        managed: list[tuple[str, str]] = []
+        for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
+            if not self._service_exists(service_name):
+                continue
+            image_path = self._service_image_path(service_name)
+            if image_path and self._is_managed_or_stale_zapret_service_path(image_path):
+                managed.append((service_name, image_path))
+        return managed
 
     def _reset_active_runtime_dir(self, active_root: Path) -> None:
         driver_marker = active_root / ".driver_path_in_use"
@@ -3607,18 +4623,84 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self.storage.paths.merged_runtime_dir.mkdir(parents=True, exist_ok=True)
         return self.storage.paths.merged_runtime_dir / f"active_zapret_{int(time.time() * 1000)}"
 
-    def _cleanup_inactive_zapret_runtimes(self) -> None:
+    def _cleanup_inactive_zapret_runtimes(self, preserve_extra: set[Path] | None = None) -> None:
+        """Keep only live + (optional) last-good / cutover pin. Drop orphan active_zapret_* copies."""
         merged_root = self.storage.paths.merged_runtime_dir
         if not merged_root.exists():
             return
-        current_root = self._current_zapret_runtime.resolve() if self._current_zapret_runtime and self._current_zapret_runtime.exists() else None
+        preserve: set[Path] = set()
+        if self._current_zapret_runtime and self._current_zapret_runtime.exists():
+            try:
+                preserve.add(self._current_zapret_runtime.resolve())
+            except Exception:
+                pass
+        extras = set(preserve_extra or ())
+        extras |= set(getattr(self, "_orchestrator_preserve_runtimes", None) or set())
+        # Last known-good from Auto memory (separate from runtime trees).
+        try:
+            knowledge = getattr(getattr(self, "_orchestrator_engine", None), "knowledge", None)
+            if knowledge is None:
+                # Fall back: processes may not hold engine; check settings auto + knowledge path via settings owner.
+                pass
+            last_good_path = getattr(self, "_last_good_runtime_path", None)
+            if last_good_path:
+                extras.add(Path(last_good_path))
+        except Exception:
+            pass
+        auto_on = False
+        try:
+            auto_on = str(self.settings.get().zapret_control_mode or "") == "auto"
+        except Exception:
+            auto_on = False
+        if auto_on:
+            try:
+                # Prefer explicit last-good path recorded on the process manager.
+                stored = getattr(self, "_auto_last_good_runtime", None)
+                if stored:
+                    extras.add(Path(stored))
+            except Exception:
+                pass
+        for item in extras:
+            try:
+                path = Path(item)
+                if path.exists():
+                    preserve.add(path.resolve())
+            except Exception:
+                continue
+        # Never keep more than current + one rollback slot when Auto is on.
+        if auto_on and len(preserve) > 2 and self._current_zapret_runtime:
+            try:
+                current = self._current_zapret_runtime.resolve()
+                others = sorted(
+                    (p for p in preserve if p != current),
+                    key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                    reverse=True,
+                )
+                preserve = {current, *others[:1]}
+            except Exception:
+                pass
+        if not auto_on and self._current_zapret_runtime:
+            try:
+                preserve = {self._current_zapret_runtime.resolve()}
+            except Exception:
+                pass
         for candidate in merged_root.glob("active_zapret*"):
             try:
-                if current_root and candidate.resolve() == current_root:
+                if candidate.resolve() in preserve:
                     continue
             except Exception:
                 pass
             self._reset_active_runtime_dir(candidate)
+
+    def remember_auto_runtime(self, root: Path | None) -> None:
+        """Remember last merged/running runtime for Auto retention (not a useless copy pile)."""
+        if root is None:
+            self._auto_last_good_runtime = None
+            return
+        try:
+            self._auto_last_good_runtime = Path(root).resolve()
+        except Exception:
+            self._auto_last_good_runtime = Path(root)
 
     def _stable_windivert_dir(self) -> Path:
         return self.storage.paths.merged_runtime_dir / "drivers" / "windivert"
@@ -3878,11 +4960,19 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         )
 
     def _is_port_listening(self, host: str, port: int) -> bool:
+        """Cheap listen probe. Old 0.8s timeout froze the GUI whenever TG was down."""
+        key = (str(host or ""), int(port))
+        now = time.time()
+        cached = self._port_listening_cache.get(key)
+        if cached is not None and (now - cached[0]) < 2.0:
+            return cached[1]
         try:
-            with socket.create_connection((host, port), timeout=0.8):
-                return True
+            with socket.create_connection((key[0], key[1]), timeout=0.05):
+                result = True
         except OSError:
-            return False
+            result = False
+        self._port_listening_cache[key] = (now, result)
+        return result
 
     def _open_source_log_stream(self, source: str):
         self._close_source_log_stream(source)
@@ -3922,10 +5012,53 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             pass
 
     def _is_telegram_running(self) -> bool:
-        for image_name in ("Telegram.exe", "Telegram Desktop.exe"):
+        for image_name in ("Telegram.exe", "telegram.exe", "Telegram Desktop.exe"):
             if self._is_image_running(image_name):
                 return True
-        return False
+        # Store / renamed builds: any process whose image contains "telegram".
+        try:
+            return self._toolhelp_image_contains("telegram")
+        except Exception:
+            return False
+
+    def _toolhelp_image_contains(self, needle: str) -> bool:
+        token = str(needle or "").strip().lower()
+        if not token or not sys.platform.startswith("win"):
+            return False
+        TH32CS_SNAPPROCESS = 0x00000002
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_ulong),
+                ("cntUsage", ctypes.c_ulong),
+                ("th32ProcessID", ctypes.c_ulong),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", ctypes.c_ulong),
+                ("cntThreads", ctypes.c_ulong),
+                ("th32ParentProcessID", ctypes.c_ulong),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.c_ulong),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snapshot or snapshot == INVALID_HANDLE_VALUE:
+            raise OSError("CreateToolhelp32Snapshot failed")
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                return False
+            while True:
+                name = str(entry.szExeFile or "").lower()
+                if token in name and not name.startswith("tgws"):
+                    return True
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    return False
+        finally:
+            kernel32.CloseHandle(snapshot)
 
     def _telegram_desktop_candidates(self) -> list[Path]:
         candidates = [

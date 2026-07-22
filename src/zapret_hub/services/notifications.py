@@ -88,3 +88,7 @@ class NotificationManager:
                 changed = True
         if changed:
             self.storage.write_json(self._path, [asdict(item) for item in entries])
+
+    def dismiss(self, notification_id: str) -> None:
+        entries = [item for item in self.list() if item.id != notification_id]
+        self.storage.write_json(self._path, [asdict(item) for item in entries])

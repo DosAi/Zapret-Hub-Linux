@@ -1,9 +1,13 @@
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
+import os
 import shutil
 import secrets
+import sys
 from typing import Any
 
+from zapret_hub import __version__
 from zapret_hub.domain import AppPaths
 from zapret_hub.runtime_env import development_install_root, is_packaged_runtime, packaged_install_root, packaged_resource_root
 from zapret_hub.services.autostart import AutostartManager
@@ -14,7 +18,11 @@ from zapret_hub.services.goshkow_vpn import GoshkowVpnManager
 from zapret_hub.services.logging_service import LoggingManager
 from zapret_hub.services.merge import MergeEngine
 from zapret_hub.services.mods import ModsManager
+from zapret_hub.services.zapret2_mods import Zapret2ModsManager
+from zapret_hub.services.marketplace import MarketplaceService
 from zapret_hub.services.notifications import NotificationManager
+from zapret_hub.services.orchestrator import OrchestratorEngine, knowledge_dir
+from zapret_hub.services.orchestrator.knowledge import KnowledgeStore
 from zapret_hub.services.profiles import ProfilesManager
 from zapret_hub.services.settings import SettingsManager
 from zapret_hub.services.storage import StorageManager
@@ -29,6 +37,8 @@ class ApplicationContext:
     autostart: AutostartManager
     processes: ProcessManager
     mods: ModsManager
+    mods2: Zapret2ModsManager
+    marketplace: MarketplaceService
     notifications: NotificationManager
     merge: MergeEngine
     diagnostics: DiagnosticsManager
@@ -36,6 +46,8 @@ class ApplicationContext:
     profiles: ProfilesManager
     files: FilesManager
     vpn: GoshkowVpnManager
+    orchestrator: OrchestratorEngine
+    knowledge: KnowledgeStore
     backend: Any | None = None
 
 
@@ -47,12 +59,14 @@ def bootstrap_application() -> ApplicationContext:
         install_root = development_install_root(__file__)
         resource_root = install_root
 
-    runtime_dir = install_root / "runtime"
+    work_root = _resolve_work_root(install_root)
+    runtime_dir = work_root / "runtime"
     ui_assets_dir = install_root / "ui_assets"
     sample_data_dir = install_root / "sample_data"
     _hydrate_bundled_assets(
         resource_root=resource_root,
         install_root=install_root,
+        work_root=work_root,
         runtime_dir=runtime_dir,
         ui_assets_dir=ui_assets_dir,
         sample_data_dir=sample_data_dir,
@@ -62,18 +76,20 @@ def bootstrap_application() -> ApplicationContext:
         install_root=install_root,
         core_dir=install_root / "core",
         runtime_dir=runtime_dir,
-        configs_dir=install_root / "configs",
+        configs_dir=work_root / "configs",
         default_packs_dir=install_root / "default_packs",
-        mods_dir=install_root / "mods",
-        merged_runtime_dir=install_root / "merged_runtime",
-        backups_dir=install_root / "backups",
-        cache_dir=install_root / "cache",
-        logs_dir=install_root / "logs",
-        data_dir=install_root / "data",
+        mods_dir=work_root / "mods",
+        mods_zapret2_dir=work_root / "mods_zapret2",
+        merged_runtime_dir=work_root / "merged_runtime",
+        backups_dir=work_root / "backups",
+        cache_dir=work_root / "cache",
+        logs_dir=work_root / "logs",
+        data_dir=work_root / "data",
         ui_assets_dir=ui_assets_dir,
     )
     storage = StorageManager(paths)
     storage.ensure_layout()
+    _ensure_windows_apps_registration(install_root)
 
     settings = SettingsManager(storage)
     logging = LoggingManager(storage)
@@ -82,14 +98,25 @@ def bootstrap_application() -> ApplicationContext:
     notifications = NotificationManager(storage)
     merge = MergeEngine(storage, logging, settings)
     mods = ModsManager(storage, logging, merge, settings, processes=processes)
+    mods2 = Zapret2ModsManager(storage, logging, settings)
+    marketplace = MarketplaceService(
+        storage_paths=paths,
+        logging=logging,
+        mods=mods,
+        mods2=mods2,
+    )
     diagnostics = DiagnosticsManager(storage, logging, processes, mods, merge)
-    updates = UpdatesManager(storage, logging, processes=processes)
+    updates = UpdatesManager(storage, logging, processes=processes, settings=settings)
     profiles = ProfilesManager(storage)
     files = FilesManager(storage, settings)
     vpn = GoshkowVpnManager(storage, logging)
+    knowledge = KnowledgeStore(knowledge_dir(paths.data_dir))
+    orchestrator = OrchestratorEngine(
+        language=lambda: str(settings.get().language or "ru"),
+    )
     _prime_first_run_state(settings, processes)
 
-    return ApplicationContext(
+    context = ApplicationContext(
         paths=paths,
         storage=storage,
         settings=settings,
@@ -97,6 +124,8 @@ def bootstrap_application() -> ApplicationContext:
         autostart=autostart,
         processes=processes,
         mods=mods,
+        mods2=mods2,
+        marketplace=marketplace,
         notifications=notifications,
         merge=merge,
         diagnostics=diagnostics,
@@ -104,8 +133,14 @@ def bootstrap_application() -> ApplicationContext:
         profiles=profiles,
         files=files,
         vpn=vpn,
+        orchestrator=orchestrator,
+        knowledge=knowledge,
         backend=None,
     )
+    orchestrator.attach(context)
+    mode = str(settings.get().zapret_control_mode or "manual")
+    orchestrator.set_mode(mode)
+    return context
 
 
 def build_startup_snapshot(context: ApplicationContext) -> dict[str, Any]:
@@ -121,6 +156,7 @@ def build_startup_snapshot(context: ApplicationContext) -> dict[str, Any]:
             "selected_zapret_general": current.selected_zapret_general,
             "favorite_zapret_generals": list(current.favorite_zapret_generals or []),
             "enabled_mod_ids": list(current.enabled_mod_ids or []),
+            "enabled_zapret2_mod_ids": list(getattr(current, "enabled_zapret2_mod_ids", None) or []),
             "selected_runtime_mode": getattr(current, "selected_runtime_mode", "zapret"),
         },
         "general_options": general_options,
@@ -155,6 +191,7 @@ def _prime_first_run_state(settings: SettingsManager, processes: ProcessManager)
 def _hydrate_bundled_assets(
     resource_root: Path,
     install_root: Path,
+    work_root: Path,
     runtime_dir: Path,
     ui_assets_dir: Path,
     sample_data_dir: Path,
@@ -163,11 +200,112 @@ def _hydrate_bundled_assets(
     bundled_ui_assets = resource_root / "ui_assets"
     bundled_sample_data = resource_root / "sample_data"
 
-    if bundled_runtime.exists() and not runtime_dir.exists():
-        shutil.copytree(bundled_runtime, runtime_dir, dirs_exist_ok=True)
+    # Program Files is not a writable runtime location. Keep generated configs,
+    # merged Zapret trees and downloaded helper cores under LocalAppData instead.
+    # Existing installations are migrated once without deleting the old copy.
+    legacy_runtime = install_root / "runtime"
+    if not runtime_dir.exists():
+        source_runtime = legacy_runtime if legacy_runtime.exists() else bundled_runtime
+        if source_runtime.exists():
+            shutil.copytree(source_runtime, runtime_dir, dirs_exist_ok=True)
+
+    for name in ("data", "configs", "mods", "mods_zapret2", "cache", "logs", "backups"):
+        source = install_root / name
+        destination = work_root / name
+        if source.exists() and not destination.exists():
+            shutil.copytree(source, destination, dirs_exist_ok=True)
 
     if bundled_ui_assets.exists() and not ui_assets_dir.exists():
         shutil.copytree(bundled_ui_assets, ui_assets_dir, dirs_exist_ok=True)
 
     if bundled_sample_data.exists() and not sample_data_dir.exists():
         shutil.copytree(bundled_sample_data, sample_data_dir, dirs_exist_ok=True)
+
+
+def _ensure_windows_apps_registration(install_root: Path) -> None:
+    """Register portable/installed builds in Windows Settings → Apps when an uninstaller is present."""
+    if not sys.platform.startswith("win") or not is_packaged_runtime():
+        return
+    uninstaller = install_root / "uninstall_zaprethub.exe"
+    if not uninstaller.exists():
+        return
+    app_exe = None
+    for name in ("Zapret_Hub.exe", "zapret_hub.exe"):
+        candidate = install_root / name
+        if candidate.exists():
+            app_exe = candidate
+            break
+    if app_exe is None:
+        return
+    try:
+        import winreg
+    except ImportError:
+        return
+    uninstall_key = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ZapretHub"
+    uninstall_cmd = f'"{uninstaller}" --install-dir "{install_root}"'
+    version_parts = str(__version__).split(".")
+    try:
+        major = int(version_parts[0]) if version_parts else 0
+        minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+    except ValueError:
+        major, minor = 0, 0
+    values: dict[str, object] = {
+        "DisplayName": "Zapret Hub",
+        "DisplayVersion": str(__version__),
+        "Publisher": "goshkow",
+        "InstallLocation": str(install_root),
+        "DisplayIcon": str(app_exe),
+        "UninstallString": uninstall_cmd,
+        "QuietUninstallString": f'{uninstall_cmd} --silent',
+        "InstallDate": datetime.now().strftime("%Y%m%d"),
+        "URLInfoAbout": "https://goshkow.ru/zapret-hub/",
+        "HelpLink": "https://goshkow.ru/zapret-hub/",
+        "NoModify": 1,
+        "NoRepair": 1,
+        "VersionMajor": major,
+        "VersionMinor": minor,
+    }
+    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            access = winreg.KEY_WRITE
+            if root == winreg.HKEY_LOCAL_MACHINE:
+                access |= winreg.KEY_WOW64_64KEY
+            with winreg.CreateKeyEx(root, uninstall_key, 0, access) as key:
+                for name, value in values.items():
+                    if isinstance(value, int):
+                        winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, value)
+                    else:
+                        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, str(value))
+            return
+        except Exception:
+            continue
+
+
+def _resolve_work_root(install_root: Path) -> Path:
+    """Return a writable per-user state directory for installed builds."""
+    explicit = str(os.environ.get("ZAPRET_HUB_WORK_ROOT", "") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    if (install_root / "portable.flag").exists():
+        return install_root / "user_data"
+    if not is_packaged_runtime():
+        return install_root
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+    target = base / "Zapret_Hub"
+    # Prefer a single folder name; migrate older LocalAppData locations once.
+    if not target.exists():
+        for legacy_name in ("Zapret Hub", "ZapretHub"):
+            legacy = base / legacy_name
+            if not legacy.exists() or not legacy.is_dir():
+                continue
+            try:
+                legacy.rename(target)
+                break
+            except Exception:
+                try:
+                    shutil.copytree(legacy, target, dirs_exist_ok=True)
+                    break
+                except Exception:
+                    continue
+    return target

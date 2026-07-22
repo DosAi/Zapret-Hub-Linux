@@ -3,6 +3,7 @@ from __future__ import annotations
 import locale
 import re
 import sys
+import threading
 from dataclasses import asdict
 
 from zapret_hub.domain import AppSettings
@@ -17,6 +18,7 @@ class SettingsManager:
     def __init__(self, storage: StorageManager) -> None:
         self.storage = storage
         self._settings_path = self.storage.paths.data_dir / "settings.json"
+        self._lock = threading.RLock()
         self._settings = self.load()
 
     def load(self) -> AppSettings:
@@ -56,7 +58,11 @@ class SettingsManager:
             changed = True
 
         if raw.get("theme") not in ("night", "midnight", "dark", "oled", "light", "light blue"):
-            settings.theme = "oled"
+            settings.theme = "light" if self._detect_system_theme() == "light" else "night"
+            changed = True
+
+        if str(getattr(settings, "ui_scale", "") or "") not in {"0.75", "1", "1.25"}:
+            settings.ui_scale = "1"
             changed = True
 
         if raw.get("zapret_ipset_mode") not in {"loaded", "none", "any"}:
@@ -91,8 +97,37 @@ class SettingsManager:
             settings.zapret_gaming_set = "stun-wide-base"
             changed = True
 
-        if raw.get("selected_runtime_mode") not in {"zapret", "goshkow-vpn"}:
+        if raw.get("selected_runtime_mode") not in {"zapret", "zapret2", "goshkow-vpn", "none"}:
             settings.selected_runtime_mode = "zapret"
+            changed = True
+
+        if raw.get("zapret_control_mode") not in {"manual", "auto"}:
+            settings.zapret_control_mode = "manual"
+            changed = True
+
+        strategy_id = str(raw.get("zapret2_strategy_id", getattr(settings, "zapret2_strategy_id", "balanced")) or "balanced")
+        if strategy_id not in {"balanced", "fake_heavy", "multisplit"}:
+            settings.zapret2_strategy_id = "balanced"
+            changed = True
+
+        if not isinstance(raw.get("trusted_general", settings.trusted_general), str):
+            settings.trusted_general = ""
+            changed = True
+
+        if raw.get("dns_profile") not in {"dhcp", "xbox", "cloudflare", "adguard", "google", "yandex"}:
+            settings.dns_profile = "xbox"
+            changed = True
+
+        runtime_modes = ("zapret", "goshkow-vpn", "zapret2", "none")
+        raw_runtime_order = raw.get("runtime_mode_order", settings.runtime_mode_order)
+        if not isinstance(raw_runtime_order, list):
+            raw_runtime_order = []
+        normalized_runtime_order = [
+            mode for mode in raw_runtime_order if isinstance(mode, str) and mode in runtime_modes
+        ]
+        normalized_runtime_order.extend(mode for mode in runtime_modes if mode not in normalized_runtime_order)
+        if normalized_runtime_order != list(settings.runtime_mode_order):
+            settings.runtime_mode_order = normalized_runtime_order
             changed = True
 
         if raw.get("goshkow_vpn_routing_mode") not in {"global", "blacklist", "whitelist"}:
@@ -104,7 +139,11 @@ class SettingsManager:
             changed = True
 
         if raw.get("goshkow_vpn_system_proxy_mode") not in {"clear", "set", "unchanged", "pac"}:
-            settings.goshkow_vpn_system_proxy_mode = "pac"
+            settings.goshkow_vpn_system_proxy_mode = "set"
+            changed = True
+
+        if raw.get("sounds_volume") not in {"normal", "louder", "quieter"}:
+            settings.sounds_volume = "normal"
             changed = True
 
         selected_service_ids = raw.get("selected_service_ids", [])
@@ -133,22 +172,31 @@ class SettingsManager:
         return settings
 
     def get(self) -> AppSettings:
-        return self._settings
+        with self._lock:
+            return self._settings
 
     def reload(self) -> AppSettings:
-        self._settings = self.load()
-        return self._settings
+        with self._lock:
+            self._settings = self.load()
+            return self._settings
 
     def update(self, **changes: object) -> AppSettings:
-        if "zapret_udp_exclude_ports" in changes:
-            changes["zapret_udp_exclude_ports"] = self._normalize_port_ranges(changes.get("zapret_udp_exclude_ports", ""))
-        for key, value in changes.items():
-            setattr(self._settings, key, value)
-        self.save()
-        return self._settings
+        with self._lock:
+            if "zapret_udp_exclude_ports" in changes:
+                changes["zapret_udp_exclude_ports"] = self._normalize_port_ranges(changes.get("zapret_udp_exclude_ports", ""))
+            if "zapret_control_mode" in changes:
+                mode = str(changes.get("zapret_control_mode") or "manual").strip().lower()
+                changes["zapret_control_mode"] = "auto" if mode == "auto" else "manual"
+            if "trusted_general" in changes:
+                changes["trusted_general"] = str(changes.get("trusted_general") or "").strip()
+            for key, value in changes.items():
+                setattr(self._settings, key, value)
+            self.save()
+            return self._settings
 
     def save(self) -> None:
-        self.storage.write_json(self._settings_path, asdict(self._settings))
+        with self._lock:
+            self.storage.write_json(self._settings_path, asdict(self._settings))
 
     def _detect_system_language(self) -> str:
         try:

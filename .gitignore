@@ -3,11 +3,16 @@ __pycache__/
 *.py[cod]
 *.pyd
 *.so
+.pytest_cache/
+.mypy_cache/
 
-# venv
+# venv / deps
 .venv/
+web_ui/node_modules/
+installer_web/node_modules/
+uninstaller_web/node_modules/
 
-# builds
+# builds / local outputs
 build/
 dist/
 dist_*/
@@ -17,12 +22,17 @@ dist_new*/
 dist_nuitka_*/
 release_*/
 .release_cache/
+.nuitka_staging/
+.build_outdir.txt
 github_release/
 portable/
 installer_payload/
+bundled_uninstaller/
 nuitka-crash-report.xml
+backup_*/
+*.pfx
 
-# runtime data
+# runtime data / local state
 logs/
 cache/
 data/
@@ -32,12 +42,14 @@ backups/
 configs/
 core/
 default_packs/
+runtime/**/.service/
 
-# local tools
+# local tools / temp
 *.zip
 *.7z
 *.log
 *.tmp
+web_ui/qa-*.png
 README.md
 
 # ide

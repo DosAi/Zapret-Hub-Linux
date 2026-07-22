@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import ctypes
 import hashlib
 import multiprocessing
@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtGui import QCursor, QGuiApplication, QIcon, QImage, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -183,16 +183,13 @@ def _preload_startup_onboarding(context, *, launch_hidden: bool, startup_snapsho
     if launch_hidden:
         return False
     try:
-        marker = context.paths.data_dir / ".services_onboarding_seen_v2"
-        if marker.exists():
-            return False
-        if isinstance(startup_snapshot, dict):
-            raw_options = startup_snapshot.get("general_options")
-            if isinstance(raw_options, list):
-                return any(isinstance(item, dict) and item.get("id") for item in raw_options)
-        return False
+        if (context.paths.install_root / ".force_onboarding_once").exists():
+            return True
+        # Stock onboarding until completed/skipped for the current marker version (v4).
+        marker = context.paths.data_dir / ".services_onboarding_seen_v4"
+        return not marker.exists()
     except Exception:
-        return False
+        return True
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -202,6 +199,7 @@ def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--worker", choices=["tg-ws-proxy"], default="")
     parser.add_argument("--autostart-launch", action="store_true")
+    parser.add_argument("--force-onboarding", action="store_true")
     parser.add_argument("--tg-host", default="127.0.0.1")
     parser.add_argument("--tg-port", type=int, default=1443)
     parser.add_argument("--tg-secret", default="")
@@ -243,23 +241,42 @@ def run(argv: list[str] | None = None) -> int:
     _startup_trace("run: before QApplication")
     app = QApplication(sys.argv)
     _startup_trace("run: QApplication created")
+    # Hold a normal arrow for the whole boot. WebEngine + blocked UI thread otherwise
+    # show the Windows/Chromium loading cursor until the first paint settles.
+    QGuiApplication.setOverrideCursor(QCursor(Qt.CursorShape.ArrowCursor))
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Zapret Hub")
-    app.setOrganizationName("ZapretHub")
+    app.setOrganizationName("Zapret_Hub")
+    app.setOrganizationDomain("zapret-hub.local")
     app_icon = _load_app_icon()
     _startup_trace(f"run: app_icon loaded={app_icon is not None}")
     if app_icon is not None:
         app.setWindowIcon(app_icon)
+    from zapret_hub.services.deeplink import extract_deep_link_from_argv, register_windows_protocol
+
     instance_key = _single_instance_key()
-    notify_message = b"PING" if known.autostart_launch else b"SHOW"
+    startup_deeplink = extract_deep_link_from_argv(runtime_argv)
+    if known.autostart_launch:
+        notify_message = b"PING"
+    elif startup_deeplink:
+        notify_message = f"DEEPLINK:{startup_deeplink}".encode("utf-8")
+    else:
+        notify_message = b"SHOW"
     if _notify_existing_instance(instance_key, notify_message):
         _startup_trace("run: existing instance notified, exiting")
         return 0
+    try:
+        register_windows_protocol()
+    except Exception:
+        pass
 
     class _BootstrapBridge(QObject):
         @Slot(object)
         def finish_bootstrap(self, bundle: object) -> None:
-            from zapret_hub.ui.main_window import MainWindow
+            if os.environ.get("ZAPRET_HUB_LEGACY_UI", "").strip() == "1":
+                from zapret_hub.ui.main_window import MainWindow
+            else:
+                from zapret_hub.ui.web_window import WebMainWindow as MainWindow
             from zapret_hub.services.backend_worker import BackendWorkerClient
 
             _startup_trace("finish_bootstrap: entered")
@@ -268,8 +285,14 @@ def run(argv: list[str] | None = None) -> int:
             context = bundle.get("context")
             startup_snapshot = bundle.get("startup_snapshot")
             startup_show_onboarding = bool(bundle.get("startup_show_onboarding"))
+            if known.force_onboarding:
+                startup_show_onboarding = True
             if context is None:
                 raise RuntimeError("Application context is missing")
+            try:
+                context.processes.reap_orphaned_bypass_images()
+            except Exception:
+                pass
             settings = context.settings.get()
             actual_autostart = bool(context.autostart.is_enabled())
             if bool(settings.autostart_windows) != actual_autostart:
@@ -279,19 +302,35 @@ def run(argv: list[str] | None = None) -> int:
             if launch_hidden:
                 startup_show_onboarding = False
             context.backend = None
+            legacy_ui = os.environ.get("ZAPRET_HUB_LEGACY_UI", "").strip() == "1"
+            early_window = getattr(app, "_startup_window", None)
             _startup_trace("finish_bootstrap: before MainWindow")
-            window = MainWindow(
-                context,
-                launch_hidden=launch_hidden,
-                startup_show_onboarding=startup_show_onboarding,
-                startup_snapshot=startup_snapshot if isinstance(startup_snapshot, dict) else None,
-            )
-            _startup_trace("finish_bootstrap: MainWindow created")
+            if (not legacy_ui) and early_window is not None and hasattr(early_window, "bind_application"):
+                window = early_window
+                window.bind_application(
+                    context,
+                    launch_hidden=launch_hidden,
+                    startup_show_onboarding=startup_show_onboarding,
+                )
+                _startup_trace("finish_bootstrap: early shell bound")
+            else:
+                window = MainWindow(
+                    context,
+                    launch_hidden=launch_hidden,
+                    startup_show_onboarding=startup_show_onboarding,
+                    startup_snapshot=startup_snapshot if isinstance(startup_snapshot, dict) else None,
+                )
+                _startup_trace("finish_bootstrap: MainWindow created")
             if app_icon is not None:
                 try:
                     window.setWindowIcon(app_icon)
                 except Exception:
                     pass
+            app._startup_window = window  # type: ignore[attr-defined]
+            if startup_deeplink:
+                queue = getattr(window, "queue_deeplink", None)
+                if callable(queue):
+                    queue(startup_deeplink)
             server = _create_single_instance_server(instance_key)
             if server is not None:
                 def _on_new_connection() -> None:
@@ -302,7 +341,14 @@ def run(argv: list[str] | None = None) -> int:
                                 client.waitForReadyRead(350)
                             payload = bytes(client.readAll()).strip()
                             client.disconnectFromServer()
-                            if payload == b"SHOW":
+                            if payload.startswith(b"DEEPLINK:"):
+                                link = payload[len(b"DEEPLINK:") :].decode("utf-8", errors="ignore").strip()
+                                queue = getattr(window, "queue_deeplink", None)
+                                if callable(queue) and link:
+                                    queue(link)
+                                else:
+                                    window.restore_from_external_launch()
+                            elif payload == b"SHOW":
                                 window.restore_from_external_launch()
 
                 server.newConnection.connect(_on_new_connection)
@@ -310,6 +356,14 @@ def run(argv: list[str] | None = None) -> int:
                 app._single_instance_window = window  # type: ignore[attr-defined]
 
             def _cleanup_before_quit() -> None:
+                if server is not None:
+                    try:
+                        server.close()
+                    except Exception:
+                        pass
+                # Full exit already scheduled a non-daemon backend stop from the window.
+                if getattr(window, "_force_exit", False):
+                    return
                 try:
                     if context.backend is not None:
                         context.backend.request_shutdown_background()
@@ -317,26 +371,36 @@ def run(argv: list[str] | None = None) -> int:
                         threading.Thread(target=context.processes.stop_all, daemon=True).start()
                 except Exception:
                     pass
-                if server is not None:
-                    try:
-                        server.close()
-                    except Exception:
-                        pass
 
             app.aboutToQuit.connect(_cleanup_before_quit)
             if known.autostart_launch and settings.auto_run_components:
                 def _start_after_backend() -> None:
                     if context.backend is not None:
-                        QTimer.singleShot(12000, lambda: window.start_enabled_components_async(autostart_only=False))
+                        def _safe_autostart() -> None:
+                            # Skip if user already powered off / selected another mode after launch.
+                            try:
+                                bridge = getattr(window, "bridge", None)
+                                if bridge is not None and getattr(bridge, "_runtime_transition_status", None) in {"stopping", "off"}:
+                                    return
+                                if bridge is not None and str(getattr(bridge, "_last_runtime_status", "") or "") == "off":
+                                    # User turned power off before autostart fired.
+                                    return
+                            except Exception:
+                                pass
+                            window.start_enabled_components_async(autostart_only=False)
+                        QTimer.singleShot(12000, _safe_autostart)
                 autostart_callback = _start_after_backend
             else:
                 autostart_callback = None
             if launch_hidden:
                 _startup_trace("finish_bootstrap: hide window")
                 window.hide()
+            elif not getattr(window, "isVisible", lambda: False)():
+                _startup_trace("finish_bootstrap: show window with preloader")
+                show_when_ready = getattr(window, "show_when_ready", None)
+                show_when_ready() if callable(show_when_ready) else window.show()
             else:
-                _startup_trace("finish_bootstrap: show window")
-                window.show()
+                _startup_trace("finish_bootstrap: early shell already visible")
             _startup_trace("finish_bootstrap: after window visible call")
 
             def _attach_backend_after_show() -> None:
@@ -344,6 +408,12 @@ def run(argv: list[str] | None = None) -> int:
                 backend = BackendWorkerClient(app)
                 _startup_trace("attach_backend: client created")
                 context.backend = backend
+                # Put backend worker into the UI kill-on-close job so Task Manager
+                # End task also tears down the worker (and its children).
+                try:
+                    context.processes.assign_pid_to_job(backend.process_pid)
+                except Exception:
+                    pass
                 window.attach_backend_client(backend)
                 _startup_trace("attach_backend: attached")
                 if autostart_callback is not None:
@@ -356,6 +426,13 @@ def run(argv: list[str] | None = None) -> int:
         @Slot(str)
         def fail_bootstrap(self, message: str) -> None:
             _startup_trace(f"finish_bootstrap: failed {message}")
+            early = getattr(app, "_startup_window", None)
+            if early is not None:
+                try:
+                    early.close()
+                except Exception:
+                    pass
+                app._startup_window = None  # type: ignore[attr-defined]
             _write_startup_error(message or "Failed to prepare the application")
             QMessageBox.critical(None, "Zapret Hub", message or "Failed to prepare the application")
             app.quit()
@@ -363,30 +440,23 @@ def run(argv: list[str] | None = None) -> int:
     bootstrap_bridge = _BootstrapBridge()
     app._bootstrap_bridge = bootstrap_bridge  # type: ignore[attr-defined]
 
-    def _bootstrap_on_main_thread() -> None:
-        try:
-            from zapret_hub.bootstrap import bootstrap_application, build_startup_snapshot
+    # Open the real frameless window immediately with a CSS preloader; bootstrap fills it in.
+    use_web_ui = os.environ.get("ZAPRET_HUB_LEGACY_UI", "").strip() != "1"
+    if use_web_ui and not known.autostart_launch:
+        from zapret_hub.ui.web_window import WebMainWindow
 
-            _startup_trace("run: bootstrap main-thread start")
-            context = bootstrap_application()
-            startup_snapshot = build_startup_snapshot(context)
-            startup_show_onboarding = _preload_startup_onboarding(
-                context,
-                launch_hidden=False,
-                startup_snapshot=startup_snapshot,
-            )
-            _startup_trace("run: bootstrap main-thread ready")
-            bootstrap_bridge.finish_bootstrap(
-                {
-                    "context": context,
-                    "startup_snapshot": startup_snapshot,
-                    "startup_show_onboarding": startup_show_onboarding,
-                }
-            )
-        except Exception as error:
-            bootstrap_bridge.fail_bootstrap(str(error))
+        early = WebMainWindow.create_early_shell(app_icon)
+        early.show_when_ready()
+        app._startup_window = early  # type: ignore[attr-defined]
+        app.processEvents()
+        _startup_trace("run: early web shell shown")
 
-    QTimer.singleShot(0, _bootstrap_on_main_thread)
+    # Keep CSS preloader animating: bootstrap off the GUI thread.
+    bootstrap_thread = _BootstrapThread()
+    bootstrap_thread.ready.connect(bootstrap_bridge.finish_bootstrap)
+    bootstrap_thread.failed.connect(bootstrap_bridge.fail_bootstrap)
+    app._bootstrap_thread = bootstrap_thread  # type: ignore[attr-defined]
+    QTimer.singleShot(0, bootstrap_thread.start)
     _startup_trace("run: bootstrap scheduled")
     return app.exec()
 

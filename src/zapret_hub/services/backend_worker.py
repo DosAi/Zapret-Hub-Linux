@@ -30,6 +30,8 @@ def _snapshot(context) -> dict[str, Any]:
             "zapret_game_filter_mode": settings.zapret_game_filter_mode,
             "zapret_gaming_set": getattr(settings, "zapret_gaming_set", "stun-wide-base"),
             "zapret_udp_exclude_ports": settings.zapret_udp_exclude_ports,
+            "zapret_control_mode": getattr(settings, "zapret_control_mode", "manual"),
+            "trusted_general": getattr(settings, "trusted_general", ""),
             "selected_runtime_mode": getattr(settings, "selected_runtime_mode", "zapret"),
             "autostart_windows": bool(settings.autostart_windows),
             "apply_update_on_next_launch": bool(getattr(settings, "apply_update_on_next_launch", False)),
@@ -86,7 +88,7 @@ def _stop_zapret_for_reconfiguration(context) -> bool:
     settings = context.settings.get()
     enabled = {str(item) for item in list(settings.enabled_component_ids or [])}
     selected_mode = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
-    should_recover = status in {"error", "partial"} and "zapret" in enabled and selected_mode != "goshkow-vpn"
+    should_recover = status in {"error", "partial"} and "zapret" in enabled and selected_mode == "zapret"
     return should_recover
 
 
@@ -118,7 +120,6 @@ def _sync_telegram_component_from_services(context) -> None:
         restore_zapret_after_vpn = restore_zapret_after_vpn or ("zapret" in enabled)
         restore_xbox_dns_after_vpn = restore_xbox_dns_after_vpn or ("xbox-dns" in enabled)
         enabled.discard("zapret")
-        enabled.discard("xbox-dns")
         autostart.discard("zapret")
     if "telegram-desktop" in selected:
         enabled.add("tg-ws-proxy")
@@ -145,12 +146,13 @@ def _sync_telegram_component_from_services(context) -> None:
         context.settings.update(**changes)
 
 
-def _runtime_running_states(context) -> tuple[dict[str, Any], bool, bool, bool]:
+def _runtime_running_states(context) -> tuple[dict[str, Any], bool, bool, bool, bool]:
     states = {item.component_id: item for item in context.processes.list_states()}
     any_running = any(item.status == "running" for item in states.values())
     zapret_running = bool(states.get("zapret") and states["zapret"].status == "running")
     vpn_running = bool(states.get("goshkow-vpn") and states["goshkow-vpn"].status == "running")
-    return states, any_running, zapret_running, vpn_running
+    zapret2_running = bool(states.get("zapret2") and states["zapret2"].status == "running")
+    return states, any_running, zapret_running, vpn_running, zapret2_running
 
 
 def _goshkow_vpn_is_enabled(context) -> bool:
@@ -186,7 +188,7 @@ def _run_goshkow_vpn_subscription_update_direct(context, action: callable) -> tu
 
 def _prepare_general_autotest_runtime(context) -> dict[str, Any]:
     settings = context.settings.get()
-    states, _any_running, zapret_running, vpn_running = _runtime_running_states(context)
+    states, _any_running, zapret_running, vpn_running, zapret2_running = _runtime_running_states(context)
     running_ids = [
         component_id
         for component_id, state in states.items()
@@ -197,6 +199,7 @@ def _prepare_general_autotest_runtime(context) -> dict[str, Any]:
         "selected_runtime_mode": str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret"),
         "zapret_running": bool(zapret_running),
         "vpn_running": bool(vpn_running),
+        "zapret2_running": bool(zapret2_running),
         "running_component_ids": running_ids,
         "enabled_component_ids": list(settings.enabled_component_ids or []),
     }
@@ -224,6 +227,11 @@ def _restore_general_autotest_runtime(context, restore: dict[str, Any]) -> bool:
         for component_id in sorted(running_component_ids - _vpn_excluded_component_ids()):
             context.processes.start_component(component_id)
         return True
+    if bool(restore.get("zapret2_running", False)):
+        context.processes.start_component("zapret2")
+        for component_id in sorted(running_component_ids - _runtime_excluded_component_ids()):
+            context.processes.start_component(component_id)
+        return True
     if bool(restore.get("zapret_running", False)):
         _finish_zapret_reconfiguration(context, restart=True)
         for component_id in sorted(running_component_ids - {"zapret", "goshkow-vpn"}):
@@ -237,6 +245,11 @@ def _restore_general_autotest_runtime(context, restore: dict[str, Any]) -> bool:
     if mode == "zapret":
         _finish_zapret_reconfiguration(context, restart=True)
         for component_id in sorted(running_component_ids - {"zapret", "goshkow-vpn"}):
+            context.processes.start_component(component_id)
+        return True
+    if mode == "zapret2":
+        context.processes.start_component("zapret2")
+        for component_id in sorted(running_component_ids - _runtime_excluded_component_ids()):
             context.processes.start_component(component_id)
         return True
     return False
@@ -254,8 +267,28 @@ def _start_enabled_aux_components(context, *, exclude: set[str] | None = None) -
         context.processes.start_component(component.id)
 
 
+def _reset_stale_start_states(context, components, *, autostart_only: bool, exclude: set[str] | None = None) -> None:
+    excluded = {str(item) for item in (exclude or set())}
+    states = {item.component_id: item for item in context.processes.list_states()}
+    for component in components:
+        if component.id in excluded:
+            continue
+        if not component.enabled or (autostart_only and not component.autostart):
+            continue
+        state = states.get(component.id)
+        if str(getattr(state, "status", "") or "").strip().lower() in {"error", "partial"}:
+            try:
+                context.processes.stop_component(component.id)
+            except Exception:
+                pass
+
+
 def _vpn_excluded_component_ids() -> set[str]:
-    return {"zapret", "goshkow-vpn", "xbox-dns"}
+    return {"zapret", "zapret2", "goshkow-vpn"}
+
+
+def _runtime_excluded_component_ids() -> set[str]:
+    return {"zapret", "zapret2", "goshkow-vpn"}
 
 
 def _set_goshkow_vpn_enabled(
@@ -266,33 +299,41 @@ def _set_goshkow_vpn_enabled(
 ) -> dict[str, Any]:
     settings = context.settings.get()
     enabled = {str(item) for item in list(settings.enabled_component_ids or [])}
-    _states, any_running, zapret_running, vpn_running = _runtime_running_states(context)
+    _states, any_running, zapret_running, vpn_running, zapret2_running = _runtime_running_states(context)
 
     if enabled_target:
         if previous_zapret_enabled is None:
             previous_zapret_enabled = "zapret" in enabled
         previous_xbox_dns_enabled = "xbox-dns" in enabled
+        previous_zapret2_enabled = "zapret2" in enabled
         enabled.add("goshkow-vpn")
         enabled.discard("zapret")
-        enabled.discard("xbox-dns")
+        enabled.discard("zapret2")
         _set_enabled_components(context, enabled)
         context.settings.update(
             selected_runtime_mode="goshkow-vpn",
             zapret_was_enabled_before_goshkow_vpn=previous_zapret_enabled,
             zapret_was_running_before_goshkow_vpn=zapret_running,
             xbox_dns_was_enabled_before_goshkow_vpn=previous_xbox_dns_enabled,
+            zapret2_was_enabled_before_goshkow_vpn=previous_zapret2_enabled,
+            zapret2_was_running_before_goshkow_vpn=zapret2_running,
         )
         if zapret_running:
             context.processes.stop_component("zapret")
-        context.processes.stop_component("xbox-dns")
+        if zapret2_running:
+            context.processes.stop_component("zapret2")
         if any_running:
             context.processes.start_component("goshkow-vpn")
             _start_enabled_aux_components(context, exclude=_vpn_excluded_component_ids())
     else:
         restore_zapret = bool(getattr(settings, "zapret_was_enabled_before_goshkow_vpn", False))
+        restore_zapret2 = bool(getattr(settings, "zapret2_was_enabled_before_goshkow_vpn", False))
         restore_xbox_dns = bool(getattr(settings, "xbox_dns_was_enabled_before_goshkow_vpn", False))
         enabled.discard("goshkow-vpn")
-        if restore_zapret:
+        if restore_zapret2:
+            enabled.add("zapret2")
+            enabled.discard("zapret")
+        elif restore_zapret:
             enabled.add("zapret")
         else:
             enabled.discard("zapret")
@@ -302,17 +343,22 @@ def _set_goshkow_vpn_enabled(
             enabled.discard("xbox-dns")
         _set_enabled_components(context, enabled)
         context.settings.update(
-            selected_runtime_mode="zapret",
+            selected_runtime_mode="zapret2" if restore_zapret2 else "zapret",
             zapret_was_enabled_before_goshkow_vpn=False,
             zapret_was_running_before_goshkow_vpn=False,
             xbox_dns_was_enabled_before_goshkow_vpn=False,
+            zapret2_was_enabled_before_goshkow_vpn=False,
+            zapret2_was_running_before_goshkow_vpn=False,
             goshkow_vpn_pending_start=False,
         )
         if vpn_running:
             context.processes.stop_component("goshkow-vpn")
-        if any_running and restore_zapret:
+        if any_running and restore_zapret2:
+            context.processes.start_component("zapret2")
+            _start_enabled_aux_components(context, exclude=_runtime_excluded_component_ids())
+        elif any_running and restore_zapret:
             context.processes.start_component("zapret")
-            _start_enabled_aux_components(context, exclude={"zapret", "goshkow-vpn"})
+            _start_enabled_aux_components(context, exclude=_runtime_excluded_component_ids())
         elif any_running and restore_xbox_dns:
             context.processes.start_component("xbox-dns")
 
@@ -322,12 +368,13 @@ def _set_goshkow_vpn_enabled(
 def _set_zapret_enabled_from_components(context, enabled_target: bool) -> dict[str, Any]:
     settings = context.settings.get()
     enabled = {str(item) for item in list(settings.enabled_component_ids or [])}
-    _states, any_running, zapret_running, vpn_running = _runtime_running_states(context)
+    _states, any_running, zapret_running, vpn_running, zapret2_running = _runtime_running_states(context)
 
     if enabled_target:
         restore_xbox_dns = bool(getattr(settings, "xbox_dns_was_enabled_before_goshkow_vpn", False))
         enabled.add("zapret")
         enabled.discard("goshkow-vpn")
+        enabled.discard("zapret2")
         if restore_xbox_dns:
             enabled.add("xbox-dns")
         _set_enabled_components(context, enabled)
@@ -336,18 +383,92 @@ def _set_zapret_enabled_from_components(context, enabled_target: bool) -> dict[s
             zapret_was_enabled_before_goshkow_vpn=False,
             zapret_was_running_before_goshkow_vpn=False,
             xbox_dns_was_enabled_before_goshkow_vpn=False,
+            zapret_was_enabled_before_zapret2=False,
+            zapret_was_running_before_zapret2=False,
+            goshkow_vpn_was_enabled_before_zapret2=False,
+            goshkow_vpn_was_running_before_zapret2=False,
+            xbox_dns_was_enabled_before_zapret2=False,
             goshkow_vpn_pending_start=False,
         )
         if vpn_running:
             context.processes.stop_component("goshkow-vpn")
+        if zapret2_running:
+            context.processes.stop_component("zapret2")
         if any_running:
             context.processes.start_component("zapret")
-            _start_enabled_aux_components(context, exclude={"zapret", "goshkow-vpn"})
+            _start_enabled_aux_components(context, exclude=_runtime_excluded_component_ids())
     else:
         enabled.discard("zapret")
         _set_enabled_components(context, enabled)
         if zapret_running:
             context.processes.stop_component("zapret")
+    return _snapshot(context)
+
+
+def _set_zapret2_enabled_from_components(context, enabled_target: bool) -> dict[str, Any]:
+    settings = context.settings.get()
+    enabled = {str(item) for item in list(settings.enabled_component_ids or [])}
+    _states, any_running, zapret_running, vpn_running, zapret2_running = _runtime_running_states(context)
+
+    if enabled_target:
+        previous_zapret_enabled = "zapret" in enabled
+        previous_vpn_enabled = "goshkow-vpn" in enabled
+        previous_xbox_dns_enabled = "xbox-dns" in enabled
+        enabled.add("zapret2")
+        enabled.discard("zapret")
+        enabled.discard("goshkow-vpn")
+        _set_enabled_components(context, enabled)
+        context.settings.update(
+            selected_runtime_mode="zapret2",
+            zapret_was_enabled_before_zapret2=previous_zapret_enabled,
+            zapret_was_running_before_zapret2=zapret_running,
+            goshkow_vpn_was_enabled_before_zapret2=previous_vpn_enabled,
+            goshkow_vpn_was_running_before_zapret2=vpn_running,
+            xbox_dns_was_enabled_before_zapret2=previous_xbox_dns_enabled,
+            goshkow_vpn_pending_start=False,
+        )
+        if zapret_running:
+            context.processes.stop_component("zapret")
+        if vpn_running:
+            context.processes.stop_component("goshkow-vpn")
+        if any_running:
+            context.processes.start_component("zapret2")
+            _start_enabled_aux_components(context, exclude=_runtime_excluded_component_ids())
+    else:
+        restore_vpn = bool(getattr(settings, "goshkow_vpn_was_enabled_before_zapret2", False))
+        restore_zapret = bool(getattr(settings, "zapret_was_enabled_before_zapret2", False))
+        restore_xbox_dns = bool(getattr(settings, "xbox_dns_was_enabled_before_zapret2", False))
+        enabled.discard("zapret2")
+        if restore_vpn:
+            enabled.add("goshkow-vpn")
+            enabled.discard("zapret")
+        elif restore_zapret:
+            enabled.add("zapret")
+            if restore_xbox_dns:
+                enabled.add("xbox-dns")
+        else:
+            enabled.discard("zapret")
+            if restore_xbox_dns:
+                enabled.add("xbox-dns")
+        _set_enabled_components(context, enabled)
+        context.settings.update(
+            selected_runtime_mode="goshkow-vpn" if restore_vpn else "zapret",
+            zapret_was_enabled_before_zapret2=False,
+            zapret_was_running_before_zapret2=False,
+            goshkow_vpn_was_enabled_before_zapret2=False,
+            goshkow_vpn_was_running_before_zapret2=False,
+            xbox_dns_was_enabled_before_zapret2=False,
+        )
+        if zapret2_running:
+            context.processes.stop_component("zapret2")
+        if any_running and restore_vpn:
+            context.processes.start_component("goshkow-vpn")
+            _start_enabled_aux_components(context, exclude=_vpn_excluded_component_ids())
+        elif any_running and restore_zapret:
+            context.processes.start_component("zapret")
+            _start_enabled_aux_components(context, exclude=_runtime_excluded_component_ids())
+        elif any_running and restore_xbox_dns:
+            context.processes.start_component("xbox-dns")
     return _snapshot(context)
 
 
@@ -429,6 +550,8 @@ def _action_error_source(action: str) -> str:
         return "tg-ws-proxy"
     if "goshkow_vpn" in normalized or "goshkow-vpn" in normalized or "vpn" in normalized:
         return "goshkow-vpn"
+    if "zapret2" in normalized:
+        return "zapret2"
     if "zapret" in normalized or "general" in normalized or "merge" in normalized:
         return "zapret"
     if "mod" in normalized:
@@ -449,24 +572,35 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         components = context.processes.list_components()
         states = {item.component_id: item for item in context.processes.list_states()}
         vpn_enabled = any(component.id == "goshkow-vpn" and component.enabled for component in components)
+        zapret2_enabled = any(component.id == "zapret2" and component.enabled for component in components)
         active_ids = [c.id for c in components if c.enabled]
         running_ids = {
             component_id
             for component_id, state in states.items()
             if state.status == "running"
         }
-        if running_ids:
+        # TG WS Proxy and Xbox DNS may remain active on their own. They must not
+        # turn the master button into a disconnect action when no actual runtime
+        # (Zapret/Zapret2/VPN) is running yet.
+        runtime_running_ids = running_ids & {"zapret", "zapret2", "goshkow-vpn"}
+        if runtime_running_ids:
             for cid in list(running_ids):
                 context.processes.stop_component(cid)
             mode = "disconnect"
         else:
             if vpn_enabled:
                 context.processes.stop_component("xbox-dns")
+                context.processes.stop_component("zapret2")
                 context.processes.start_component("goshkow-vpn")
                 _start_enabled_aux_components(context, exclude=_vpn_excluded_component_ids())
+            elif zapret2_enabled:
+                context.processes.stop_component("zapret")
+                context.processes.stop_component("goshkow-vpn")
+                context.processes.start_component("zapret2")
+                _start_enabled_aux_components(context, exclude=_runtime_excluded_component_ids())
             else:
                 for cid in active_ids:
-                    if cid != "goshkow-vpn":
+                    if cid not in {"goshkow-vpn", "zapret2"}:
                         context.processes.start_component(cid)
             mode = "connect"
         result = {"mode": mode}
@@ -513,23 +647,38 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         autostart_only = bool(payload.get("autostart_only", False)) if isinstance(payload, dict) else False
         components = context.processes.list_components()
         vpn_enabled = any(component.id == "goshkow-vpn" and component.enabled for component in components)
+        zapret2_enabled = any(component.id == "zapret2" and component.enabled for component in components)
         if vpn_enabled:
             context.processes.stop_component("xbox-dns")
+            context.processes.stop_component("zapret2")
+            _reset_stale_start_states(context, components, autostart_only=autostart_only, exclude=_vpn_excluded_component_ids())
             for component in components:
                 if component.id in _vpn_excluded_component_ids():
                     continue
                 if component.enabled and (not autostart_only or component.autostart):
                     context.processes.start_component(component.id)
             context.processes.start_component("goshkow-vpn")
-        elif autostart_only:
+        elif zapret2_enabled:
+            context.processes.stop_component("zapret")
+            context.processes.stop_component("goshkow-vpn")
+            _reset_stale_start_states(context, components, autostart_only=autostart_only, exclude=_runtime_excluded_component_ids())
             for component in components:
-                if component.id == "goshkow-vpn":
+                if component.id in _runtime_excluded_component_ids():
+                    continue
+                if component.enabled and (not autostart_only or component.autostart):
+                    context.processes.start_component(component.id)
+            context.processes.start_component("zapret2")
+        elif autostart_only:
+            _reset_stale_start_states(context, components, autostart_only=True, exclude=_runtime_excluded_component_ids())
+            for component in components:
+                if component.id in {"goshkow-vpn", "zapret2"}:
                     continue
                 if component.enabled and component.autostart:
                     context.processes.start_component(component.id)
         else:
+            _reset_stale_start_states(context, components, autostart_only=False, exclude=_runtime_excluded_component_ids())
             for component in components:
-                if component.id == "goshkow-vpn":
+                if component.id in {"goshkow-vpn", "zapret2"}:
                     continue
                 if component.enabled:
                     context.processes.start_component(component.id)
@@ -548,6 +697,10 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
                 result = _set_zapret_enabled_from_components(context, True)
                 _attach_telegram_proxy_info(context, result)
                 return result
+            if component_id == "zapret2":
+                result = _set_zapret2_enabled_from_components(context, True)
+                _attach_telegram_proxy_info(context, result)
+                return result
             context.processes.start_component(component_id)
         result = _snapshot(context)
         _attach_telegram_proxy_info(context, result)
@@ -560,6 +713,8 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
                 return _set_goshkow_vpn_enabled(context, False)
             if component_id == "zapret":
                 return _set_zapret_enabled_from_components(context, False)
+            if component_id == "zapret2":
+                return _set_zapret2_enabled_from_components(context, False)
             context.processes.stop_component(component_id)
         return _snapshot(context)
 
@@ -583,9 +738,13 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
 
     if action == "select_runtime_mode":
         mode = str(payload.get("mode", "") or "").strip()
-        if mode not in {"zapret", "goshkow-vpn"}:
+        if mode not in {"zapret", "zapret2", "goshkow-vpn"}:
             mode = "zapret"
-        return _set_goshkow_vpn_enabled(context, mode == "goshkow-vpn") if mode == "goshkow-vpn" else _set_goshkow_vpn_enabled(context, False)
+        if mode == "goshkow-vpn":
+            return _set_goshkow_vpn_enabled(context, True)
+        if mode == "zapret2":
+            return _set_zapret2_enabled_from_components(context, True)
+        return _set_zapret_enabled_from_components(context, True)
 
     if action == "import_goshkow_vpn_subscription":
         url = str(payload.get("url", "") or "")
@@ -835,10 +994,12 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         enabled_components = set(settings.enabled_component_ids or [])
         autostart_components = set(settings.autostart_component_ids or [])
         vpn_enabled = "goshkow-vpn" in enabled_components
+        zapret2_enabled = "zapret2" in enabled_components
         restore_zapret_after_vpn = bool(getattr(settings, "zapret_was_enabled_before_goshkow_vpn", False))
         restore_xbox_dns_after_vpn = bool(getattr(settings, "xbox_dns_was_enabled_before_goshkow_vpn", False))
+        restore_zapret_after_zapret2 = bool(getattr(settings, "zapret_was_enabled_before_zapret2", False))
         has_zapret_services = bool(requested_zapret_services)
-        if has_zapret_services:
+        if has_zapret_services and not zapret2_enabled:
             enabled_components.add("zapret")
         else:
             enabled_components.discard("zapret")
@@ -858,7 +1019,10 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             restore_zapret_after_vpn = has_zapret_services
             restore_xbox_dns_after_vpn = "ai" in requested
             enabled_components.discard("zapret")
-            enabled_components.discard("xbox-dns")
+            enabled_components.discard("zapret2")
+        elif zapret2_enabled:
+            restore_zapret_after_zapret2 = has_zapret_services
+            enabled_components.discard("zapret")
         if "telegram-desktop" in before_services and "telegram-desktop" not in requested:
             states = {item.component_id: item for item in context.processes.list_states()}
             if states.get("tg-ws-proxy") and states["tg-ws-proxy"].status == "running":
@@ -895,6 +1059,8 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         if vpn_enabled:
             settings_changes["zapret_was_enabled_before_goshkow_vpn"] = restore_zapret_after_vpn
             settings_changes["xbox_dns_was_enabled_before_goshkow_vpn"] = restore_xbox_dns_after_vpn
+        if zapret2_enabled:
+            settings_changes["zapret_was_enabled_before_zapret2"] = restore_zapret_after_zapret2
         if "gaming" in requested:
             settings_changes.update(_gaming_zapret_settings(context))
         if "ubisoft" in requested:
@@ -930,6 +1096,16 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
                 )
                 result["component"] = next(
                     (asdict(item) for item in context.processes.list_components() if item.id == "zapret"),
+                    {},
+                )
+                return result
+            if component_id == "zapret2":
+                result = _set_zapret2_enabled_from_components(
+                    context,
+                    "zapret2" not in {str(item) for item in list(context.settings.get().enabled_component_ids or [])},
+                )
+                result["component"] = next(
+                    (asdict(item) for item in context.processes.list_components() if item.id == "zapret2"),
                     {},
                 )
                 return result
@@ -1341,6 +1517,11 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         result.update(_snapshot(context))
         return result
 
+    if action == "update_zapret2_runtime":
+        result = context.processes.update_zapret2_runtime()
+        result.update(_snapshot(context))
+        return result
+
     if action == "update_tg_ws_proxy_runtime":
         result = context.processes.update_tg_ws_proxy_runtime()
         result.update(_snapshot(context))
@@ -1366,6 +1547,14 @@ class BackendWorkerClient(QObject):
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(80)
         self._poll_timer.timeout.connect(self._poll_results)
+
+    @property
+    def process_pid(self) -> int | None:
+        try:
+            pid = int(getattr(self._process, "pid", 0) or 0)
+            return pid or None
+        except Exception:
+            return None
 
     def submit(self, action: str, payload: dict[str, Any] | None = None) -> str:
         task_id = uuid.uuid4().hex
