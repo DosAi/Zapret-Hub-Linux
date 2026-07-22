@@ -337,6 +337,10 @@ class WebBridge(QObject):
         self._services_set_lock = threading.Lock()
         self._services_set_desired: list[str] | None = None
         self._services_set_running = False
+        self._runtime_reconfigure_lock = threading.Lock()
+        self._mod_toggle_lock = threading.Lock()
+        self._mod_toggle_desired: dict[tuple[str, str], bool] = {}
+        self._mod_toggle_running: set[tuple[str, str]] = set()
         self._power_lock = threading.Lock()
         self._power_desired: bool | None = None
         self._power_runtime_id = "zapret"
@@ -1310,19 +1314,15 @@ class WebBridge(QObject):
         if command == "mods.toggle":
             mod_id = str((payload or {}).get("id", ""))
             enabled = bool((payload or {}).get("on"))
-            current = self.context.settings.get()
-            ids = set(current.enabled_mod_ids or [])
-            ids.add(mod_id) if enabled else ids.discard(mod_id)
-            self.context.settings.update(enabled_mod_ids=sorted(ids))
-            self._cached_file_entries = None
-            self._run_background(self.context.merge.rebuild)
+            self._queue_mod_toggle("zapret", mod_id, enabled)
             return None
         if command == "mods.create":
             item = self.context.mods.create_empty(name=str((payload or {}).get("name", "") or "Модификация"))
             self.emit_state()
             return asdict(item)
         if command == "mods.delete":
-            self.context.mods.remove(str((payload or {}).get("id", "")))
+            mod_id = str((payload or {}).get("id", ""))
+            self._reconfigure_runtimes(("zapret",), lambda: self.context.mods.remove(mod_id))
             self.emit_state(force=True)
             return self._build_marketplace_mods_payload()
         if command == "mods.reorder":
@@ -1376,9 +1376,7 @@ class WebBridge(QObject):
         if command == "mods2.toggle":
             mod_id = str((payload or {}).get("id", ""))
             enabled = bool((payload or {}).get("on"))
-            self.context.mods2.set_enabled(mod_id, enabled)
-            self._cached_file2_entries = None
-            self.emit_state()
+            self._queue_mod_toggle("zapret2", mod_id, enabled)
             return None
         if command == "mods2.create":
             item = self.context.mods2.create_empty(name=str((payload or {}).get("name", "") or "Модификация Zapret 2"))
@@ -1386,7 +1384,8 @@ class WebBridge(QObject):
             self.emit_state()
             return asdict(item)
         if command == "mods2.delete":
-            self.context.mods2.remove(str((payload or {}).get("id", "")))
+            mod_id = str((payload or {}).get("id", ""))
+            self._reconfigure_runtimes(("zapret2",), lambda: self.context.mods2.remove(mod_id))
             self._cached_file2_entries = None
             self.emit_state(force=True)
             return self._build_marketplace_mods_payload()
@@ -1668,7 +1667,10 @@ class WebBridge(QObject):
             return result
         if command == "marketplace.remove":
             slug = str((payload or {}).get("slug") or "")
-            result = self.context.marketplace.remove_installed(slug)
+            result = self._reconfigure_runtimes(
+                ("zapret", "zapret2"),
+                lambda: self.context.marketplace.remove_installed(slug),
+            )
             installed = self._build_marketplace_mods_payload()
             self._merge_marketplace_mods_cache(installed)
             self._schedule_on_gui(lambda: self.emit_state(force=True))
@@ -1753,30 +1755,128 @@ class WebBridge(QObject):
         raise ValueError(f"Unsupported web command: {command}")
 
     def _apply_selected_services(self, selected: list[str], *, emit: bool = True) -> None:
-        settings = self.context.settings.get()
-        enabled_ids = {str(item) for item in settings.enabled_component_ids or []}
-        autostart_ids = {str(item) for item in settings.autostart_component_ids or []}
-        if "telegram-desktop" in selected:
-            enabled_ids.add("tg-ws-proxy")
-            autostart_ids.add("tg-ws-proxy")
-        else:
-            enabled_ids.discard("tg-ws-proxy")
-            autostart_ids.discard("tg-ws-proxy")
-        if "ai" in selected:
-            enabled_ids.add("xbox-dns")
-        else:
-            enabled_ids.discard("xbox-dns")
-            autostart_ids.discard("xbox-dns")
-        changes: dict[str, Any] = {
-            "selected_service_ids": selected,
-            "enabled_component_ids": sorted(enabled_ids),
-            "autostart_component_ids": sorted(autostart_ids),
-        }
-        if "ai" in selected:
-            changes["dns_profile"] = "xbox"
-        self.context.settings.update(**changes)
+        selected_set = {str(item) for item in selected}
+        ordered = [preset.id for preset in SERVICE_PRESETS if preset.id in selected_set]
+
+        def apply() -> None:
+            settings = self.context.settings.get()
+            enabled_ids = {str(item) for item in settings.enabled_component_ids or []}
+            autostart_ids = {str(item) for item in settings.autostart_component_ids or []}
+            bypass_services = set(ordered) - {"telegram-desktop", "ai"}
+            active_backend = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
+            if bypass_services:
+                enabled_ids.add("zapret2" if active_backend == "zapret2" else "zapret")
+            else:
+                enabled_ids.discard("zapret")
+                enabled_ids.discard("zapret2")
+                autostart_ids.discard("zapret")
+                autostart_ids.discard("zapret2")
+            if "telegram-desktop" in ordered:
+                enabled_ids.add("tg-ws-proxy")
+                autostart_ids.add("tg-ws-proxy")
+            else:
+                enabled_ids.discard("tg-ws-proxy")
+                autostart_ids.discard("tg-ws-proxy")
+            if "ai" in ordered:
+                enabled_ids.add("xbox-dns")
+            else:
+                enabled_ids.discard("xbox-dns")
+                autostart_ids.discard("xbox-dns")
+            changes: dict[str, Any] = {
+                "selected_service_ids": ordered,
+                "enabled_component_ids": sorted(enabled_ids),
+                "autostart_component_ids": sorted(autostart_ids),
+            }
+            if "ai" in ordered:
+                changes["dns_profile"] = "xbox"
+            if "discord" in ordered and str(getattr(settings, "zapret_control_mode", "manual")) == "auto":
+                changes["zapret_game_filter_mode"] = "tcpudp"
+            self.context.settings.update(**changes)
+            self.context.merge.rebuild()
+            self.context.files._invalidate_collection_cache()
+            self.context.files.rebuild_materialized_collections()
+
+        bypass_services = set(ordered) - {"telegram-desktop", "ai"}
+        self._reconfigure_runtimes(
+            ("zapret", "zapret2"),
+            apply,
+            restart_allowed={"zapret": bool(bypass_services), "zapret2": bool(bypass_services)},
+        )
         if emit:
             self.emit_state()
+
+    def _component_running(self, component_id: str) -> bool:
+        return any(
+            item.component_id == component_id and str(item.status or "") == "running"
+            for item in self.context.processes.list_states()
+        )
+
+    def _reconfigure_runtimes(
+        self,
+        component_ids: tuple[str, ...],
+        action: Callable[[], Any],
+        *,
+        restart_allowed: dict[str, bool] | None = None,
+    ) -> Any:
+        with self._runtime_reconfigure_lock:
+            running = {component_id: self._component_running(component_id) for component_id in component_ids}
+            for component_id, was_running in running.items():
+                if was_running:
+                    self.context.processes.stop_component(component_id)
+            try:
+                return action()
+            finally:
+                for component_id, was_running in running.items():
+                    if not was_running or restart_allowed is not None and not restart_allowed.get(component_id, True):
+                        continue
+                    try:
+                        self.context.processes.start_component(component_id)
+                    except Exception as error:
+                        self.context.logging.log(
+                            "error",
+                            "Runtime restart after reconfiguration failed",
+                            component=component_id,
+                            error=str(error),
+                        )
+
+    def _queue_mod_toggle(self, backend: str, mod_id: str, enabled: bool) -> None:
+        if not mod_id:
+            return
+        key = (backend, mod_id)
+        with self._mod_toggle_lock:
+            self._mod_toggle_desired[key] = enabled
+            if key in self._mod_toggle_running:
+                return
+            self._mod_toggle_running.add(key)
+
+        def worker() -> None:
+            while True:
+                with self._mod_toggle_lock:
+                    desired = self._mod_toggle_desired.pop(key, None)
+                    if desired is None:
+                        self._mod_toggle_running.discard(key)
+                        return
+                try:
+                    manager = self.context.mods2 if backend == "zapret2" else self.context.mods
+                    self._reconfigure_runtimes(
+                        (backend,),
+                        lambda value=desired: manager.set_enabled(mod_id, value),
+                    )
+                    if backend == "zapret2":
+                        self._cached_file2_entries = None
+                    else:
+                        self._cached_file_entries = None
+                    self.emit_state(force=True)
+                except Exception as error:
+                    self.context.logging.log(
+                        "error",
+                        "Modification reconfiguration failed",
+                        backend=backend,
+                        mod_id=mod_id,
+                        error=str(error),
+                    )
+
+        threading.Thread(target=worker, daemon=True, name=f"zapret-hub-{backend}-mod-toggle").start()
 
     def _safe_abort_diagnostics(self) -> None:
         if self.context is None:
