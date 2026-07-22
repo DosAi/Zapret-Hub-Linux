@@ -68,9 +68,6 @@ export function OnboardingFlow({
   const onboardingRootRef = useRef<HTMLDivElement>(null);
   const [serviceEdges, setServiceEdges] = useState({ top: false, bottom: true });
   const readySoundPlayed = useRef(false);
-  const autoBootstrapDone = useRef(false);
-  const autoBootstrapStarted = useRef(false);
-  const autoSawTuning = useRef(false);
   const vpnSetup = startStep >= 2 && initialMode === "goshkow-vpn";
   const reconfigure = startStep >= 2 && !vpnSetup;
   // First-run onboarding only — not "Run setup again" from Zapret.
@@ -85,52 +82,11 @@ export function OnboardingFlow({
     setConfiguration({ status: result.status, name: result.name });
     setGameOpen(false);
   }), [bridge]);
-  useEffect(() => bridge.subscribe("orchestrator.bootstrap", (result) => {
-    if (!autoBootstrapStarted.current || autoBootstrapDone.current) return;
-    if (setupMode !== "auto") return;
-    autoBootstrapDone.current = true;
-    const ok = result?.ok !== false;
-    setConfiguration({
-      status: ok ? "success" : "error",
-      name: ok
-        ? (result.deferred ? "deferred" : (result.trustedGeneral || ""))
-        : (result.error || result.trustedGeneral || ""),
-    });
-    setGameOpen(false);
-  }), [bridge, setupMode]);
-  useEffect(() => bridge.subscribe("orchestrator.status", (payload) => {
-    if (setupMode !== "auto") return;
-    if (payload.status === "picking" || payload.status === "tuning" || payload.busy) {
-      setConfiguration({ status: "running", name: payload.statusText || payload.detail || "" });
-      setProgress((prev) => ({ ...prev, name: payload.detail || payload.statusText || prev.name }));
-    }
-  }), [bridge, setupMode]);
-  // Fallback: status left "tuning" after we started bootstrap (if bootstrap event is missing).
-  useEffect(() => {
-    if (setupMode !== "auto" || step !== 3 || configuration.status !== "running") return;
-    if (!autoBootstrapStarted.current || autoBootstrapDone.current) return;
-    const orch = state?.orchestrator;
-    if (!orch) return;
-    if (orch.status === "tuning" || orch.status === "picking" || orch.status === "bootstrap") {
-      autoSawTuning.current = true;
-      return;
-    }
-    if (!autoSawTuning.current && orch.status !== "ok" && orch.status !== "watching") return;
-    const timer = window.setTimeout(() => {
-      if (autoBootstrapDone.current) return;
-      autoBootstrapDone.current = true;
-      setConfiguration({ status: "success", name: "" });
-    }, autoSawTuning.current ? 350 : 1200);
-    return () => window.clearTimeout(timer);
-  }, [setupMode, step, configuration.status, state?.orchestrator]);
   useEffect(() => {
     if (open) {
       const next = Math.max(startStep, previewStep);
       setSelectedMode(initialMode);
       setSetupMode("manual");
-      autoBootstrapDone.current = false;
-      autoBootstrapStarted.current = false;
-      autoSawTuning.current = false;
       goToStep(setStep, next);
       readySoundPlayed.current = false;
       setGameOpen(false);
@@ -211,11 +167,7 @@ export function OnboardingFlow({
     if (step !== 3 && configuration.status !== "running") return;
     setConfiguration({ status: "error", name: "" });
     setGameOpen(false);
-    if (setupMode === "auto") {
-      autoBootstrapDone.current = true;
-    } else {
-      bridgeLater(() => bridge.call("onboarding.cancel", undefined));
-    }
+    bridgeLater(() => bridge.call("onboarding.cancel", undefined));
   };
 
   const goBack = () => {
@@ -281,15 +233,12 @@ export function OnboardingFlow({
     }
     if (step === 5) {
       if (setupMode === "auto") {
-        autoBootstrapDone.current = false;
-        autoBootstrapStarted.current = true;
-        autoSawTuning.current = false;
         setConfiguration({ status: "running", name: "" });
         setProgress({ current: 0, total: 1, name: "", overallCurrent: 0, overallTotal: 1 });
         goToStep(setStep, 3);
         bridgeIdle(() => {
           void bridge.call("orchestrator.setMode", { mode: "auto" });
-          void bridge.call("orchestrator.bootstrap", { youtube: true, discord: true });
+          void bridge.call("onboarding.configure", { selected: ["youtube", "discord"] });
         });
         return;
       }
@@ -315,8 +264,7 @@ export function OnboardingFlow({
       goToStep(setStep, 3);
       bridgeIdle(() => {
         void bridge.call("orchestrator.setMode", { mode: "manual" });
-        void bridge.call("services.set", { selected });
-        void bridge.call("onboarding.configure", undefined);
+        void bridge.call("onboarding.configure", { selected });
       });
       return;
     }
@@ -630,39 +578,18 @@ export function OnboardingFlow({
                   {configuration.status === "success" ? <span className="text-2xl text-[var(--ok)]">✓</span> : configuration.status === "error" ? <span className="text-xl text-[var(--err)]">×</span> : <span className="h-7 w-7 rounded-full border-2 border-fg-mute border-t-fg" />}
                 </motion.div>
                 <h1 className="brand-font mt-5 text-[24px] font-semibold text-fg">
-                  {setupMode === "auto" && !reconfigure
-                    ? t("onboarding.auto.tuning")
-                    : (ru ? "Подбор конфигурации" : "Selecting configuration")}
+                  {ru ? "Подбор конфигурации" : "Selecting configuration"}
                 </h1>
                 <p className="mt-2 max-w-[560px] text-[12px] text-fg-dim">
-                  {setupMode === "auto" && !reconfigure
-                    ? (configuration.status === "running"
-                      ? t("onboarding.auto.tuningBody")
-                      : configuration.status === "success"
-                        ? (configuration.name === "deferred"
-                          ? (ru
-                            ? "Базовая настройка готова — оркестратор донастроит в фоне."
-                            : "Base setup is ready — the orchestrator will keep tuning in the background.")
-                          : (ru ? "Автоматический режим готов" : "Automatic mode is ready"))
-                        : (ru
-                          ? "Автоподбор не завершился — можно продолжить, оркестратор донастроит позже."
-                          : "Auto setup did not finish — you can continue; the orchestrator will keep tuning."))
-                    : configuration.status === "running"
-                      ? (progress.name || (ru ? "Подготовка проверки..." : "Preparing checks..."))
-                      : configuration.status === "success"
-                        ? `${ru ? "Выбрана" : "Selected"}: ${configuration.name}`
-                        : (ru ? "Автоматически подобрать конфигурацию не удалось. Можно продолжить." : "Automatic selection failed. You can continue.")}
+                  {configuration.status === "running"
+                    ? (progress.name || (ru ? "Подготовка проверки..." : "Preparing checks..."))
+                    : configuration.status === "success"
+                      ? `${ru ? "Выбрана" : "Selected"}: ${configuration.name}`
+                      : (ru ? "Автоматически подобрать конфигурацию не удалось. Можно продолжить." : "Automatic selection failed. You can continue.")}
                 </p>
-                {!(setupMode === "auto" && !reconfigure) && (
-                  <>
-                    <div className="mt-5 h-1.5 w-[360px] overflow-hidden rounded-full bg-bg-3"><motion.div className="h-full rounded-full bg-fg" animate={{ width: `${configuration.status === "running" ? progressValue : 100}%` }} transition={{ duration: 0.35 }} /></div>
-                    <div className="mt-2 text-[10px] text-fg-mute">{configuration.status === "running" ? `${progressValue}% · ${ru ? `general ${Math.max(1, progress.overallCurrent)} из ${progress.overallTotal}` : `general ${Math.max(1, progress.overallCurrent)} of ${progress.overallTotal}`}` : configuration.status === "success" ? (ru ? "Настройка применена" : "Configuration applied") : (ru ? "Проверка завершена" : "Check completed")}</div>
-                  </>
-                )}
-                {setupMode === "auto" && !reconfigure && configuration.status === "running" && (
-                  <div className="mt-5 text-[10px] text-fg-mute">{ru ? "Это займёт немного времени…" : "This may take a moment…"}</div>
-                )}
-                {configuration.status === "running" && setupMode !== "auto" && (
+                <div className="mt-5 h-1.5 w-[360px] overflow-hidden rounded-full bg-bg-3"><motion.div className="h-full rounded-full bg-fg" animate={{ width: `${configuration.status === "running" ? progressValue : 100}%` }} transition={{ duration: 0.35 }} /></div>
+                <div className="mt-2 text-[10px] text-fg-mute">{configuration.status === "running" ? `${progressValue}% · ${ru ? `general ${Math.max(1, progress.overallCurrent)} из ${progress.overallTotal}` : `general ${Math.max(1, progress.overallCurrent)} of ${progress.overallTotal}`}` : configuration.status === "success" ? (ru ? "Настройка применена" : "Configuration applied") : (ru ? "Проверка завершена" : "Check completed")}</div>
+                {configuration.status === "running" && (
                   <button
                     type="button"
                     onClick={() => setGameOpen(true)}

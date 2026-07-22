@@ -20,6 +20,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QSystemTrayIcon
 
 from zapret_hub.services.service_catalog import SERVICE_PRESETS
+from zapret_hub.services.onboarding_state import onboarding_is_update
 from zapret_hub.runtime_env import development_install_root, is_packaged_runtime, packaged_install_root
 
 
@@ -1408,14 +1409,8 @@ class WebBridge(QObject):
             return None
         if command == "onboarding.configure":
             selected = (payload or {}).get("selected") if isinstance(payload, dict) else None
-            if isinstance(selected, list):
-                selected_list = [str(item) for item in selected]
-                threading.Thread(
-                    target=lambda: self._apply_selected_services(selected_list, emit=False),
-                    daemon=True,
-                    name="zapret-hub-onboarding-configure-services",
-                ).start()
-            self._start_onboarding_configuration()
+            selected_list = [str(item) for item in selected] if isinstance(selected, list) else None
+            self._start_onboarding_configuration(selected_services=selected_list)
             return None
         if command == "onboarding.cancel":
             self._onboarding_configuration_cancelled = True
@@ -2042,7 +2037,7 @@ class WebBridge(QObject):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _start_onboarding_configuration(self) -> None:
+    def _start_onboarding_configuration(self, *, selected_services: list[str] | None = None) -> None:
         if self._onboarding_configuration_running:
             return
         self._onboarding_configuration_running = True
@@ -2050,6 +2045,11 @@ class WebBridge(QObject):
 
         def worker() -> None:
             try:
+                # Apply the service preset in the same worker before diagnostics.
+                # Running this in a second thread raced list materialization and made
+                # onboarding test an older selection intermittently.
+                if selected_services is not None:
+                    self._apply_selected_services(selected_services, emit=False)
                 general_count = max(1, len(self.context.processes.list_zapret_generals()))
 
                 def progress(current: int, total: int, name: str) -> None:
@@ -2740,11 +2740,7 @@ class WebBridge(QObject):
                 "forceOpen": bool(self.show_onboarding)
                 and (self.context.paths.data_dir / ".services_onboarding_seen_v4").exists(),
                 "initialMode": self._onboarding_initial_mode,
-                "isUpdate": (
-                    # Only when an older onboarding was completed, but not the current v4.
-                    (self.context.paths.data_dir / ".services_onboarding_seen_v3").exists()
-                    and not (self.context.paths.data_dir / ".services_onboarding_seen_v4").exists()
-                ),
+                "isUpdate": onboarding_is_update(self.context.paths.data_dir),
             },
             "ui": {
                 "locale": settings.language if settings.language in {"ru", "en"} else "ru",

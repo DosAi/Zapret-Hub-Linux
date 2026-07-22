@@ -180,14 +180,15 @@ def _load_app_icon() -> QIcon | None:
 
 
 def _preload_startup_onboarding(context, *, launch_hidden: bool, startup_snapshot: dict[str, object] | None = None) -> bool:
+    from zapret_hub.services.onboarding_state import onboarding_completed
+
     if launch_hidden:
         return False
     try:
         if (context.paths.install_root / ".force_onboarding_once").exists():
             return True
         # Stock onboarding until completed/skipped for the current marker version (v4).
-        marker = context.paths.data_dir / ".services_onboarding_seen_v4"
-        return not marker.exists()
+        return not onboarding_completed(context.paths.data_dir)
     except Exception:
         return True
 

@@ -53,11 +53,14 @@ class SettingsManager:
             settings.language = self._detect_system_language()
             changed = True
 
-        if raw.get("theme") == "midnight":
-            settings.theme = "night"
+        theme_defaults_marker = self.storage.paths.data_dir / ".theme_defaults_v4"
+        initialize_theme_defaults = not theme_defaults_marker.exists()
+        if initialize_theme_defaults:
+            # Theme names and palettes from the legacy UI are intentionally not
+            # migrated. Pick the initial v4 theme from Windows exactly once.
+            settings.theme = "light" if self._detect_system_theme() == "light" else "night"
             changed = True
-
-        if raw.get("theme") not in ("night", "midnight", "dark", "oled", "light", "light blue"):
+        elif raw.get("theme") not in {"night", "oled", "light"}:
             settings.theme = "light" if self._detect_system_theme() == "light" else "night"
             changed = True
 
@@ -169,6 +172,8 @@ class SettingsManager:
 
         if changed:
             self.storage.write_json(self._settings_path, asdict(settings))
+        if initialize_theme_defaults:
+            theme_defaults_marker.write_text("1", encoding="utf-8")
         return settings
 
     def get(self) -> AppSettings:
