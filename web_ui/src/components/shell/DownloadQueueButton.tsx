@@ -119,6 +119,11 @@ function ActiveRow({
   const paused = item.status === "paused";
   const queued = item.status === "queued";
   const progress = Math.max(0, Math.min(1, Number(item.progress || 0)));
+  const [visualProgress, setVisualProgress] = useState(0);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setVisualProgress(progress));
+    return () => cancelAnimationFrame(frame);
+  }, [progress]);
   return (
     <div className="px-1 py-1">
       <div className="flex items-center gap-2">
@@ -166,8 +171,8 @@ function ActiveRow({
       </div>
       <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-bg-3">
         <div
-          className="h-full rounded-full bg-[rgb(var(--page-accent-rgb))] transition-[width] duration-1000 ease-linear"
-          style={{ width: `${Math.max(paused ? 0 : 2, progress * 100)}%` }}
+          className="h-full rounded-full bg-[rgb(var(--page-accent-rgb))] transition-[width] duration-700 ease-linear"
+          style={{ width: `${visualProgress * 100}%` }}
         />
       </div>
     </div>
@@ -280,8 +285,19 @@ export function DownloadQueueButton({
   );
   const errors = useMemo(() => items.filter((item) => item.status === "error"), [items]);
   const hasError = errors.length > 0;
+  const activeKey = active ? `${active.slug}:${active.jobId || ""}` : "";
+  const previousActiveKey = useRef(activeKey);
+  const resetProgress = previousActiveKey.current !== activeKey;
+  previousActiveKey.current = activeKey;
 
-  const ring = Math.max(0, Math.min(1, progress));
+  const targetRing = Math.max(0, Math.min(1, progress));
+  const [visualRing, setVisualRing] = useState(0);
+  useEffect(() => {
+    if (resetProgress) setVisualRing(0);
+    const frame = requestAnimationFrame(() => setVisualRing(targetRing));
+    return () => cancelAnimationFrame(frame);
+  }, [activeKey, resetProgress, targetRing]);
+  const ring = resetProgress ? 0 : visualRing;
   const deg = ring * 360;
 
   const onDragEnd = (event: DragEndEvent) => {
@@ -315,8 +331,10 @@ export function DownloadQueueButton({
               ? "transparent"
               : hasError
                 ? "transparent"
-              : "conic-gradient(rgb(var(--page-accent-rgb)) var(--download-progress), color-mix(in srgb, var(--fg-mute) 28%, transparent) 0deg)",
-            transition: "--download-progress 1000ms linear",
+                : ring <= 0
+                  ? "color-mix(in srgb, var(--fg-mute) 28%, transparent)"
+                  : "conic-gradient(rgb(var(--page-accent-rgb)) var(--download-progress), color-mix(in srgb, var(--fg-mute) 28%, transparent) 0deg)",
+            transition: resetProgress ? "none" : "--download-progress 700ms linear",
             WebkitMask: "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
             mask: "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
           } as CSSProperties}
@@ -363,6 +381,7 @@ export function DownloadQueueButton({
                         {errors.map((item) => <ErrorRow key={`error-${item.jobId}`} item={item} locale={locale} />)}
                         {active ? (
                           <ActiveRow
+                            key={activeKey}
                             item={active}
                             locale={locale}
                             onCancel={() => onCancel(active.slug, active.jobId)}

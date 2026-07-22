@@ -1,4 +1,4 @@
-import { type ReactNode, type RefObject, useLayoutEffect, useRef } from "react";
+import { type ReactNode, type RefObject, useLayoutEffect, useRef, useState } from "react";
 
 function sanitizeMirrorClone(root: HTMLElement) {
   root.querySelectorAll<HTMLElement>("*").forEach((node) => {
@@ -18,16 +18,21 @@ export function ScrollGlassHeader({
   children: ReactNode;
   className?: string;
   foregroundClassName?: string;
-  /** Remount/rebuild mirror when page content identity changes (e.g. settings tab). */
+  /** Identifies the foreground content without tearing down the live mirror. */
   contentKey?: string | number;
 }) {
   const mirrorRef = useRef<HTMLDivElement>(null);
+  const [initRetry, setInitRetry] = useState(0);
 
   useLayoutEffect(() => {
     const scroller = scrollerRef.current;
     const mirror = mirrorRef.current;
     const source = scroller?.querySelector<HTMLElement>(".scroll-content");
-    if (!scroller || !mirror || !source) return;
+    if (!scroller || !mirror || !source) {
+      if (initRetry >= 4) return;
+      const retryFrame = requestAnimationFrame(() => setInitRetry((value) => value + 1));
+      return () => cancelAnimationFrame(retryFrame);
+    }
 
     let clone: HTMLElement | null = null;
     let syncFrame = 0;
@@ -61,18 +66,30 @@ export function ScrollGlassHeader({
     };
     const rebuild = () => {
       rebuildTimer = 0;
-      clone = source.cloneNode(true) as HTMLElement;
-      clone.classList.add("scroll-header-mirror-content");
-      clone.setAttribute("aria-hidden", "true");
-      clone.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
-      sanitizeMirrorClone(clone);
-      mirror.replaceChildren(clone);
+      const previousClone = clone;
+      const nextClone = source.cloneNode(true) as HTMLElement;
+      clone = nextClone;
+      nextClone.classList.add("scroll-header-mirror-content");
+      nextClone.setAttribute("aria-hidden", "true");
+      nextClone.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
+      sanitizeMirrorClone(nextClone);
+      mirror.append(nextClone);
       syncAnimatedStyles();
       sync();
+      if (previousClone) {
+        nextClone.style.opacity = "0";
+        requestAnimationFrame(() => {
+          nextClone.style.opacity = "0.8";
+          previousClone.style.opacity = "0";
+        });
+        window.setTimeout(() => previousClone.remove(), 200);
+      }
     };
     const scheduleRebuild = () => {
       if (rebuildTimer) return;
-      rebuildTimer = window.setTimeout(rebuild, 0);
+      // AnimatePresence can briefly remove the old page before mounting the next
+      // one. Keep the last mirror during that gap instead of flashing a sharp frame.
+      rebuildTimer = window.setTimeout(rebuild, 24);
       if (settleTimer) window.clearTimeout(settleTimer);
       // Catch content after tab / page enter animations finish.
       settleTimer = window.setTimeout(rebuild, 220);
@@ -101,10 +118,10 @@ export function ScrollGlassHeader({
       if (rebuildTimer) window.clearTimeout(rebuildTimer);
       if (settleTimer) window.clearTimeout(settleTimer);
     };
-  }, [scrollerRef, contentKey]);
+  }, [initRetry, scrollerRef]);
 
   return (
-    <div className={`scroll-header ${className}`}>
+    <div className={`scroll-header ${className}`} data-content-key={contentKey}>
       <div ref={mirrorRef} className="scroll-header-mirror" aria-hidden="true" />
       <div className="scroll-header-glass-tint" aria-hidden="true" />
       <div className={`scroll-header-foreground ${foregroundClassName}`}>{children}</div>

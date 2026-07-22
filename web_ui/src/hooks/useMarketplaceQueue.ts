@@ -194,7 +194,7 @@ function ensureWired() {
     const overall = active?.bytesTotal
       ? Math.max(0, Math.min(1, (active.bytesDone || 0) / active.bytesTotal))
       : active
-        ? Math.max(0.02, Number(active.progress || 0.02))
+        ? Math.max(0, Number(active.progress || 0))
         : items.some(isWorking)
           ? 0.02
           : 0;

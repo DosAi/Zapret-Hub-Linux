@@ -550,7 +550,7 @@ export function SettingsModal({
       {embedded ? (
         <>
           <div className="relative min-h-0 flex-1 overflow-hidden">
-            <div ref={scrollerRef} className="settings-scroll scroll-area h-full overflow-y-auto">
+            <div ref={scrollerRef} className="settings-scroll scroll-area glass-page-scroll h-full overflow-y-auto" style={{ "--glass-header-height": "78px" } as React.CSSProperties}>
               <div className="scroll-content px-4 pb-3 pt-[78px]">
                 {settingsBody}
               </div>

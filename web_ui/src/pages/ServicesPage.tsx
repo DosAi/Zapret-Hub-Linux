@@ -48,7 +48,7 @@ export function ServicesPage() {
 
   return (
     <div className="relative h-full overflow-hidden">
-      <div ref={scrollerRef} className="scroll-area h-full overflow-auto">
+      <div ref={scrollerRef} className="scroll-area glass-page-scroll h-full overflow-auto">
       <div className="scroll-content px-7 pb-7 pt-[86px]">
         {isAuto && (
           <div className="mb-4 rounded-[14px] border border-line-1 bg-bg-1 px-4 py-3">

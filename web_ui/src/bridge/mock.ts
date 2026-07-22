@@ -286,9 +286,9 @@ export function createMockBridge(): ZapretHubBridge {
     const overall = active?.bytesTotal
       ? Math.max(0, Math.min(1, active.bytesDone / active.bytesTotal))
       : active
-        ? Math.max(0.02, active.progress)
+        ? Math.max(0, active.progress)
         : mockDlQueue.length
-          ? 0.02
+          ? 0
           : 0;
     return {
       busy: mockDlBusy,

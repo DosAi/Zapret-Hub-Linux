@@ -264,16 +264,45 @@ textarea {
   }
 
   .scroll-area {
+    --scrollbar-top: 4px;
+    --scrollbar-bottom: 4px;
     overscroll-behavior: contain;
-    scroll-behavior: smooth;
+    scroll-behavior: auto;
     scrollbar-gutter: auto;
     overflow-y: overlay;
+  }
+
+  .scroll-area::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+
+  .scroll-area::-webkit-scrollbar-track {
+    margin-block: var(--scrollbar-top) var(--scrollbar-bottom);
+    background: transparent;
+  }
+
+  .scroll-area::-webkit-scrollbar-thumb {
+    min-height: 28px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--fg-mute) 42%, transparent);
+    background-clip: padding-box;
+  }
+
+  .scroll-area::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--fg-dim) 62%, transparent);
+    background-clip: padding-box;
+  }
+
+  .glass-page-scroll {
+    --scrollbar-top: var(--glass-header-height, 86px);
   }
 
   .scroll-header {
     overflow: hidden;
     /* Hide the sharp source before painting the mirrored, blurred copy. */
-    background-color: var(--bg-1);
+    background-color: color-mix(in srgb, var(--bg-1) 82%, transparent);
     backdrop-filter: blur(36px) saturate(1.42);
     -webkit-backdrop-filter: blur(36px) saturate(1.42);
     box-shadow: 0 12px 26px color-mix(in srgb, var(--bg-1) 10%, transparent);
@@ -284,6 +313,7 @@ textarea {
     inset: 0;
     overflow: hidden;
     pointer-events: none;
+    z-index: 0;
   }
 
   .scroll-header-mirror-content {
@@ -292,7 +322,8 @@ textarea {
     filter: blur(6px) saturate(1.16);
     opacity: 0.8;
     pointer-events: none;
-    will-change: transform;
+    transition: opacity 180ms ease;
+    will-change: transform, opacity;
   }
 
   .scroll-header-mirror-content *,
@@ -308,11 +339,12 @@ textarea {
     inset: 0;
     background: color-mix(in srgb, var(--bg-1) 18%, transparent);
     pointer-events: none;
+    z-index: 1;
   }
 
   .scroll-header-foreground {
     position: relative;
-    z-index: 1;
+    z-index: 2;
     width: 100%;
   }
 

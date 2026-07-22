@@ -483,6 +483,8 @@ class MarketplaceService:
             updated_ts = int(updated) if updated is not None else 0
         except Exception:
             updated_ts = 0
+        latest = item.get("latest_version") if isinstance(item.get("latest_version"), dict) else {}
+        latest_size = item.get("latest_version_size") or item.get("latestVersionSize") or item.get("latest_size") or latest.get("size") or 0
         return {
             "id": int(item.get("id") or 0),
             "slug": str(item.get("slug") or ""),
@@ -504,6 +506,7 @@ class MarketplaceService:
             "comments": int(item.get("comments") or 0) if not isinstance(item.get("comments"), list) else len(item.get("comments") or []),
             "featured": bool(item.get("featured")),
             "updatedAt": updated_ts,
+            "latestVersionSize": int(latest_size or 0),
             "publishedAt": int(item.get("published_at") or 0) if str(item.get("published_at") or "").isdigit() or isinstance(item.get("published_at"), int) else 0,
         }
 
@@ -512,7 +515,7 @@ class MarketplaceService:
             "id": int(item.get("id") or 0),
             "version": str(item.get("version") or ""),
             "changelog": str(item.get("changelog") or ""),
-            "size": int(item.get("size") or 0),
+            "size": int(item.get("size") or item.get("file_size") or 0),
             "sha256": str(item.get("sha256") or ""),
             "downloads": int(item.get("downloads") or 0),
             "publishedAt": item.get("published_at"),
