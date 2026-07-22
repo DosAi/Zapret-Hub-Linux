@@ -349,21 +349,28 @@ class OrchestratorEngine:
                 self.context.settings.update(**changes)
                 if runtime == "zapret2":
                     try:
-                        if not any(
+                        if any(
                             getattr(s, "component_id", "") == "zapret2" and getattr(s, "status", "") == "running"
                             for s in self.context.processes.list_states()
                         ):
-                            self.context.processes.start_component("zapret2")
+                            self.context.processes.stop_component("zapret2")
+                        self.context.processes.start_component("zapret2")
                     except Exception as error:
-                        self._log("warning", "Resume zapret2 start failed", error=str(error))
+                        self._log("warning", "Resume zapret2 restart failed", error=str(error))
                 else:
                     try:
                         self.context.merge.rebuild()
                         self.context.files._invalidate_collection_cache()
                         self.context.files.rebuild_materialized_collections()
                         self.context.processes.rebuild_zapret_runtime_snapshot()
+                        if any(
+                            getattr(s, "component_id", "") == "zapret" and getattr(s, "status", "") == "running"
+                            for s in self.context.processes.list_states()
+                        ):
+                            self.context.processes.stop_component("zapret")
+                        self.context.processes.start_component("zapret")
                     except Exception as error:
-                        self._log("warning", "Resume merge failed", error=str(error))
+                        self._log("warning", "Resume zapret rebuild/restart failed", error=str(error))
                 cutover.snapshot()
                 self._zapret_active = True
                 self.set_status("ok")

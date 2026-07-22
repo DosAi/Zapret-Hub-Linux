@@ -2764,8 +2764,6 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if isinstance(item, dict)
         }
         installed_raw = self.storage.read_json(self.storage.paths.data_dir / "installed_mods.json", default=[]) or []
-        custom: list[dict[str, Any]] = []
-        marketplace: list[dict[str, Any]] = []
         for raw in installed_raw:
             if raw.get("source_type") != "zapret_bundle":
                 continue
@@ -2778,16 +2776,12 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if mod_id == "unified-by-goshkow":
                 continue
             title = str(raw.get("name") or "").strip() or index_map.get(mod_id) or mod_id
-            entry = {
+            bundles.append({
                 "id": mod_id,
                 "title": title,
                 "path": path,
                 "marketplace": bool(str(raw.get("marketplace_slug") or "").strip()),
-            }
-            (marketplace if entry["marketplace"] else custom).append(entry)
-        # Custom first (higher among mods), marketplace last (below vanilla for bat/bin).
-        bundles.extend(custom)
-        bundles.extend(marketplace)
+            })
         if include_hidden_generals and unified_root.exists():
             bundles.insert(0, {"id": "unified-general", "title": "Hub", "path": unified_root, "marketplace": False})
         if base.exists():
@@ -3063,19 +3057,11 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         for bundle in layered_bundles:
             bundle_id = bundle["id"]
             bundle_root = Path(bundle["path"])
-            is_marketplace = bool(bundle.get("marketplace"))
-            include_bin_overlay = (
-                not is_marketplace
-                and not bin_overlay_applied
-                and self._bundle_has_bin_overlay(bundle_root)
-            )
+            include_bin_overlay = not bin_overlay_applied and self._bundle_has_bin_overlay(bundle_root)
             if bundle_id != "base":
-                # Marketplace mods only merge lists — never overwrite vanilla bat/bin.
-                if is_marketplace:
-                    pass
-                else:
-                    self._overlay_zapret_bundle_runtime(active_root, bundle_root, include_bin_overlay=include_bin_overlay)
-                    bin_overlay_applied = bin_overlay_applied or include_bin_overlay
+                # Match 2.1.2: every enabled bundle is a complete runtime layer.
+                self._overlay_zapret_bundle_runtime(active_root, bundle_root, include_bin_overlay=include_bin_overlay)
+                bin_overlay_applied = bin_overlay_applied or include_bin_overlay
             lists_source = bundle_root / "lists"
             if not lists_source.exists():
                 continue
