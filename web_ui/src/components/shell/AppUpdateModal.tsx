@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useState } from "react";
 import { useLocale } from "@/hooks/useLocale";
 import { useBridge } from "@/hooks/useBridgeState";
+import { MarkdownContent } from "@/components/ui/MarkdownContent";
 
 export type AppUpdatePrompt = {
   currentVersion: string;
@@ -80,9 +81,9 @@ export function AppUpdateModal({
                   ? `Вышла новая версия Zapret Hub.\nТекущая: ${prompt.currentVersion} · Новая: ${prompt.latestVersion}`
                   : `A new Zapret Hub version is available.\nCurrent: ${prompt.currentVersion} · New: ${prompt.latestVersion}`}
               </p>
-              <div className="max-h-[180px] overflow-y-auto rounded-[12px] border border-line-1 bg-bg-1 p-3 text-[11px] leading-relaxed text-fg whitespace-pre-wrap">
+              <MarkdownContent className="max-h-[180px] overflow-y-auto rounded-[12px] border border-line-1 bg-bg-1 p-3 text-[11px] leading-relaxed text-fg-dim">
                 {prompt.changelog || (ru ? "Список изменений недоступен." : "Changelog is unavailable.")}
-              </div>
+              </MarkdownContent>
               {prompt.demo && (
                 <div className="rounded-[10px] border border-line-1 bg-bg-3/60 px-3 py-2 text-[10px] text-fg-mute">
                   {ru ? "Тестовый показ интерфейса обновления (один раз)." : "One-time demo of the update UI."}

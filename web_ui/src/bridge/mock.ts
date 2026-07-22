@@ -337,9 +337,6 @@ export function createMockBridge(): ZapretHubBridge {
           next.progress = 1;
           mockDlQueue = mockDlQueue.filter((j) => j.jobId !== next.jobId);
           mockDlBusy = false;
-          emit("marketplace.download-progress", { ...next, pending: mockDlQueue.map((j) => j.slug) });
-          emit("toast.show", { id: `mp-${next.slug}`, message: `Модификация «${next.title}» установлена.`, kind: "success" });
-          emitQueue();
           const project = mockMarketplace.find((item) => item.slug === next.slug);
           if (project) {
             const mod: Mod = {
@@ -364,6 +361,14 @@ export function createMockBridge(): ZapretHubBridge {
             }
             pushState();
           }
+          emit("marketplace.download-progress", {
+            ...next,
+            pending: mockDlQueue.map((j) => j.slug),
+            mods: structuredClone(state.mods),
+            mods2: structuredClone(state.mods2 || []),
+          });
+          emit("toast.show", { id: `mp-${next.slug}`, message: `Модификация «${next.title}» установлена.`, kind: "success" });
+          emitQueue();
           pumpMockDownloads();
         }, 350);
         return;
@@ -423,6 +428,8 @@ export function createMockBridge(): ZapretHubBridge {
     switch (cmd) {
       case "state.get":
         return structuredClone(state) as Commands[K]["out"];
+      case "marketplace.installed":
+        return { mods: structuredClone(state.mods), mods2: structuredClone(state.mods2 || []) } as Commands[K]["out"];
       case "window.minimize":
       case "window.close":
         console.log("[mock bridge]", cmd);

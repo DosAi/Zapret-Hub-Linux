@@ -477,6 +477,26 @@ export async function refreshAppState(): Promise<AppState | null> {
   return next;
 }
 
+export function applyMarketplaceMods(mods: AppState["mods"], mods2: AppState["mods2"]) {
+  if (!baseState) return;
+  setBaseState({ ...baseState, mods, mods2 }, true);
+}
+
+export async function refreshMarketplaceMods(slug = "", timeoutMs = 60_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const next = await getBridge().call("marketplace.installed", undefined);
+    const mods = next?.mods || [];
+    const mods2 = next?.mods2 || [];
+    if (!slug || [...mods, ...mods2].some((mod) => mod.marketplaceSlug === slug)) {
+      applyMarketplaceMods(mods, mods2);
+      return true;
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 300));
+  }
+  return false;
+}
+
 export function useBridge() {
   return getBridge();
 }

@@ -20,20 +20,24 @@ type InstalledView = "zapret" | "zapret2";
 
 function ProjectCover({ url, title }: { url?: string; title: string }) {
   const [failed, setFailed] = useState(false);
-  if (!url || failed) {
-    return (
-      <div className="grid h-14 w-14 shrink-0 place-items-center rounded-xl bg-bg-3 text-[13px] font-semibold text-fg-mute">
-        {(title.trim()[0] || "?").toUpperCase()}
-      </div>
-    );
-  }
   return (
-    <img
-      src={url}
-      alt=""
-      className="h-14 w-14 shrink-0 rounded-xl object-cover"
-      onError={() => setFailed(true)}
-    />
+    <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-[12px] border border-line-1 bg-bg-2">
+      {url && !failed ? (
+        <img
+          src={url}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
+          className="absolute inset-0 h-full w-full object-cover object-center"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <div className="grid h-full w-full place-items-center text-[15px] font-semibold text-fg-mute">
+          {(title.trim()[0] || "?").toUpperCase()}
+        </div>
+      )}
+    </div>
   );
 }
 

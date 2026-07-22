@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { refreshAppState, useAppState, useBridge } from "@/hooks/useBridgeState";
 import { useLocale } from "@/hooks/useLocale";
 import { useMarketplaceQueue } from "@/hooks/useMarketplaceQueue";
+import { MarkdownContent } from "@/components/ui/MarkdownContent";
 import type {
   MarketplaceCard,
   MarketplaceCompatibility,
@@ -535,7 +536,7 @@ function DetailView({
                         <span className="text-[12px] font-medium text-fg">v{v.version}</span>
                         <span className="text-[10px] text-fg-mute">{v.downloads} dl</span>
                       </div>
-                      {v.changelog ? <p className="mt-1 text-[11px] text-fg-dim">{v.changelog}</p> : null}
+                      {v.changelog ? <MarkdownContent className="mt-1 text-[11px] text-fg-dim">{v.changelog}</MarkdownContent> : null}
                     </li>
                   ))}
                 </ul>
@@ -872,12 +873,25 @@ export function MarketplacePage({
                     {ru ? "Каталог модификаций для Zapret и Zapret 2" : "Mods catalog for Zapret and Zapret 2"}
                   </p>
                 </div>
-                <input
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  placeholder={ru ? "Поиск…" : "Search…"}
-                  className="h-8 w-48 rounded-lg border border-line-1 bg-bg-1 px-2.5 text-[11px] text-fg outline-none placeholder:text-fg-mute focus:border-line-2"
-                />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void bridge.call("marketplace.open-url", { url: "https://goshkow.ru/zapret-hub/marketplace" })}
+                    className="flex h-8 items-center gap-1.5 rounded-lg border border-line-1 bg-bg-1 px-2.5 text-[11px] text-fg-dim transition-colors hover:border-line-2 hover:bg-bg-3 hover:text-fg"
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M6 3H3.8A1.8 1.8 0 0 0 2 4.8v7.4A1.8 1.8 0 0 0 3.8 14h7.4a1.8 1.8 0 0 0 1.8-1.8V10" />
+                      <path d="M9 2h5v5M14 2 7.2 8.8" />
+                    </svg>
+                    {ru ? "Открыть сайт" : "Open website"}
+                  </button>
+                  <input
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    placeholder={ru ? "Поиск…" : "Search…"}
+                    className="h-8 w-48 rounded-lg border border-line-1 bg-bg-1 px-2.5 text-[11px] text-fg outline-none placeholder:text-fg-mute focus:border-line-2"
+                  />
+                </div>
               </div>
               <div className="relative z-20 mt-3 flex flex-nowrap items-center gap-2">
                 <FilterSelect

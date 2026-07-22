@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { useLocale } from "@/hooks/useLocale";
+import { MarkdownContent } from "@/components/ui/MarkdownContent";
 import { useBridge } from "@/hooks/useBridgeState";
 
 export type ModUpdateItem = {
@@ -173,7 +174,7 @@ export function ModUpdatesModal({
                     v{item.currentVersion || "?"} → v{item.latestVersion}
                   </div>
                   {item.summary ? <div className="mt-1 line-clamp-2 text-[11px] text-fg-mute">{item.summary}</div> : null}
-                  {item.changelog ? <div className="mt-1 line-clamp-3 text-[10px] text-fg-mute">{item.changelog}</div> : null}
+                  {item.changelog ? <MarkdownContent className="mt-1 line-clamp-3 text-[10px] text-fg-mute">{item.changelog}</MarkdownContent> : null}
                 </div>
                 <button
                   type="button"

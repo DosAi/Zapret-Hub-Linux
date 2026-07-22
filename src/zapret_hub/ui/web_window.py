@@ -299,6 +299,7 @@ class WebBridge(QObject):
         "logs.get",
     })
     _ASYNC_RESULT_COMMANDS = frozenset({
+        "marketplace.installed",
         "marketplace.list",
         "marketplace.get",
         "marketplace.check-updates",
@@ -386,13 +387,20 @@ class WebBridge(QObject):
             return
 
         def _on_event(name: str, payload: dict[str, Any]) -> None:
+            status = str(payload.get("status") or "") if name == "marketplace.download-progress" else ""
+            if status == "done":
+                try:
+                    installed = self._build_marketplace_mods_payload()
+                    payload = {**payload, **installed}
+                    self._schedule_on_gui(lambda value=installed: self._merge_marketplace_mods_cache(value))
+                except Exception:
+                    pass
             try:
                 encoded = json.dumps(payload, ensure_ascii=False)
             except Exception:
                 return
             self._schedule_on_gui(lambda n=name, e=encoded: self.event.emit(n, e))
             if name == "marketplace.download-progress":
-                status = str(payload.get("status") or "")
                 slug = str(payload.get("slug") or "")
                 if status == "done":
                     self._schedule_on_gui(
@@ -402,7 +410,6 @@ class WebBridge(QObject):
                             toast_id=f"mp-dl-{slug}",
                         )
                     )
-                    self._schedule_on_gui(lambda: self.emit_state(force=True))
                 elif status == "error":
                     msg = str(payload.get("message") or "error")
                     self._schedule_on_gui(
@@ -414,6 +421,16 @@ class WebBridge(QObject):
                     )
 
         market.on_event = _on_event
+
+    def _merge_marketplace_mods_cache(self, payload: dict[str, Any]) -> None:
+        cached = getattr(self, "_last_state_payload", None)
+        if not isinstance(cached, dict) or not cached:
+            return
+        self._last_state_payload = {
+            **cached,
+            "mods": list(payload.get("mods") or []),
+            "mods2": list(payload.get("mods2") or []),
+        }
 
     def _emit_toast(self, message: str, *, kind: str = "info", toast_id: str = "") -> None:
         payload = {
@@ -869,6 +886,8 @@ class WebBridge(QObject):
             if isinstance(cached, dict) and cached:
                 return cached
             return self.build_state()
+        if command == "marketplace.installed":
+            return self._build_marketplace_mods_payload()
         if command == "window.minimize":
             minimize = getattr(self.window, "fade_minimize", None)
             minimize() if callable(minimize) else self.window.showMinimized()
@@ -2517,6 +2536,63 @@ class WebBridge(QObject):
             return stored
         return stored
 
+    def _build_marketplace_mods_payload(self) -> dict[str, list[dict[str, Any]]]:
+        """Build only installed-mod data for a lightweight Marketplace refresh."""
+        settings = self.context.settings.get()
+        try:
+            update_by_slug = {
+                str(item.get("slug") or ""): item
+                for item in (self.context.marketplace.updates_status().get("updates") or [])
+                if isinstance(item, dict) and item.get("slug")
+            }
+        except Exception:
+            update_by_slug = {}
+
+        def _common(item: Any, compatibility: str) -> dict[str, Any]:
+            slug = str(getattr(item, "marketplace_slug", "") or "")
+            update = update_by_slug.get(slug) or {}
+            return {
+                "id": item.id,
+                "name": item.name or item.id,
+                "author": item.author,
+                "description": item.description,
+                "createdAt": int(time.time() * 1000),
+                "iconUrl": self._mod_cover_url(item),
+                "marketplaceSlug": slug,
+                "sourceUrl": str(getattr(item, "source_url", "") or ""),
+                "version": item.version,
+                "compatibility": compatibility,
+                "updateAvailable": bool(update),
+                "latestVersion": str(update.get("latestVersion") or ""),
+                "updateChangelog": str(update.get("changelog") or ""),
+            }
+
+        mods = []
+        for item in self.context.mods.list_installed():
+            entry = _common(item, "zapret")
+            entry.update(
+                {
+                    "enabled": bool(item.enabled or item.id in (settings.enabled_mod_ids or [])),
+                    "compatibleFiles": ["general"],
+                    "source": "github" if item.source_url else "folder",
+                }
+            )
+            mods.append(entry)
+
+        mods2 = []
+        for item in self.context.mods2.list_installed():
+            entry = _common(item, "zapret2")
+            entry.update(
+                {
+                    "enabled": bool(item.enabled or item.id in (getattr(settings, "enabled_zapret2_mod_ids", None) or [])),
+                    "compatibleFiles": ["domains", "ip-lists", "advanced"],
+                    "source": "folder",
+                    "runtime": "zapret2",
+                }
+            )
+            mods2.append(entry)
+        return {"mods": mods, "mods2": mods2}
+
     def build_state(self) -> dict[str, Any]:
         settings = self.context.settings.get()
         vpn_state = self.context.vpn.state()
@@ -2590,58 +2666,9 @@ class WebBridge(QObject):
             runtime_status = str(components.get(runtime_id, {}).get("status", "off"))
         if self._runtime_transition_status is not None:
             runtime_status = self._runtime_transition_status
-        update_by_slug = {}
-        try:
-            update_by_slug = {
-                str(item.get("slug") or ""): item
-                for item in (self.context.marketplace.updates_status().get("updates") or [])
-                if isinstance(item, dict) and item.get("slug")
-            }
-        except Exception:
-            update_by_slug = {}
-        mods = [
-            {
-                "id": item.id,
-                "name": item.name or item.id,
-                "author": item.author,
-                "description": item.description,
-                "enabled": bool(item.enabled or item.id in (settings.enabled_mod_ids or [])),
-                "compatibleFiles": ["general"],
-                "source": "github" if item.source_url else "folder",
-                "createdAt": int(time.time() * 1000),
-                "iconUrl": self._mod_cover_url(item),
-                "marketplaceSlug": str(getattr(item, "marketplace_slug", "") or ""),
-                "sourceUrl": str(getattr(item, "source_url", "") or ""),
-                "version": item.version,
-                "compatibility": "zapret",
-                "updateAvailable": bool(update_by_slug.get(str(getattr(item, "marketplace_slug", "") or ""))),
-                "latestVersion": str((update_by_slug.get(str(getattr(item, "marketplace_slug", "") or "")) or {}).get("latestVersion") or ""),
-                "updateChangelog": str((update_by_slug.get(str(getattr(item, "marketplace_slug", "") or "")) or {}).get("changelog") or ""),
-            }
-            for item in self.context.mods.list_installed()
-        ]
-        mods2 = [
-            {
-                "id": item.id,
-                "name": item.name or item.id,
-                "author": item.author,
-                "description": item.description,
-                "enabled": bool(item.enabled or item.id in (getattr(settings, "enabled_zapret2_mod_ids", None) or [])),
-                "compatibleFiles": ["domains", "ip-lists", "advanced"],
-                "source": "folder",
-                "createdAt": int(time.time() * 1000),
-                "runtime": "zapret2",
-                "iconUrl": self._mod_cover_url(item),
-                "marketplaceSlug": str(getattr(item, "marketplace_slug", "") or ""),
-                "sourceUrl": str(getattr(item, "source_url", "") or ""),
-                "version": item.version,
-                "compatibility": "zapret2",
-                "updateAvailable": bool(update_by_slug.get(str(getattr(item, "marketplace_slug", "") or ""))),
-                "latestVersion": str((update_by_slug.get(str(getattr(item, "marketplace_slug", "") or "")) or {}).get("latestVersion") or ""),
-                "updateChangelog": str((update_by_slug.get(str(getattr(item, "marketplace_slug", "") or "")) or {}).get("changelog") or ""),
-            }
-            for item in self.context.mods2.list_installed()
-        ]
+        marketplace_mods = self._build_marketplace_mods_payload()
+        mods = marketplace_mods["mods"]
+        mods2 = marketplace_mods["mods2"]
         notifications = [
             {
                 "id": item.id,
