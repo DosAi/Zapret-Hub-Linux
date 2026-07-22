@@ -555,18 +555,19 @@ def remove_uninstall_registry() -> None:
 def launch_folder_removal(install_dir: Path) -> None:
     script_path = Path(tempfile.gettempdir()) / f"zapret_hub_uninstall_{int(time.time() * 1000)}.ps1"
     target = str(install_dir).replace("'", "''")
-    script = (
-        "$target = '{target}'\n"
-        "for ($i = 0; $i -lt 40; $i++) {\n"
-        "  try {\n"
-        "    if (-not (Test-Path -LiteralPath $target)) { break }\n"
-        "    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop\n"
-        "    if (-not (Test-Path -LiteralPath $target)) { break }\n"
-        "  } catch {}\n"
-        "  Start-Sleep -Milliseconds 800\n"
-        "}\n"
-        "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
-    ).format(target=target)
+    # Use an f-string (with doubled braces) — never str.format on PowerShell,
+    # or literal `{` / `}` in try/catch blocks raise: unexpected '{' in field name.
+    script = f"""$target = '{target}'
+for ($i = 0; $i -lt 40; $i++) {{
+  try {{
+    if (-not (Test-Path -LiteralPath $target)) {{ break }}
+    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+    if (-not (Test-Path -LiteralPath $target)) {{ break }}
+  }} catch {{}}
+  Start-Sleep -Milliseconds 800
+}}
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+"""
     script_path.write_text(script, encoding="utf-8")
     startup = None
     flags = 0
