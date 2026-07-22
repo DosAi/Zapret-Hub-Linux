@@ -66,24 +66,17 @@ export function ScrollGlassHeader({
     };
     const rebuild = () => {
       rebuildTimer = 0;
-      const previousClone = clone;
       const nextClone = source.cloneNode(true) as HTMLElement;
       clone = nextClone;
       nextClone.classList.add("scroll-header-mirror-content");
       nextClone.setAttribute("aria-hidden", "true");
       nextClone.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
       sanitizeMirrorClone(nextClone);
-      mirror.append(nextClone);
+      // Keep exactly one blurred snapshot. Cross-fading snapshots leaves two
+      // differently positioned copies visible while Marketplace cards update.
+      mirror.replaceChildren(nextClone);
       syncAnimatedStyles();
       sync();
-      if (previousClone) {
-        nextClone.style.opacity = "0";
-        requestAnimationFrame(() => {
-          nextClone.style.opacity = "0.8";
-          previousClone.style.opacity = "0";
-        });
-        window.setTimeout(() => previousClone.remove(), 200);
-      }
     };
     const scheduleRebuild = () => {
       if (rebuildTimer) return;
