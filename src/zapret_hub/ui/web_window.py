@@ -350,7 +350,9 @@ class WebBridge(QObject):
         self._pending_app_release: dict[str, str] | None = None
         self._app_update_busy = False
         self._app_update_check_started = False
+        self._app_update_check_busy = False
         self._marketplace_update_check_started = False
+        self._marketplace_update_check_busy = False
         # Only the owner of this token may clear _runtime_transition_status.
         self._transition_token = 0
         # Thread-safe state push: workers must not call QTimer directly.
@@ -513,8 +515,12 @@ class WebBridge(QObject):
         market = getattr(self.context, "marketplace", None)
         if market is None:
             return
+        if self._marketplace_update_check_busy:
+            return
+        self._marketplace_update_check_busy = True
 
         def worker() -> None:
+            result: dict[str, Any] = {"ok": False, "updates": [], "notify": []}
             try:
                 lang = str(self.context.settings.get().language or "ru")
                 result = market.check_updates(lang=lang if lang in {"ru", "en"} else "ru")
@@ -523,7 +529,8 @@ class WebBridge(QObject):
                     self.context.logging.log("error", "Marketplace update check failed", error=str(error))
                 except Exception:
                     pass
-                return
+            finally:
+                self._marketplace_update_check_busy = False
             self._schedule_on_gui(lambda: self._on_marketplace_update_check_done(result, show_modal=show_modal))
 
         threading.Thread(target=worker, daemon=True, name="zapret-hub-marketplace-updates").start()
@@ -545,8 +552,41 @@ class WebBridge(QObject):
     def _start_app_update_check(self, *, manual: bool) -> None:
         if self.context is None:
             return
+        if self._app_update_check_busy:
+            if manual:
+                self._emit_toast(
+                    "Проверка обновлений уже выполняется…" if self._ru() else "Update check is already running…",
+                    kind="info",
+                    toast_id="app-update-check",
+                )
+            return
+        self._app_update_check_busy = True
+        if manual:
+            try:
+                self.event.emit(
+                    "app.update-progress",
+                    json.dumps(
+                        {
+                            "phase": "check",
+                            "percent": 1,
+                            "downloadedBytes": 0,
+                            "totalBytes": 0,
+                            "messageRu": "Проверяем обновления…",
+                            "messageEn": "Checking for updates…",
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            except Exception:
+                pass
 
         def worker() -> None:
+            release: dict[str, Any] = {
+                "status": "error",
+                "current_version": "",
+                "latest_version": "",
+                "error": "Не удалось проверить обновления." if self._ru() else "Failed to check for updates.",
+            }
             try:
                 release = self.context.updates.fetch_latest_application_release(force_refresh=manual)
             except Exception as error:
@@ -554,15 +594,12 @@ class WebBridge(QObject):
                     self.context.logging.log("error", "App update check failed", error=str(error))
                 except Exception:
                     pass
-                if manual:
-                    self._schedule_on_gui(
-                        lambda: self._emit_toast(
-                            "Не удалось проверить обновления." if self._ru() else "Failed to check for updates.",
-                            kind="error",
-                            toast_id="app-update-check",
-                        )
-                    )
-                return
+                try:
+                    release["error"] = self.context.updates._friendly_mirror_error(error)
+                except Exception:
+                    release["error"] = str(error) or release["error"]
+            finally:
+                self._app_update_check_busy = False
             self._schedule_on_gui(lambda: self._on_app_update_check_done(release, manual=manual))
 
         threading.Thread(target=worker, daemon=True, name="zapret-hub-app-update-check").start()

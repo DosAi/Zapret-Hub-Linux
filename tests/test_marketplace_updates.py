@@ -337,8 +337,46 @@ def test_ticket_http_error_uses_verified_public_download(monkeypatch, tmp_path: 
     assert ticket["filename"] == "shizapret_mod-2.1.0.zip"
 
 
+def test_download_active_uses_fallback_url_from_error(monkeypatch, tmp_path: Path) -> None:
+    class Paths:
+        data_dir = tmp_path / "data"
+        cache_dir = tmp_path / "cache"
+
+    class Logging:
+        def log(self, *_args, **_kwargs) -> None:
+            return None
+
+    service = MarketplaceService(storage_paths=Paths(), logging=Logging())
+
+    def reject_active(*_args, **_kwargs):
+        raise MarketplaceError(
+            "download_active",
+            "busy",
+            details={"fallback_url": "/zapret-hub/marketplace/download/4"},
+        )
+
+    monkeypatch.setattr(service, "_request_json", reject_active)
+    monkeypatch.setattr(
+        service,
+        "fetch_latest",
+        lambda *_args, **_kwargs: {
+            "version": "2.1.0",
+            "versionId": 4,
+            "size": 123,
+            "sha256": "abc123",
+        },
+    )
+
+    ticket = service._create_ticket("shizapret_mod", version_id=4)
+    assert ticket["direct_url"].endswith("/zapret-hub/marketplace/download/4")
+    assert ticket["ticket"] == ""
+
+
 def test_download_tries_absolute_fallback_after_marketplace_error(monkeypatch, tmp_path: Path) -> None:
     service = MarketplaceService.__new__(MarketplaceService)
+    service.DOWNLOAD_ATTEMPTS = 2
+    service.DOWNLOAD_WALL_SEC = 30.0
+    service.DOWNLOAD_STALL_SEC = 5.0
     calls: list[tuple[str, int]] = []
 
     def stream(url: str, _target: Path, *, resume_from: int, job=None) -> None:
@@ -351,16 +389,155 @@ def test_download_tries_absolute_fallback_after_marketplace_error(monkeypatch, t
     monkeypatch.setattr(service, "_log", lambda *_args, **_kwargs: None)
 
     service._download_file(
-        "https://download.goshkow.com/file.zip",
-        "/zapret-hub/marketplace/download/4",
+        [
+            "https://download.goshkow.com/file.zip",
+            "/zapret-hub/marketplace/download/4",
+        ],
         tmp_path / "mod.zip",
         expected_size=0,
     )
 
-    assert calls == [
-        ("https://download.goshkow.com/file.zip", 0),
-        ("https://goshkow.com/zapret-hub/marketplace/download/4", 0),
-    ]
+    assert calls[0] == ("https://download.goshkow.com/file.zip", 0)
+    assert calls[1][0] == "https://goshkow.com/zapret-hub/marketplace/download/4"
+
+
+def test_download_resumes_partial_with_range(monkeypatch, tmp_path: Path) -> None:
+    service = MarketplaceService.__new__(MarketplaceService)
+    service.DOWNLOAD_ATTEMPTS = 3
+    service.DOWNLOAD_WALL_SEC = 30.0
+    service.DOWNLOAD_STALL_SEC = 5.0
+    target = tmp_path / "mod.partial.zip"
+    target.write_bytes(b"hello")
+    calls: list[int] = []
+
+    def stream(url: str, path: Path, *, resume_from: int, job=None) -> None:
+        del url, job
+        calls.append(resume_from)
+        if resume_from == 5:
+            with path.open("ab") as handle:
+                handle.write(b" world")
+            return
+        raise MarketplaceError("timeout", "stall")
+
+    monkeypatch.setattr(service, "_stream_to_file", stream)
+    monkeypatch.setattr(service, "_log", lambda *_args, **_kwargs: None)
+
+    service._download_file(
+        ["https://download.goshkow.com/file.zip"],
+        target,
+        expected_size=11,
+    )
+
+    assert calls == [5]
+    assert target.read_bytes() == b"hello world"
+
+
+def test_complete_ticket_failure_does_not_break_install(monkeypatch, tmp_path: Path) -> None:
+    archive_buffer = BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w") as archive:
+        archive.writestr("general-test.bat", "@echo off\n")
+    payload = archive_buffer.getvalue()
+
+    class Response:
+        status = 200
+        headers = {"Content-Length": str(len(payload))}
+
+        def __init__(self) -> None:
+            self._offset = 0
+
+        def getcode(self) -> int:
+            return self.status
+
+        def read(self, size: int = -1) -> bytes:
+            if self._offset >= len(payload):
+                return b""
+            end = len(payload) if size < 0 else min(len(payload), self._offset + size)
+            chunk = payload[self._offset:end]
+            self._offset = end
+            return chunk
+
+        def close(self) -> None:
+            return None
+
+    class Paths:
+        data_dir = tmp_path / "data"
+        cache_dir = tmp_path / "cache"
+
+    class Logging:
+        def log(self, *_args, **_kwargs) -> None:
+            return None
+
+    class Mods:
+        def __init__(self) -> None:
+            self.imported: list[Path] = []
+            self.installed: list[SimpleNamespace] = []
+
+        def list_installed(self) -> list[object]:
+            return list(self.installed)
+
+        def import_from_path(self, path: str) -> object:
+            imported = Path(path)
+            self.imported.append(imported)
+            installed = tmp_path / "installed" / "market-test"
+            installed.mkdir(parents=True, exist_ok=True)
+            entry = SimpleNamespace(
+                id="market-test",
+                path=installed,
+                name="Market test",
+                description="",
+                author="",
+                version="1.0.0",
+                marketplace_slug="",
+            )
+            self.installed.append(entry)
+            return entry
+
+        def update_metadata(self, mod_id: str, **metadata) -> object:
+            entry = next(item for item in self.installed if item.id == mod_id)
+            for key, value in metadata.items():
+                setattr(entry, key, value)
+            return entry
+
+        def remove(self, mod_id: str) -> None:
+            self.installed = [item for item in self.installed if item.id != mod_id]
+
+    events: list[tuple[str, dict[str, object]]] = []
+    completed = threading.Event()
+
+    def on_event(name: str, event_payload: dict[str, object]) -> None:
+        events.append((name, event_payload))
+        if name == "marketplace.download-progress" and event_payload.get("status") == "done":
+            completed.set()
+
+    mods = Mods()
+    service = MarketplaceService(storage_paths=Paths(), logging=Logging(), mods=mods, on_event=on_event)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(
+        service,
+        "_create_ticket",
+        lambda *_args, **_kwargs: {
+            "filename": "market-test.zip",
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "direct_url": "https://example.test/market-test.zip",
+            "fallback_url": "",
+            "legacy_fallback_url": "",
+            "ticket": "ticket-1",
+            "version": "1.0.0",
+        },
+    )
+
+    def boom(*_args, **_kwargs):
+        raise MarketplaceError("timeout", "complete hung")
+
+    monkeypatch.setattr(service, "_complete_ticket", boom)
+    monkeypatch.setattr(service, "fetch_latest", lambda *_args, **_kwargs: {"version": "1.0.0", "compatibility": "zapret"})
+    monkeypatch.setattr(service, "get_project", lambda *_args, **_kwargs: {"project": {}})
+
+    queued = service.enqueue_download("market-test", title="Market test", compatibility="zapret")
+    assert queued["queued"] is True
+    assert completed.wait(3), events
+    assert mods.installed[0].marketplace_slug == "market-test"
 
 
 def test_marketplace_image_uses_content_signature_and_disk_cache(monkeypatch, tmp_path: Path) -> None:
