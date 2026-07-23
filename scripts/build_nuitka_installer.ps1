@@ -66,10 +66,11 @@ $compilerArg = switch ($Compiler) {
     default { "--msvc=latest" }
 }
 
-# Onefile AV hardening:
-# - compressed custom streams look like packers to Defender ML (Trojan:Win32/Bearfoos.A!ml)
-# - --onefile-as-archive + --onefile-no-compression are less "dropper-like"
-# - stable CACHE_DIR unpack path avoids random TEMP extractors
+# Installer onefile packaging:
+# - QtWebEngine + --onefile-no-compression balloons to ~450-530MB with NO app payload.
+# - Local verified slim builds use compressed onefile (~120MB). Prefer that.
+# - Keep --onefile-as-archive + stable CACHE_DIR unpack path (less TEMP-dropper-like).
+# Uninstaller (no WebEngine) may still use --onefile-no-compression below.
 $modeArgs = @()
 if ($Standalone) {
   $modeArgs += "--standalone"
@@ -77,7 +78,6 @@ if ($Standalone) {
   $modeArgs += @(
     "--onefile",
     "--onefile-as-archive",
-    "--onefile-no-compression",
     "--onefile-tempdir-spec={CACHE_DIR}/goshkow/zapret-hub-installer/{VERSION}-{PID}"
   )
 }
@@ -185,6 +185,15 @@ if ($embedBundledUninstaller -and (Test-Path (Join-Path $bundledUninstallerDir "
   $installerDataFiles += "--include-data-files=bundled_uninstaller/uninstall_zaprethub_arm64.exe=bundled_uninstaller/uninstall_zaprethub_arm64.exe"
 }
 
+# Slim path must never ship leftover portable payload zips from a prior fat build.
+$payloadZipHits = @()
+if (Test-Path -LiteralPath $PayloadDir) {
+  $payloadZipHits = @(Get-ChildItem -LiteralPath $PayloadDir -Filter "*.zip" -File -ErrorAction SilentlyContinue)
+}
+if ($payloadZipHits.Count -gt 0) {
+  throw "Refusing slim installer build: '$PayloadDir' still contains payload zip(s): $($payloadZipHits.Name -join ', '). Remove them (runtime download is from the mirror)."
+}
+
 $installerName = "install_zaprethub_${Version}_universal.exe"
 $nuitkaArgs = @(
   "-m",
@@ -212,13 +221,15 @@ $nuitkaArgs = @(
 ) + $installerDataFiles + @(
   "--include-package=installer",
   "--nofollow-import-to=tkinter",
+  "--nofollow-import-to=zapret_hub",
+  "--nofollow-import-to=nuitka",
   "--remove-output",
   "installer\install_zaprethub.py"
 )
 if ($embedBundledUninstaller) {
   Write-Host "Building installer with bundled standalone uninstaller..."
 } else {
-  Write-Host "Building AV-safer slim onefile installer (archive, no compression, no embedded uninstaller EXE)..."
+  Write-Host "Building compressed slim onefile installer (QtWebEngine UI; no portable zips; no embedded uninstaller EXE)..."
 }
 & $Python @nuitkaArgs
 if ($LASTEXITCODE -ne 0) { throw "Nuitka installer build failed with exit code $LASTEXITCODE" }
@@ -227,6 +238,17 @@ $builtInstaller = Get-ChildItem $OutputDir -Recurse -File -Filter $installerName
     Select-Object -First 1
 if (-not $builtInstaller) {
     throw "Built installer not found in $OutputDir"
+}
+
+$installerMb = [math]::Round($builtInstaller.Length / 1MB, 1)
+Write-Host "Built slim installer size: $installerMb MB"
+# Compressed WebEngine installer is ~100-150MB locally. Uncompressed (~450-530MB) or
+# embedded portable payloads (~500MB+) must fail the build.
+if ($builtInstaller.Length -gt (200MB)) {
+  throw "Slim installer too large ($installerMb MB > 200 MB). Expected ~100-150 MB compressed WebEngine without portable payload."
+}
+if ($builtInstaller.Length -lt (20MB)) {
+  throw "Slim installer suspiciously small ($installerMb MB < 20 MB)."
 }
 
 # Keep a sidecar only when this build intentionally embedded an uninstaller.

@@ -251,11 +251,14 @@ jobs:
           $version = "${{ steps.meta.outputs.version }}"
           $installer = Get-Item ".\dist_installer\install_zaprethub_${version}_universal.exe"
           $mb = [math]::Round($installer.Length / 1MB, 1)
-          Write-Host "Slim installer size: $mb MB (QtWebEngine UI; onefile archive without compression; no portable app zips)"
-          # Uncompressed onefile+WebEngine is larger (~400-600MB) but safer for Defender ML.
-          # >700MB usually means an embedded portable payload mistake.
-          if ($installer.Length -gt (700MB)) {
-            throw "Installer too large ($mb MB > 700 MB). Likely embedded app payload; slim build expected."
+          Write-Host "Slim installer size: $mb MB (compressed QtWebEngine UI; no portable app zips / installer_payload)"
+          # Local verified slim ~122MB. Uncompressed WebEngine (~450-530MB) or embedded
+          # portable payloads must fail — do not raise this gate to "pass" fat builds.
+          if ($installer.Length -gt (200MB)) {
+            throw "Installer too large ($mb MB > 200 MB). Expected ~100-150 MB compressed slim; fat/uncompressed build rejected."
+          }
+          if ($installer.Length -lt (20MB)) {
+            throw "Installer suspiciously small ($mb MB < 20 MB)."
           }
 
       - uses: actions/upload-artifact@v6
