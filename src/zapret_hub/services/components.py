@@ -343,11 +343,16 @@ class ProcessManager:
         return dict(info) if isinstance(info, dict) else None
 
     def abort_diagnostics(self, *, kill_winws: bool = True) -> None:
-        """Stop general/settings diagnostics immediately."""
+        """Stop general/settings diagnostics immediately.
+
+        Never kill a normal user-powered winws session. Only tear down the
+        temporary diagnostic runtime (onboarding / general test).
+        """
         self._diagnostic_token += 1
         self._diagnostic_abort.set()
+        owned_by_diagnostics = bool(self._diagnostic_runtime_override)
         self._diagnostic_runtime_override = False
-        if kill_winws:
+        if kill_winws and owned_by_diagnostics:
             try:
                 self.stop_component("zapret")
             except Exception:
@@ -521,12 +526,44 @@ class ProcessManager:
     def _start_component_unlocked(self, component_id: str) -> ComponentState:
         component = next(item for item in self.list_components() if item.id == component_id)
         if component.id == "zapret":
+            # Never let a stale Auto cutover flip Quick Access back after the user
+            # already selected another mode.
+            if not self._diagnostic_runtime_override:
+                selected = str(self.settings.get().selected_runtime_mode or "zapret")
+                if selected not in {"zapret", ""}:
+                    state = ComponentState(
+                        component_id=component_id,
+                        status="stopped",
+                        last_error="runtime_mode_mismatch",
+                    )
+                    self._states[component_id] = state
+                    self.logging.log(
+                        "info",
+                        "Skipping zapret start — selected runtime is not zapret",
+                        selected=selected,
+                    )
+                    return state
             self.stop_component("goshkow-vpn")
             self.stop_component("zapret2")
             state = self._start_zapret(component_id)
             self._invalidate_state_cache()
             return state
         if component.id == "zapret2":
+            if not self._diagnostic_runtime_override:
+                selected = str(self.settings.get().selected_runtime_mode or "zapret")
+                if selected != "zapret2":
+                    state = ComponentState(
+                        component_id=component_id,
+                        status="stopped",
+                        last_error="runtime_mode_mismatch",
+                    )
+                    self._states[component_id] = state
+                    self.logging.log(
+                        "info",
+                        "Skipping zapret2 start — selected runtime is not zapret2",
+                        selected=selected,
+                    )
+                    return state
             self.stop_component("zapret")
             self.stop_component("goshkow-vpn")
             state = self._start_zapret2(component_id)
@@ -1232,9 +1269,9 @@ foreach ($adapter in @($payload.adapters)) {
         if not self._diagnostic_runtime_override:
             # Explicit user start — don't stay blocked by a stale diagnostic abort.
             self._diagnostic_abort.clear()
-        # Claim the Quick Access mode so a stale VPN-enabled flag cannot rewrite UI later.
+        # Never rewrite Quick Access mode here — Auto/start must not flip Zapret↔Zapret2.
         try:
-            self.settings.update(selected_runtime_mode="zapret", goshkow_vpn_pending_start=False)
+            self.settings.update(goshkow_vpn_pending_start=False)
         except Exception:
             pass
         # Always clear existing winws copies, then start a Hub-owned instance.
@@ -1378,7 +1415,7 @@ foreach ($adapter in @($payload.adapters)) {
 
     def _start_zapret2(self, component_id: str) -> ComponentState:
         try:
-            self.settings.update(selected_runtime_mode="zapret2", goshkow_vpn_pending_start=False)
+            self.settings.update(goshkow_vpn_pending_start=False)
         except Exception:
             pass
         if self._is_image_running("winws2.exe"):
@@ -1399,6 +1436,12 @@ foreach ($adapter in @($payload.adapters)) {
             if winws2_path is None:
                 raise FileNotFoundError("winws2.exe was not found in the Zapret2 runtime.")
             command = self._build_zapret2_command(winws2_path, runtime_root)
+            try:
+                from zapret_hub.services.orchestrator import zapret2_hub
+
+                zapret2_hub.sanitize_classic_discord_pollution(Path(self.storage.paths.configs_dir))
+            except Exception:
+                pass
             process = subprocess.Popen(
                 command,
                 # winws2 resolves cygwin1.dll / WinDivert next to the exe
@@ -1534,8 +1577,10 @@ foreach ($adapter in @($payload.adapters)) {
         settings = self.settings.get()
         tcp_ports = self._normalize_zapret2_ports(settings.zapret2_tcp_ports, "80,443")
         udp_ports = self._normalize_zapret2_ports(settings.zapret2_udp_ports, "443")
-        selected_services = {str(item) for item in (settings.selected_service_ids or [])}
         control_mode = str(getattr(settings, "zapret2_control_mode", "manual") or "manual")
+        selected_services = {str(item) for item in (settings.selected_service_ids or [])}
+        # Discord voice / STUN / media need UDP beyond 443. Auto must widen capture
+        # even when the settings field still says the default "443".
         if control_mode == "auto" and "discord" in selected_services:
             udp_ports = self._merge_zapret2_ports(
                 udp_ports,
@@ -1564,6 +1609,7 @@ foreach ($adapter in @($payload.adapters)) {
         configs_dir = Path(self.storage.paths.configs_dir)
         strategy_id = str(getattr(settings, "zapret2_strategy_id", "balanced") or "balanced")
         lists = zapret2_hub.prepare_zapret2_runtime_files(configs_dir, strategy_id)
+        include_hostlist_auto = control_mode == "auto"
         try:
             selected = [str(item) for item in (settings.selected_service_ids or [])]
             # Append-only: never wipe; seed only what is still missing.
@@ -1573,8 +1619,23 @@ foreach ($adapter in @($payload.adapters)) {
                 zapret2_hub.seed_bypass_catalog(configs_dir, only_missing=True)
         except Exception:
             pass
+        if include_hostlist_auto:
+            # Auto: runtime copy with overlay/diff applied — battle hub files stay intact.
+            auto_root = Path(self.storage.paths.runtime_dir) / "zapret2" / "lists_auto"
+            lists = {
+                **lists,
+                **zapret2_hub.materialize_auto_lists(configs_dir, auto_root),
+            }
+        else:
+            # Manual: same hub/mod/user merge, but without Auto-learned overlays and
+            # never pass winws2 hostlist-auto.
+            manual_root = Path(self.storage.paths.runtime_dir) / "zapret2" / "lists_manual"
+            lists = {
+                **lists,
+                **zapret2_hub.materialize_manual_lists(configs_dir, manual_root),
+            }
 
-        mod_lua_root = lists["hub"].parent / "mod_lua"
+        mod_lua_root = zapret2_hub.zapret2_lists_dir(configs_dir) / "mod_lua"
         if mod_lua_root.is_dir():
             for mod_lua in sorted(mod_lua_root.glob("*.lua")):
                 command.append(f"--lua-init=@{mod_lua}")
@@ -1594,6 +1655,7 @@ foreach ($adapter in @($payload.adapters)) {
                 bundle_root=bundle_root,
                 tcp_ports=tcp_ports,
                 strategy_id=strategy_id,
+                include_hostlist_auto=include_hostlist_auto,
             )
         )
         return command
@@ -2592,6 +2654,14 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         lists_dir.mkdir(parents=True, exist_ok=True)
         utils_dir.mkdir(parents=True, exist_ok=True)
 
+        # Drop classic pollution from older Auto Discord seeds (CDN CIDR + excludes).
+        try:
+            from zapret_hub.services.orchestrator import zapret2_hub
+
+            zapret2_hub.sanitize_classic_discord_pollution(Path(self.storage.paths.configs_dir))
+        except Exception:
+            pass
+
         ipset_mode = (settings.zapret_ipset_mode or "loaded").strip().lower()
         if self._should_force_fortnite_runtime_modes():
             ipset_mode = "any"
@@ -2602,6 +2672,19 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             ipset_all.write_text("", encoding="utf-8")
         elif not ipset_all.exists():
             ipset_all.write_text("", encoding="utf-8")
+        elif ipset_mode == "loaded" and ipset_all.is_file():
+            # If Discord /20 was merged into the stub file, strip hostlist-only seeds.
+            try:
+                from zapret_hub.services.orchestrator import zapret2_hub
+
+                ban = {str(x).strip().lower() for x in zapret2_hub.BYPASS_SEED_NETWORKS}
+                ban.add("162.159.128.0/20")
+                lines = ipset_all.read_text(encoding="utf-8", errors="ignore").splitlines()
+                kept = [row for row in lines if row.strip().lower() not in ban]
+                if len(kept) != len(lines):
+                    ipset_all.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+            except Exception:
+                pass
 
         game_mode = (settings.zapret_game_filter_mode or "disabled").strip().lower()
         if self._should_force_fortnite_runtime_modes():
@@ -2913,7 +2996,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         gap without bypass stays minimal.
         """
         try:
-            self.settings.update(selected_runtime_mode="zapret", goshkow_vpn_pending_start=False)
+            self.settings.update(goshkow_vpn_pending_start=False)
         except Exception:
             pass
         self._soft_stop_zapret_image()
@@ -2934,7 +3017,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         component_id = "zapret"
         active_root = Path(active_root)
         try:
-            self.settings.update(selected_runtime_mode="zapret", goshkow_vpn_pending_start=False)
+            self.settings.update(goshkow_vpn_pending_start=False)
         except Exception:
             pass
         if not assume_clean:
@@ -3073,6 +3156,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             self._merge_lists_into_target(lists_target, lists_source)
 
         self._apply_selected_service_rules(active_root, allow_bin_overlay=not bin_overlay_applied)
+
+        # Discord > Cloudflare: after service merge, always strip Discord CDN parent
+        # ranges from the live ipset so hostlist-only Discord cannot be double-desynced.
+        try:
+            selected = {str(x) for x in (self.settings.get().selected_service_ids or [])}
+            if "discord" in selected:
+                self._strip_discord_cdn_from_ipset(lists_target)
+        except Exception:
+            pass
 
         selected_script = selected_bundle_root / selected_script_name
         if selected_script.exists():
@@ -3274,12 +3366,87 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 result.append(item)
             target.write_text("\n".join(result) + ("\n" if result else ""), encoding="utf-8")
 
+    def _promote_selected_catalog_domains_from_exclude(
+        self,
+        lists_dir: Path,
+        selected_ids: list[str],
+    ) -> None:
+        """Remove selected-service catalog hosts from exclude lists so hostlist DPI applies."""
+        protected: set[str] = set()
+        for service_id in selected_ids:
+            rule = SERVICE_RULES.get(str(service_id))
+            if rule is None:
+                continue
+            for item in (*rule.list_general, *rule.list_google, *rule.health_hosts):
+                host = str(item).strip().lower().rstrip(".")
+                if host:
+                    protected.add(host)
+        if not protected:
+            return
+
+        def _matches(host: str) -> bool:
+            return host in protected or any(host == p or host.endswith("." + p) for p in protected if p)
+
+        for filename in ("list-exclude.txt", "list-exclude-user.txt"):
+            path = lists_dir / filename
+            if not path.is_file():
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                continue
+            kept: list[str] = []
+            changed = False
+            for line in lines:
+                host = line.strip().lower().rstrip(".")
+                if host and not host.startswith("#") and _matches(host):
+                    changed = True
+                    continue
+                kept.append(line.rstrip())
+            if changed:
+                path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        # Also scrub persistent user exclude in configs so the next materialize stays clean.
+        try:
+            from zapret_hub.services.orchestrator import zapret2_hub
+
+            zapret2_hub.sanitize_classic_discord_pollution(Path(self.storage.paths.configs_dir))
+        except Exception:
+            pass
+
+    def _strip_discord_cdn_from_ipset(self, lists_dir: Path) -> None:
+        """Keep Discord hostlist-only: drop CDN parent ranges from ipset-all*."""
+        ban = {
+            "162.158.0.0/15",  # Cloudflare parent that covers Discord
+            "162.159.128.0/20",  # Discord identity network
+        }
+        try:
+            from zapret_hub.services.orchestrator import zapret2_hub
+
+            ban |= {str(x).strip().lower() for x in zapret2_hub.BYPASS_SEED_NETWORKS}
+        except Exception:
+            pass
+        for filename in ("ipset-all.txt", "ipset-all-user.txt"):
+            path = lists_dir / filename
+            if not path.is_file():
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                continue
+            kept = [row for row in lines if row.strip().lower() not in ban]
+            if len(kept) != len(lines):
+                path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+
     def _apply_selected_service_rules(self, active_root: Path, *, allow_bin_overlay: bool = True) -> None:
         selected_ids = list(self.settings.get().selected_service_ids or [])
         if not selected_ids:
             return
         lists_dir = active_root / "lists"
         lists_dir.mkdir(parents=True, exist_ok=True)
+        # If Auto previously excluded Discord/YouTube catalog hosts, promote them
+        # back before hostlist merge — otherwise conflict resolution drops them
+        # from list-general and Discord never gets DPI (looks like "Zapret on but dead").
+        self._promote_selected_catalog_domains_from_exclude(lists_dir, selected_ids)
         mapping = {
             "list-general.txt": "list_general",
             "list-exclude.txt": "list_exclude",
@@ -3293,13 +3460,29 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 rule = SERVICE_RULES.get(str(service_id))
                 if rule is None:
                     continue
-                incoming.extend(getattr(rule, attr))
+                values = list(getattr(rule, attr) or ())
+                # Discord must stay hostlist-only. Cloudflare's 162.158.0.0/15 covers
+                # Discord's 162.159.128.0/20 — a second 443 ipset desync kills Discord.
+                if (
+                    attr == "ipset_all"
+                    and service_id == "cloudflare"
+                    and "discord" in {str(x) for x in selected_ids}
+                ):
+                    values = [
+                        item
+                        for item in values
+                        if str(item).strip().lower()
+                        not in {"162.158.0.0/15", "162.159.128.0/20"}
+                    ]
+                incoming.extend(values)
             if not incoming:
                 continue
             target = lists_dir / filename
             existing = self._read_list_lines(target)
             merged = self._merge_with_conflict_resolution(lists_dir, filename, existing, incoming)
             target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+        if "discord" in {str(x) for x in selected_ids}:
+            self._strip_discord_cdn_from_ipset(lists_dir)
         for service_id in selected_ids:
             rule = SERVICE_RULES.get(str(service_id))
             if rule is None:
@@ -4443,23 +4626,62 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return proc.returncode == 0
 
     def _ensure_zapret_user_lists(self, lists_dir: Path) -> None:
+        from zapret_hub.services.orchestrator.auto_overlay import (
+            AutoOverlayStore,
+            migrate_legacy_markers_into_overlay,
+        )
+        from zapret_hub.services.orchestrator.learner import strip_auto_overlay
+        from zapret_hub.services.orchestrator import zapret2_hub
+
+        # Migrate any legacy in-file Auto blocks into overlay.json, then keep battle files clean.
+        try:
+            migrate_legacy_markers_into_overlay(Path(self.storage.paths.configs_dir))
+        except Exception:
+            pass
+        try:
+            zapret2_hub.sanitize_classic_discord_pollution(Path(self.storage.paths.configs_dir))
+        except Exception:
+            pass
+
         defaults = {
             "ipset-all-user.txt": "",
             "ipset-exclude-user.txt": "",
             "list-general-user.txt": "",
             "list-exclude-user.txt": "",
         }
+        auto_on = False
+        try:
+            mode = str(self.settings.get().selected_runtime_mode or "zapret")
+            field = "zapret2_control_mode" if mode == "zapret2" else "zapret_control_mode"
+            auto_on = str(getattr(self.settings.get(), field, "manual") or "manual") == "auto"
+        except Exception:
+            auto_on = False
         for filename, content in defaults.items():
             source = self.storage.paths.configs_dir / filename
             target = lists_dir / filename
             if source.exists():
                 try:
-                    target.write_text(source.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+                    # Always strip legacy markers — Auto now lives in overlay.json only.
+                    text = strip_auto_overlay(source.read_text(encoding="utf-8", errors="ignore"))
+                    target.write_text(text, encoding="utf-8")
                     continue
                 except Exception:
                     pass
             if not target.exists():
                 target.write_text(content, encoding="utf-8")
+        # Auto: apply overlay/diff onto the runtime copy only (never source configs).
+        if auto_on:
+            try:
+                AutoOverlayStore(Path(self.storage.paths.configs_dir)).apply_to_lists_dir(lists_dir)
+            except Exception:
+                pass
+        # Discord always wins over Cloudflare CDN parent ranges in the live ipset.
+        try:
+            selected = {str(x) for x in (self.settings.get().selected_service_ids or [])}
+            if "discord" in selected:
+                self._strip_discord_cdn_from_ipset(lists_dir)
+        except Exception:
+            pass
 
     def _is_image_running(self, image_name: str) -> bool:
         now = time.time()
@@ -4570,6 +4792,16 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     if owned is not process:
                         return
                     if process.poll() is not None:
+                        # Intentional stop/replace: Hub already tore down or swapped the Popen.
+                        owned = self._processes.get(component_id)
+                        if owned is not process:
+                            return
+                        state_now = self._states.get(component_id)
+                        if state_now is not None and str(getattr(state_now, "status", "") or "") in {
+                            "stopped",
+                            "starting",
+                        }:
+                            return
                         log_hint = self._recent_source_log_error(component_id)
                         error_message = log_hint or f"{component_id} exited right after start"
                         try:

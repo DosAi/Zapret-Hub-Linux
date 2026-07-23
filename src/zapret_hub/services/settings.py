@@ -46,6 +46,18 @@ class SettingsManager:
                         autostart_defaults.append(cid)
                 settings.enabled_component_ids = enabled_defaults
                 settings.autostart_component_ids = autostart_defaults
+            # New clients: TG WS Proxy on; stock services selected (CF/Discord/YT/Gaming/Clouds).
+            enabled = {str(item) for item in (settings.enabled_component_ids or [])}
+            if "tg-ws-proxy" not in enabled:
+                settings.enabled_component_ids = sorted([*enabled, "tg-ws-proxy"])
+            if not settings.selected_service_ids:
+                from zapret_hub.services.service_rules import merge_auto_default_services
+
+                settings.selected_service_ids = merge_auto_default_services([])
+                if "gaming" in settings.selected_service_ids and str(
+                    settings.zapret_game_filter_mode or "disabled"
+                ) == "disabled":
+                    settings.zapret_game_filter_mode = "tcpudp"
             settings.component_selection_initialized = True
             changed = True
 
@@ -153,8 +165,15 @@ class SettingsManager:
             settings.sounds_volume = "normal"
             changed = True
 
-        selected_service_ids = raw.get("selected_service_ids", [])
-        if not isinstance(selected_service_ids, list):
+        selected_service_ids = raw.get("selected_service_ids", None)
+        if selected_service_ids is None:
+            # Key missing: keep first-init YouTube/Discord defaults (or seed now).
+            if not list(settings.selected_service_ids or []):
+                from zapret_hub.services.service_rules import merge_auto_default_services
+
+                settings.selected_service_ids = merge_auto_default_services([])
+                changed = True
+        elif not isinstance(selected_service_ids, list):
             settings.selected_service_ids = []
             changed = True
         else:

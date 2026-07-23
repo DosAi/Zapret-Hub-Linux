@@ -77,6 +77,41 @@ def test_mapper_combines_process_and_domain_evidence():
     assert combined.score > process_only.score
 
 
+def test_mapper_discord_update_exe_path():
+    mapper = ServiceMapper()
+    hits = mapper.map_process(r"C:\Users\User\AppData\Local\Discord\Update.exe")
+    assert hits and hits[0].service_id == "discord"
+
+
+def test_mapper_spotify_updater_path():
+    mapper = ServiceMapper()
+    hits = mapper.map_process(r"C:\Users\User\AppData\Roaming\Spotify\Update.exe")
+    assert hits and hits[0].service_id == "spotify"
+
+
+def test_mapper_discord_ip_beats_cloudflare():
+    mapper = ServiceMapper()
+    hits = mapper.map(ip="162.159.135.232", use_dns=False)
+    assert hits
+    assert hits[0].service_id == "discord"
+
+
+def test_health_hosts_prefer_critical_paths():
+    from zapret_hub.services.service_rules import health_hosts_for, merge_auto_default_services
+
+    assert health_hosts_for("discord")[0] == "updates.discord.com"
+    assert health_hosts_for("youtube")[0] == "redirector.googlevideo.com"
+    assert health_hosts_for("github")[0] == "codeload.github.com"
+    assert merge_auto_default_services(["telegram-desktop"])[:5] == [
+        "cloudflare",
+        "discord",
+        "youtube",
+        "gaming",
+        "clouds",
+    ]
+    assert "telegram-desktop" in merge_auto_default_services(["telegram-desktop"])
+
+
 def test_passive_scan_activates_discord_from_established_process(tmp_path: Path):
     engine = __import__(
         "zapret_hub.services.orchestrator.engine", fromlist=["OrchestratorEngine"]
@@ -91,7 +126,7 @@ def test_passive_scan_activates_discord_from_established_process(tmp_path: Path)
     )
     engine._mode = "auto"
     engine._signals = SimpleNamespace(
-        snapshot_connections=lambda limit=60: [
+        snapshot_connections=lambda limit=200: [
             ConnSample(
                 remote_ip="162.159.135.232",
                 remote_port=443,
@@ -108,6 +143,61 @@ def test_passive_scan_activates_discord_from_established_process(tmp_path: Path)
     assert incidents
     assert incidents[0]["services"] == ["discord"]
     assert incidents[0]["symptom"] == "service_detected"
+
+
+def test_passive_scan_batches_all_discord_remotes(tmp_path: Path):
+    engine = __import__(
+        "zapret_hub.services.orchestrator.engine", fromlist=["OrchestratorEngine"]
+    ).OrchestratorEngine()
+    settings = SimpleNamespace(selected_service_ids=["discord", "youtube"])
+    engine.context = SimpleNamespace(
+        settings=SimpleNamespace(get=lambda: settings),
+        paths=SimpleNamespace(configs_dir=tmp_path, merged_runtime_dir=tmp_path),
+        processes=SimpleNamespace(_current_zapret_runtime=None),
+        knowledge=None,
+        logging=None,
+    )
+    engine._mode = "auto"
+    engine._signals = SimpleNamespace(
+        snapshot_connections=lambda limit=200: [
+            ConnSample(
+                remote_ip="162.159.135.232",
+                remote_port=443,
+                proto="tcp",
+                state="SYN_SENT",
+                pid=42,
+                process=r"C:\Users\User\AppData\Local\Discord\Update.exe",
+                domain="updates.discord.com",
+            ),
+            ConnSample(
+                remote_ip="162.159.135.240",
+                remote_port=443,
+                proto="tcp",
+                state="SYN_SENT",
+                pid=42,
+                process=r"C:\Users\User\AppData\Local\Discord\Update.exe",
+                domain="cdn.discordapp.com",
+            ),
+            ConnSample(
+                remote_ip="162.159.138.10",
+                remote_port=443,
+                proto="tcp",
+                state="ESTABLISHED",
+                pid=42,
+                process=r"C:\Users\User\AppData\Local\Discord\Update.exe",
+                domain="gateway.discord.gg",
+            ),
+        ]
+    )
+    incidents: list[dict[str, Any]] = []
+    engine._handle_incident = incidents.append
+    engine._passive_scan()
+    assert incidents
+    assert incidents[0]["services"] == ["discord"]
+    assert "updates.discord.com" in incidents[0]["domains"]
+    assert "cdn.discordapp.com" in incidents[0]["domains"]
+    assert "gateway.discord.gg" in incidents[0]["domains"]
+    assert len(incidents[0]["ips"]) >= 2
 
 
 def test_staged_plans_escalate_cumulatively():
@@ -553,10 +643,18 @@ def test_cutover_coalesce_and_batch_write(tmp_path: Path):
     assert len(domain_applied) == 1
     assert "one.com" in domain_applied[0]["value"] and "two.com" in domain_applied[0]["value"]
     assert len(ip_applied) == 1
-    text = (configs / "list-general-user.txt").read_text(encoding="utf-8")
-    assert "one.com" in text and "two.com" in text
-    ip_text = (configs / "ipset-all-user.txt").read_text(encoding="utf-8")
-    assert "9.9.9.9" in ip_text and "8.8.8.8" in ip_text
+    # Auto writes overlay/diff only — battle user lists stay untouched.
+    overlay = configs / "auto" / "overlay.json"
+    assert overlay.is_file()
+    payload = overlay.read_text(encoding="utf-8")
+    assert "one.com" in payload and "two.com" in payload
+    assert "9.9.9.9" in payload and "8.8.8.8" in payload
+    assert not (configs / "list-general-user.txt").exists() or "one.com" not in (
+        configs / "list-general-user.txt"
+    ).read_text(encoding="utf-8")
+    assert not (configs / "ipset-all-user.txt").exists() or "9.9.9.9" not in (
+        configs / "ipset-all-user.txt"
+    ).read_text(encoding="utf-8")
 
 
 def test_signals_never_calls_tasklist():

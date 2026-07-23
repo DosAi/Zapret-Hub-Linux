@@ -78,28 +78,39 @@ def _host_file_records(context) -> list[FileRecord]:
     return [FileRecord(path=str(path), relative_path=relative, size=path.stat().st_size)]
 
 
+def _active_bypass_id(context) -> str:
+    mode = str(getattr(context.settings.get(), "selected_runtime_mode", "zapret") or "zapret")
+    return mode if mode in {"zapret", "zapret2"} else "zapret"
+
+
 def _stop_zapret_for_reconfiguration(context) -> bool:
+    """Stop the active bypass (zapret or zapret2) before list/settings rebuild."""
+    component_id = _active_bypass_id(context)
     states = {item.component_id: item for item in context.processes.list_states()}
-    zapret_state = states.get("zapret")
-    status = str(getattr(zapret_state, "status", "") or "").strip().lower() if zapret_state else ""
+    state = states.get(component_id)
+    status = str(getattr(state, "status", "") or "").strip().lower() if state else ""
     was_running = status == "running"
     if was_running:
-        context.processes.stop_component("zapret")
+        context.processes.stop_component(component_id)
         return True
     settings = context.settings.get()
     enabled = {str(item) for item in list(settings.enabled_component_ids or [])}
     selected_mode = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
-    should_recover = status in {"error", "partial"} and "zapret" in enabled and selected_mode == "zapret"
+    # Recover after a failed/partial start so reconfigure can bring the bypass back.
+    should_recover = status in {"error", "partial", "starting"} and component_id in enabled and selected_mode == component_id
     return should_recover
 
 
 def _finish_zapret_reconfiguration(context, *, restart: bool) -> bool:
+    """Rebuild classic lists/runtime; restart active bypass when requested."""
+    component_id = _active_bypass_id(context)
     context.merge.rebuild()
     context.files._invalidate_collection_cache()
     context.files.rebuild_materialized_collections()
-    context.processes.rebuild_zapret_runtime_snapshot()
+    if component_id == "zapret":
+        context.processes.rebuild_zapret_runtime_snapshot()
     if restart:
-        state = context.processes.start_component("zapret")
+        state = context.processes.start_component(component_id)
         return bool(getattr(state, "status", "") == "running")
     return False
 
@@ -107,6 +118,56 @@ def _finish_zapret_reconfiguration(context, *, restart: bool) -> bool:
 def _restart_zapret_if_running(context) -> bool:
     was_running = _stop_zapret_for_reconfiguration(context)
     return _finish_zapret_reconfiguration(context, restart=was_running)
+
+
+def _restart_goshkow_vpn_if_running(context) -> bool:
+    states = {item.component_id: item for item in context.processes.list_states()}
+    if not (states.get("goshkow-vpn") and states["goshkow-vpn"].status == "running"):
+        return False
+    if not _goshkow_vpn_is_enabled(context):
+        return False
+    context.processes.stop_component("goshkow-vpn")
+    state = context.processes.start_component("goshkow-vpn")
+    return bool(getattr(state, "status", "") == "running")
+
+
+def _sync_bypass_enabled_for_mode(context, runtime_id: str) -> None:
+    """Mutual-exclusion for Quick Access mode ↔ enabled_component_ids."""
+    settings = context.settings.get()
+    enabled = {str(item) for item in list(settings.enabled_component_ids or [])}
+    autostart = {str(item) for item in list(settings.autostart_component_ids or [])}
+    mode = str(runtime_id or "zapret")
+    if mode == "zapret":
+        enabled.add("zapret")
+        enabled.discard("zapret2")
+        enabled.discard("goshkow-vpn")
+        autostart.discard("zapret2")
+        autostart.discard("goshkow-vpn")
+    elif mode == "zapret2":
+        enabled.add("zapret2")
+        enabled.discard("zapret")
+        enabled.discard("goshkow-vpn")
+        autostart.discard("zapret")
+        autostart.discard("goshkow-vpn")
+    elif mode == "goshkow-vpn":
+        enabled.add("goshkow-vpn")
+        enabled.discard("zapret")
+        enabled.discard("zapret2")
+        autostart.discard("zapret")
+        autostart.discard("zapret2")
+    elif mode == "none":
+        enabled.discard("zapret")
+        enabled.discard("zapret2")
+        enabled.discard("goshkow-vpn")
+        autostart.discard("zapret")
+        autostart.discard("zapret2")
+        autostart.discard("goshkow-vpn")
+    context.settings.update(
+        enabled_component_ids=sorted(enabled),
+        autostart_component_ids=sorted(autostart),
+        selected_runtime_mode=mode if mode in {"zapret", "zapret2", "goshkow-vpn", "none"} else "zapret",
+        goshkow_vpn_pending_start=False,
+    )
 
 
 def _sync_telegram_component_from_services(context) -> None:
@@ -940,6 +1001,7 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         zapret_after = (
             current.zapret_ipset_mode,
             current.zapret_game_filter_mode,
+            getattr(current, "zapret_gaming_set", "stun-wide-base"),
             current.zapret_udp_exclude_ports,
             current.selected_zapret_general,
         )
@@ -950,7 +1012,8 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             context.processes.start_component("tg-ws-proxy")
             tg_proxy_restarted = True
         zapret_restarted = False
-        if zapret_before != zapret_after:
+        # Only rebuild/restart when Zapret knobs actually changed (same 5-tuple).
+        if zapret_changed and zapret_before != zapret_after:
             zapret_restarted = _finish_zapret_reconfiguration(context, restart=zapret_was_running)
         vpn_restarted = False
         if vpn_before != vpn_after:
@@ -1068,8 +1131,6 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
             settings_changes.update(_ubisoft_zapret_settings(context))
         if "fortnite" in requested:
             settings_changes.update(_fortnite_zapret_settings(context))
-        if "discord" in requested and str(getattr(settings, "zapret_control_mode", "manual")) == "auto":
-            settings_changes["zapret_game_filter_mode"] = "tcpudp"
         context.settings.update(**settings_changes)
         zapret_restarted = _finish_zapret_reconfiguration(context, restart=zapret_was_running) if zapret_services_changed else False
         result = {"selected_service_ids": ordered, "client_revision": client_revision, "zapret_restarted": zapret_restarted}

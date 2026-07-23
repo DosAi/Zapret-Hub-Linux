@@ -120,6 +120,38 @@ class CutoverManager:
             mode = "zapret"
         return "zapret2" if mode == "zapret2" else "zapret"
 
+    def _abort_if_backend_changed(self, backend: str) -> dict[str, Any] | None:
+        if self._runtime_backend() != backend:
+            return {
+                "ok": False,
+                "applied": [],
+                "skipped": [],
+                "results": [],
+                "restarted": False,
+                "error": "runtime_mode_changed",
+                "backend": backend,
+            }
+        aborted = self._abort_if_power_off(backend)
+        return aborted
+
+    def _abort_if_power_off(self, backend: str) -> dict[str, Any] | None:
+        """User turned Quick Access off mid-tune — do not restart the bypass."""
+        try:
+            orch = getattr(self.context, "orchestrator", None)
+            if orch is not None and hasattr(orch, "is_live") and not orch.is_live():
+                return {
+                    "ok": False,
+                    "applied": [],
+                    "skipped": [],
+                    "results": [],
+                    "restarted": False,
+                    "error": "power_off",
+                    "backend": backend,
+                }
+        except Exception:
+            pass
+        return None
+
     def _apply_plan_classic(
         self,
         steps: list[TunerStep] | list[dict[str, Any]] | None,
@@ -135,6 +167,7 @@ class CutoverManager:
 
         was_running = self._zapret_running() if restart is None else bool(restart)
         baseline = self.snapshot()
+        overlay_checkpoint = self._overlay_checkpoint()
         live_a = getattr(self.context.processes, "_current_zapret_runtime", None)
         if live_a is not None:
             self._slot_a = Path(live_a)
@@ -149,6 +182,10 @@ class CutoverManager:
                 self._apply_one_mutation(step, backend="zapret")
                 applied.append({"kind": step.kind, "value": step.value, "reason": step.reason})
 
+            aborted = self._abort_if_backend_changed("zapret")
+            if aborted is not None:
+                return aborted
+
             if not was_running:
                 self._rebuild_snapshot_only()
                 self.snapshot()
@@ -162,11 +199,17 @@ class CutoverManager:
                 }
 
             self._rebuild_snapshot_only()
+            aborted = self._abort_if_backend_changed("zapret")
+            if aborted is not None:
+                return aborted
             slot_b = self._stage_candidate_b()
             self._log("info", "Orchestrator staged candidate B", runtime=str(slot_b), steps=len(applied))
 
             # Stage B while A still runs, then soft-kill A and start B immediately.
             # (WinDivert cannot run two captures — gap is minimized, not overlap.)
+            aborted = self._abort_if_backend_changed("zapret")
+            if aborted is not None:
+                return aborted
             if hasattr(self.context.processes, "hot_replace_zapret_runtime"):
                 started = self.context.processes.hot_replace_zapret_runtime(slot_b)
             else:
@@ -174,10 +217,13 @@ class CutoverManager:
                     self.context.processes.stop_component("zapret")
                 except Exception as error:
                     self._log("warning", "Orchestrator stop A failed", error=str(error))
+                aborted = self._abort_if_backend_changed("zapret")
+                if aborted is not None:
+                    return aborted
                 started = self.context.processes.start_zapret_from_runtime(slot_b)
             restarted = str(getattr(started, "status", "")) == "running"
             if not restarted:
-                self._full_rollback(baseline)
+                self._full_rollback(baseline, overlay_checkpoint=overlay_checkpoint)
                 return {
                     "ok": False,
                     "applied": [],
@@ -197,7 +243,7 @@ class CutoverManager:
                 ok = probe_required_ok(results, required_hosts=required_hosts or [])
             if not ok:
                 self._log("info", "Orchestrator candidate B failed probe — full rollback")
-                self._full_rollback(baseline)
+                self._full_rollback(baseline, overlay_checkpoint=overlay_checkpoint)
                 return {
                     "ok": False,
                     "applied": [],
@@ -231,7 +277,7 @@ class CutoverManager:
         except Exception as error:
             self._log("error", "Orchestrator apply_plan failed", error=str(error))
             try:
-                self._full_rollback(baseline)
+                self._full_rollback(baseline, overlay_checkpoint=overlay_checkpoint)
             except Exception:
                 pass
             return {
@@ -263,6 +309,7 @@ class CutoverManager:
 
         was_running = self._zapret2_running() if restart is None else bool(restart)
         baseline = self.snapshot()
+        overlay_checkpoint = self._overlay_checkpoint()
         applied: list[dict[str, Any]] = []
         needs_restart = False
         try:
@@ -275,6 +322,9 @@ class CutoverManager:
                     needs_restart = True
 
             # List-only changes: bol-van docs — files reload automatically, no restart.
+            aborted = self._abort_if_backend_changed("zapret2")
+            if aborted is not None:
+                return aborted
             if was_running and needs_restart:
                 # Soft-kill then restart — avoid deleting runtime between stop and start.
                 try:
@@ -284,9 +334,12 @@ class CutoverManager:
                         self.context.processes.stop_component("zapret2")
                 except Exception as error:
                     self._log("warning", "Zapret2 stop before strategy restart failed", error=str(error))
+                aborted = self._abort_if_backend_changed("zapret2")
+                if aborted is not None:
+                    return aborted
                 state = self.context.processes.start_component("zapret2")
                 if str(getattr(state, "status", "")) != "running":
-                    self._full_rollback_zapret2(baseline)
+                    self._full_rollback_zapret2(baseline, overlay_checkpoint=overlay_checkpoint)
                     return {
                         "ok": False,
                         "applied": [],
@@ -311,7 +364,7 @@ class CutoverManager:
                 ok = probe_required_ok(results, required_hosts=required_hosts or [])
             if not ok:
                 self._log("info", "Zapret2 plan failed probe — rollback")
-                self._full_rollback_zapret2(baseline)
+                self._full_rollback_zapret2(baseline, overlay_checkpoint=overlay_checkpoint)
                 return {
                     "ok": False,
                     "applied": [],
@@ -336,7 +389,7 @@ class CutoverManager:
         except Exception as error:
             self._log("error", "Zapret2 apply_plan failed", error=str(error))
             try:
-                self._full_rollback_zapret2(baseline)
+                self._full_rollback_zapret2(baseline, overlay_checkpoint=overlay_checkpoint)
             except Exception:
                 pass
             return {
@@ -350,7 +403,32 @@ class CutoverManager:
                 "backend": "zapret2",
             }
 
-    def _full_rollback_zapret2(self, baseline: dict[str, Any] | None = None) -> bool:
+    def _overlay_store(self) -> Any:
+        from zapret_hub.services.orchestrator.auto_overlay import AutoOverlayStore
+
+        return AutoOverlayStore(Path(self.context.paths.configs_dir))
+
+    def _overlay_checkpoint(self) -> dict[str, Any] | None:
+        try:
+            return self._overlay_store().checkpoint()
+        except Exception:
+            return None
+
+    def _overlay_restore(self, checkpoint: dict[str, Any] | None) -> None:
+        if not checkpoint:
+            return
+        try:
+            self._overlay_store().restore(checkpoint)
+        except Exception as error:
+            self._log("warning", "Auto overlay restore failed", error=str(error))
+
+    def _full_rollback_zapret2(
+        self,
+        baseline: dict[str, Any] | None = None,
+        *,
+        overlay_checkpoint: dict[str, Any] | None = None,
+    ) -> bool:
+        self._overlay_restore(overlay_checkpoint)
         good = dict(baseline or self.load_last_good() or {})
         if not good:
             return False
@@ -364,9 +442,15 @@ class CutoverManager:
             except Exception as error:
                 self._log("warning", "Zapret2 rollback settings failed", error=str(error))
         self._restore_mod2_enables(list(good.get("enabled_zapret2_mod_ids") or []))
+        if self._runtime_backend() != "zapret2":
+            return False
+        if self._abort_if_power_off("zapret2") is not None:
+            return False
         try:
             if self._zapret2_running():
                 self.context.processes.stop_component("zapret2")
+            if self._abort_if_power_off("zapret2") is not None:
+                return False
             state = self.context.processes.start_component("zapret2")
             ok = str(getattr(state, "status", "")) == "running"
             if ok:
@@ -405,8 +489,14 @@ class CutoverManager:
             restart=was_running,
         )
 
-    def _full_rollback(self, baseline: dict[str, Any] | None = None) -> bool:
+    def _full_rollback(
+        self,
+        baseline: dict[str, Any] | None = None,
+        *,
+        overlay_checkpoint: dict[str, Any] | None = None,
+    ) -> bool:
         """Restore settings AND runtime from baseline / last_good. Always together."""
+        self._overlay_restore(overlay_checkpoint)
         good = dict(baseline or self.load_last_good() or {})
         if not good:
             return self._rebuild_and_maybe_restart(restart=True)
@@ -426,6 +516,9 @@ class CutoverManager:
         self._restore_mod_enables(enabled_mods)
         self._restore_mod2_enables(enabled_mods2)
 
+        if self._abort_if_power_off("zapret") is not None:
+            return False
+
         runtime_path = str(good.get("runtime_path") or "")
         path_ok = bool(runtime_path and Path(runtime_path).exists())
         try:
@@ -433,6 +526,9 @@ class CutoverManager:
                 self.context.processes.stop_component("zapret")
         except Exception:
             pass
+
+        if self._abort_if_power_off("zapret") is not None:
+            return False
 
         if path_ok:
             try:
@@ -594,7 +690,7 @@ class CutoverManager:
         return out
 
     def _apply_one_mutation(self, step: TunerStep, *, backend: str = "zapret") -> str:
-        if step.kind in {"add_domain", "add_ip", "exclude_domain"}:
+        if step.kind in {"add_domain", "add_ip", "exclude_domain", "remove_domain", "remove_ip"}:
             self._apply_list_step(step, backend=backend)
             return "lists"
         if step.kind == "enable_mod":
@@ -609,26 +705,39 @@ class CutoverManager:
         values = [part.strip() for part in str(step.value or "").replace(",", "\n").splitlines() if part.strip()]
         if not values:
             return []
+        reason = str(step.reason or step.kind or "auto")
         if backend == "zapret2":
             from zapret_hub.services.orchestrator import zapret2_hub
 
             configs = Path(self.context.paths.configs_dir)
             if step.kind == "add_domain":
-                return zapret2_hub.add_domains(configs, values)
+                return zapret2_hub.add_auto_domains(configs, values, reason=reason)
             if step.kind == "exclude_domain":
-                return zapret2_hub.exclude_domains(configs, values)
+                return zapret2_hub.exclude_auto_domains(configs, values, reason=reason)
             if step.kind == "add_ip":
-                return zapret2_hub.add_ips(configs, values)
+                return zapret2_hub.add_auto_ips(configs, values, reason=reason)
+            if step.kind == "remove_domain":
+                from zapret_hub.services.orchestrator.auto_overlay import AutoOverlayStore
+
+                return AutoOverlayStore(configs).remove_domains(values, reason=reason)
+            if step.kind == "remove_ip":
+                from zapret_hub.services.orchestrator.auto_overlay import AutoOverlayStore
+
+                return AutoOverlayStore(configs).remove_ips(values, reason=reason)
             return []
 
         configs = Path(self.context.paths.configs_dir)
         learner = HostlistLearner(configs)
         if step.kind == "add_domain":
-            return learner.add_domains(values)
+            return learner.add_domains(values, reason=reason)
         if step.kind == "exclude_domain":
-            return learner.exclude_domains(values)
+            return learner.exclude_domains(values, reason=reason)
         if step.kind == "add_ip":
-            return learner.add_ips(values)
+            return learner.add_ips(values, reason=reason)
+        if step.kind == "remove_domain":
+            return learner.remove_domains(values, reason=reason)
+        if step.kind == "remove_ip":
+            return learner.remove_ips(values, reason=reason)
         return []
 
     def _coalesce_list_steps(self, steps: list[TunerStep]) -> list[TunerStep]:
@@ -760,39 +869,64 @@ class CutoverManager:
             ordered = [preset.id for preset in SERVICE_PRESETS if preset.id in selected]
             changes: dict[str, Any] = {"selected_service_ids": ordered}
             enabled = {str(item) for item in (settings.enabled_component_ids or [])}
-            if backend == "zapret2":
+            # Auto never switches Quick Access bypass. Only keep the active one enabled.
+            active = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
+            live_backend = "zapret2" if active == "zapret2" else "zapret"
+            if live_backend != backend:
+                # Stale plan for the other bypass — ignore component flips.
+                backend = live_backend
+            if live_backend == "zapret2":
                 enabled.add("zapret2")
                 enabled.discard("zapret")
             elif step.value not in {"telegram-desktop", "ai"}:
                 enabled.add("zapret")
+                enabled.discard("zapret2")
             if step.value == "telegram-desktop":
                 enabled.add("tg-ws-proxy")
             if step.value == "ai":
                 enabled.add("xbox-dns")
-            if step.value == "gaming":
+            if step.value == "gaming" and live_backend == "zapret":
                 changes["zapret_game_filter_mode"] = "tcpudp"
-            if step.value == "fortnite":
+            if step.value == "fortnite" and live_backend == "zapret":
                 changes["zapret_ipset_mode"] = "any"
                 changes["zapret_game_filter_mode"] = "tcpudp"
             changes["enabled_component_ids"] = sorted(enabled)
             self.context.settings.update(**changes)
-            # One-shot: dump all known domains/IPs for this service into the active backend lists.
+            # One-shot: dump known domains for this service. Classic stock services
+            # must NOT receive CDN CIDRs into ipset-all-user (breaks Discord).
             harvested_domains = zapret2_hub.harvest_service_domains([step.value])
-            harvested_ips = zapret2_hub.harvest_service_ips([step.value])
+            from zapret_hub.services.service_rules import is_stock_service
+
+            harvested_ips = (
+                []
+                if is_stock_service(step.value)
+                else zapret2_hub.harvest_service_ips([step.value])
+            )
             if backend == "zapret2":
                 zapret2_hub.seed_service_lists(configs, [step.value])
             else:
-                learner = HostlistLearner(configs)
-                if harvested_domains:
-                    learner.add_domains(harvested_domains)
+                # Stock service domains stay in service materialization; only extra
+                # non-stock harvest goes into Auto overlay (never battle user lists).
+                from zapret_hub.services.orchestrator.auto_overlay import AutoOverlayStore
+
+                store = AutoOverlayStore(configs)
+                if harvested_domains and not is_stock_service(step.value):
+                    store.add_domains(harvested_domains, reason=f"enable_service:{step.value}")
                 if harvested_ips:
-                    learner.add_ips(harvested_ips)
+                    store.add_ips(harvested_ips, reason=f"enable_service:{step.value}")
             return "lists"
 
         if step.kind == "ipset":
             if backend == "zapret2":
-                # Widen coverage by seeding Google/Discord nets; no classic ipset mode on z2.
-                zapret2_hub.add_ips(configs, list(zapret2_hub.BYPASS_SEED_NETWORKS))
+                # Widen coverage via Auto overlay remove/add — never mutate battle ipset-hub
+                # with Discord CDN when Discord service is selected. Seed only non-Discord nets.
+                from zapret_hub.services.orchestrator.auto_overlay import AutoOverlayStore
+
+                selected = {str(x) for x in (self.context.settings.get().selected_service_ids or [])}
+                nets = list(zapret2_hub.BYPASS_SEED_NETWORKS)
+                if "discord" in selected:
+                    nets = [n for n in nets if str(n).strip().lower() not in {"162.159.128.0/20"}]
+                AutoOverlayStore(configs).add_ips(nets, reason="ipset_widen")
                 return "lists"
             self.context.settings.update(zapret_ipset_mode=step.value)
             return "settings"
@@ -846,9 +980,13 @@ class CutoverManager:
         self._rebuild_snapshot_only()
         if not restart:
             return False
+        if self._abort_if_power_off("zapret") is not None:
+            return False
         try:
             if self._zapret_running():
                 self.context.processes.stop_component("zapret")
+            if self._abort_if_power_off("zapret") is not None:
+                return False
             state = self.context.processes.start_component("zapret")
             return bool(getattr(state, "status", "") == "running")
         except Exception:

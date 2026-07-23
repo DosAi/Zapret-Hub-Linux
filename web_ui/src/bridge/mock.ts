@@ -555,6 +555,14 @@ export function createMockBridge(): ZapretHubBridge {
         pushState();
         return structuredClone(state.orchestrator) as Commands[K]["out"];
       }
+      case "orchestrator.resetAuto": {
+        emit("toast.show", {
+          id: "orchestrator-reset-auto",
+          message: "Auto mode cache was reset.",
+          kind: "success",
+        });
+        return { ok: true, overlay: true, knowledge: true, memory: true } as Commands[K]["out"];
+      }
       case "orchestrator.bootstrap": {
         state.settings.zapret.controlMode = "auto";
         state.orchestrator = {

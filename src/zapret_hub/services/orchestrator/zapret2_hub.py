@@ -336,9 +336,18 @@ def _append_unique(path: Path, lines: list[str]) -> list[str]:
 
 
 def add_domains(configs_dir: Path, domains: list[str]) -> list[str]:
+    """Service / seed domains → permanent hub list (kept in Manual)."""
     paths = ensure_zapret2_lists(configs_dir)
     cleaned = [d.strip().lower().rstrip(".") for d in domains if d and d.strip()]
     return _append_unique(paths["hub"], cleaned)
+
+
+def add_auto_domains(configs_dir: Path, domains: list[str], *, reason: str = "learn") -> list[str]:
+    """Auto-learned domains → overlay diff (never mutates list-hub battle copy)."""
+    from zapret_hub.services.orchestrator.auto_overlay import AutoOverlayStore
+
+    cleaned = [d.strip().lower().rstrip(".") for d in domains if d and d.strip()]
+    return AutoOverlayStore(configs_dir).add_domains(cleaned, reason=reason)
 
 
 def add_ips(configs_dir: Path, ips: list[str]) -> list[str]:
@@ -347,10 +356,138 @@ def add_ips(configs_dir: Path, ips: list[str]) -> list[str]:
     return _append_unique(paths["ipset"], cleaned)
 
 
+def add_auto_ips(configs_dir: Path, ips: list[str], *, reason: str = "learn") -> list[str]:
+    from zapret_hub.services.orchestrator.auto_overlay import AutoOverlayStore
+
+    cleaned = [item.strip() for item in ips if item and item.strip()]
+    return AutoOverlayStore(configs_dir).add_ips(cleaned, reason=reason)
+
+
 def exclude_domains(configs_dir: Path, domains: list[str]) -> list[str]:
     paths = ensure_zapret2_lists(configs_dir)
     cleaned = [d.strip().lower().rstrip(".") for d in domains if d and d.strip()]
     return _append_unique(paths["exclude"], cleaned)
+
+
+def exclude_auto_domains(configs_dir: Path, domains: list[str], *, reason: str = "over_block") -> list[str]:
+    from zapret_hub.services.orchestrator.auto_overlay import AutoOverlayStore
+
+    cleaned = [d.strip().lower().rstrip(".") for d in domains if d and d.strip()]
+    return AutoOverlayStore(configs_dir).exclude_domains(cleaned, reason=reason)
+
+
+def materialize_auto_lists(configs_dir: Path, target_dir: Path) -> dict[str, Path]:
+    """Materialize zapret2 lists with Auto overlay applied (runtime copy only)."""
+    from zapret_hub.services.orchestrator.auto_overlay import AutoOverlayStore
+    from zapret_hub.services.orchestrator.learner import strip_auto_overlay
+
+    src = ensure_zapret2_lists(configs_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    out: dict[str, Path] = {}
+    for key in ("hub", "exclude", "ipset", "auto", "lua_orch", "lua_strategy", "lua_targets"):
+        source = src[key]
+        dest = target_dir / source.name
+        if key in {"hub", "exclude", "ipset"}:
+            text = ""
+            if source.exists():
+                try:
+                    text = strip_auto_overlay(source.read_text(encoding="utf-8", errors="ignore"))
+                except Exception:
+                    text = ""
+            dest.write_text(text, encoding="utf-8")
+        elif key == "auto":
+            dest.write_text("", encoding="utf-8")
+        else:
+            if source.exists():
+                try:
+                    dest.write_text(source.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+                except Exception:
+                    dest.write_text("", encoding="utf-8")
+            else:
+                dest.write_text("", encoding="utf-8")
+        out[key] = dest
+    # Apply Auto overlay into the runtime copy (hub/exclude/ipset/auto views).
+    store = AutoOverlayStore(configs_dir)
+    # Map classic apply onto zapret2 filenames via a fake lists dir layout.
+    lists_view = target_dir / "_classic_view"
+    lists_view.mkdir(parents=True, exist_ok=True)
+    (lists_view / "list-general-user.txt").write_text("", encoding="utf-8")
+    (lists_view / "list-exclude-user.txt").write_text("", encoding="utf-8")
+    (lists_view / "ipset-all-user.txt").write_text("", encoding="utf-8")
+    # Seed view from hub/exclude/ipset so removals can hit service-adjacent user rows.
+    try:
+        (lists_view / "list-general.txt").write_text(out["hub"].read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+        (lists_view / "list-exclude.txt").write_text(out["exclude"].read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+        (lists_view / "ipset-all.txt").write_text(out["ipset"].read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+    except Exception:
+        pass
+    store.apply_to_lists_dir(lists_view)
+    # Fold classic-view Auto adds into zapret2 files.
+    try:
+        auto_domains = [
+            row.strip()
+            for row in (lists_view / "list-general-user.txt").read_text(encoding="utf-8", errors="ignore").splitlines()
+            if row.strip() and not row.lstrip().startswith("#")
+        ]
+        auto_excludes = [
+            row.strip()
+            for row in (lists_view / "list-exclude-user.txt").read_text(encoding="utf-8", errors="ignore").splitlines()
+            if row.strip() and not row.lstrip().startswith("#")
+        ]
+        auto_ips = [
+            row.strip()
+            for row in (lists_view / "ipset-all-user.txt").read_text(encoding="utf-8", errors="ignore").splitlines()
+            if row.strip() and not row.lstrip().startswith("#")
+        ]
+        # Removals already applied to list-general/ipset views — write back.
+        out["hub"].write_text((lists_view / "list-general.txt").read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+        out["exclude"].write_text(
+            (lists_view / "list-exclude.txt").read_text(encoding="utf-8", errors="ignore"),
+            encoding="utf-8",
+        )
+        out["ipset"].write_text((lists_view / "ipset-all.txt").read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+        if auto_domains:
+            _append_unique(out["auto"], auto_domains)
+        if auto_excludes:
+            _append_unique(out["exclude"], auto_excludes)
+        if auto_ips:
+            _append_unique(out["ipset"], auto_ips)
+    except Exception:
+        pass
+    return out
+
+
+def materialize_manual_lists(configs_dir: Path, target_dir: Path) -> dict[str, Path]:
+    """Copy zapret2 lists for Manual start without Auto-learned overlays."""
+    from zapret_hub.services.orchestrator.learner import strip_auto_overlay
+
+    src = ensure_zapret2_lists(configs_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    out: dict[str, Path] = {}
+    for key in ("hub", "exclude", "ipset", "auto", "lua_orch", "lua_strategy", "lua_targets"):
+        source = src[key]
+        dest = target_dir / source.name
+        if key in {"hub", "exclude", "ipset"}:
+            text = ""
+            if source.exists():
+                try:
+                    text = strip_auto_overlay(source.read_text(encoding="utf-8", errors="ignore"))
+                except Exception:
+                    text = ""
+            dest.write_text(text, encoding="utf-8")
+        elif key == "auto":
+            # Manual never feeds hostlist-auto; keep an empty stub for path stability.
+            dest.write_text("", encoding="utf-8")
+        else:
+            if source.exists():
+                try:
+                    dest.write_text(source.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+                except Exception:
+                    dest.write_text("", encoding="utf-8")
+            else:
+                dest.write_text("", encoding="utf-8")
+        out[key] = dest
+    return out
 
 
 def seed_bypass_catalog(configs_dir: Path, *, only_missing: bool = True) -> dict[str, list[str]]:
@@ -370,7 +507,7 @@ def seed_service_lists(
     configs_dir: Path, service_ids: list[str], *, only_missing: bool = True
 ) -> dict[str, list[str]]:
     domains = harvest_service_domains(service_ids)
-    ips = harvest_service_ips(service_ids)
+    ips = harvest_service_ips(service_ids, include_bypass_seeds=True)
     if only_missing:
         domains = missing_domains(configs_dir, domains)
         ips = missing_ips(configs_dir, ips)
@@ -401,10 +538,20 @@ def harvest_service_domains(service_ids: list[str]) -> list[str]:
     return out
 
 
-def harvest_service_ips(service_ids: list[str]) -> list[str]:
+def harvest_service_ips(service_ids: list[str], *, include_bypass_seeds: bool = False) -> list[str]:
+    """Collect service IP catalogs.
+
+    Classic Zapret must not seed Discord/YouTube CDN CIDRs into ipset-all*: that
+    enables a second 443 desync on top of hostlists and breaks Discord updates.
+    Zapret2 hub lists can still take BYPASS_SEED_NETWORKS via include_bypass_seeds.
+    """
     out: list[str] = []
     seen: set[str] = set()
-    extras = list(BYPASS_SEED_NETWORKS) if any(s in {"youtube", "discord"} for s in service_ids) else []
+    extras = (
+        list(BYPASS_SEED_NETWORKS)
+        if include_bypass_seeds and any(s in {"youtube", "discord"} for s in service_ids)
+        else []
+    )
     for service_id in service_ids:
         rule = SERVICE_RULES.get(service_id)
         if rule is None:
@@ -420,6 +567,76 @@ def harvest_service_ips(service_ids: list[str]) -> list[str]:
             seen.add(value)
             out.append(value)
     return out
+
+
+def sanitize_classic_discord_pollution(configs_dir: Path) -> dict[str, int]:
+    """Strip Auto-seeded CDN CIDRs and protected service hosts from battle lists.
+
+    Older Hub builds wrote BYPASS_SEED_NETWORKS into ipset-all-user.txt and could
+    exclude discord.com after failed probes — both break Discord HTTPS vs 2.1.2.
+    """
+    from zapret_hub.services.orchestrator.auto_overlay import is_service_protected_host
+    from zapret_hub.services.service_rules import AUTO_DEFAULT_SERVICE_IDS
+
+    configs = Path(configs_dir)
+    removed_ips = 0
+    removed_excludes = 0
+    ban_ips = {str(item).strip().lower() for item in BYPASS_SEED_NETWORKS}
+    for rule in SERVICE_RULES.values():
+        for item in getattr(rule, "identity_networks", ()) or ():
+            ban_ips.add(str(item).strip().lower())
+    for sid in AUTO_DEFAULT_SERVICE_IDS:
+        rule = SERVICE_RULES.get(sid)
+        if rule is None:
+            continue
+        for item in rule.ipset_all or ():
+            ban_ips.add(str(item).strip().lower())
+        for _name, entries in rule.extra_lists or ():
+            if "ipset" in str(_name).lower():
+                for item in entries:
+                    ban_ips.add(str(item).strip().lower())
+
+    ipset_path = configs / "ipset-all-user.txt"
+    if ipset_path.is_file():
+        try:
+            lines = ipset_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            lines = []
+        kept: list[str] = []
+        for line in lines:
+            key = line.strip().lower()
+            if key and not key.startswith("#") and key in ban_ips:
+                removed_ips += 1
+                continue
+            kept.append(line.rstrip())
+        if removed_ips:
+            ipset_path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+
+    exclude_paths = [configs / "list-exclude-user.txt", configs / "list-exclude.txt"]
+    try:
+        exclude_paths.append(ensure_zapret2_lists(configs)["exclude"])
+    except Exception:
+        pass
+    for exclude_path in exclude_paths:
+        if not Path(exclude_path).is_file():
+            continue
+        try:
+            lines = Path(exclude_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            continue
+        kept_ex: list[str] = []
+        changed = 0
+        for line in lines:
+            host = line.strip().lower().rstrip(".")
+            if host and not host.startswith("#") and is_service_protected_host(host):
+                changed += 1
+                continue
+            kept_ex.append(line.rstrip())
+        if changed:
+            Path(exclude_path).write_text("\n".join(kept_ex) + ("\n" if kept_ex else ""), encoding="utf-8")
+            removed_excludes += changed
+
+    return {"ips": removed_ips, "excludes": removed_excludes}
 
 
 def bundle_winws_root(winws2_path: Path) -> Path:
@@ -444,8 +661,13 @@ def build_default_profile_args(
     bundle_root: Path,
     tcp_ports: str,
     strategy_id: str = "balanced",
+    include_hostlist_auto: bool = True,
 ) -> list[str]:
-    """Filter/desync profiles; lua-init files must already be on the command line."""
+    """Filter/desync profiles; lua-init files must already be on the command line.
+
+    Manual mode sets include_hostlist_auto=False so winws2 / Hub Auto overlays
+    are not applied — services, mods, and user lists still use hostlist/ipset.
+    """
     _ = strategy_id
     hub = str(lists["hub"])
     auto = str(lists["auto"])
@@ -453,14 +675,19 @@ def build_default_profile_args(
     ipset = str(lists["ipset"])
     hostlist_args = [
         f"--hostlist={hub}",
-        f"--hostlist-auto={auto}",
         f"--hostlist-exclude={exclude}",
         f"--ipset={ipset}",
     ]
-    auto_args = [
-        "--hostlist-auto-fail-threshold=2",
-        "--hostlist-auto-fail-time=60",
-    ]
+    if include_hostlist_auto:
+        hostlist_args.insert(1, f"--hostlist-auto={auto}")
+    auto_args = (
+        [
+            "--hostlist-auto-fail-threshold=2",
+            "--hostlist-auto-fail-time=60",
+        ]
+        if include_hostlist_auto
+        else []
+    )
 
     args: list[str] = []
     for name in (

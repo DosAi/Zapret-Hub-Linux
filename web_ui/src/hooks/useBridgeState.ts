@@ -369,9 +369,10 @@ function marketplaceOnly(mods: Mods) {
 }
 
 function marketplaceSignature(mods: Mods) {
+  // Order-sensitive: reordering must keep the optimistic override until the
+  // backend state matches the new sequence (not just the same set of mods).
   return marketplaceOnly(mods)
     .map((mod) => `${mod.id}:${mod.marketplaceSlug}:${mod.version || ""}`)
-    .sort()
     .join("|");
 }
 

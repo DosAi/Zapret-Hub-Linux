@@ -138,6 +138,21 @@ def bootstrap_application() -> ApplicationContext:
         backend=None,
     )
     orchestrator.attach(context)
+    # Post-update / every-start: undo old Auto pollution in battle lists so Discord
+    # etc. work out of the box in Manual; Auto overlay stays separate.
+    try:
+        from zapret_hub.services.orchestrator.auto_overlay import ensure_auto_integrity
+
+        report = ensure_auto_integrity(paths.configs_dir, work_root=work_root)
+        try:
+            logging.log("info", "Auto integrity repair on startup", **{k: report.get(k) for k in report})
+        except Exception:
+            pass
+    except Exception as error:
+        try:
+            logging.log("warning", "Auto integrity repair failed", error=str(error))
+        except Exception:
+            pass
     current = settings.get()
     backend = "zapret2" if str(current.selected_runtime_mode or "") == "zapret2" else "zapret"
     mode = str((current.zapret2_control_mode if backend == "zapret2" else current.zapret_control_mode) or "manual")

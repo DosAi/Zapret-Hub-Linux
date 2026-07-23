@@ -11,10 +11,14 @@ from zapret_hub.services.orchestrator.cutover import CutoverManager
 from zapret_hub.services.orchestrator.learner import HostlistLearner
 from zapret_hub.services.orchestrator.mapper import ServiceMapper
 from zapret_hub.services.orchestrator.memory import WorkingMemory
-from zapret_hub.services.orchestrator.signals import SignalCollector, classify_failure
+from zapret_hub.services.orchestrator.signals import SignalCollector, classify_failure, is_interesting_udp_port
 from zapret_hub.services.orchestrator.tuner import SmartTuner
 from zapret_hub.services.service_catalog import SERVICE_PRESETS
-from zapret_hub.services.service_rules import SERVICE_RULES
+from zapret_hub.services.service_rules import (
+    SERVICE_RULES,
+    health_hosts_for,
+    merge_auto_default_services,
+)
 
 
 OrchestratorStatus = str  # "idle" | "tuning" | "ok"
@@ -29,12 +33,27 @@ _STATUS_TEXT = {
 }
 
 _LONG_TUNE_S = 30.0
-_FAIL_THRESHOLD = 3
-_SCAN_INTERVAL_S = 3.0
-_DISCORD_PROBE_INTERVAL_S = 20.0
+_FAIL_THRESHOLD = 2
+_PROCESS_FAIL_THRESHOLD = 1  # SYN_SENT from a known app is enough
+_SCAN_INTERVAL_S = 2.0
 _MAX_STEPS = 12
 _EXHAUSTED_COOLDOWN_S = 900.0
 _SYN_SENT_MIN_AGE_HINT = 2  # require repeated fails; SYN_SENT alone is normal
+_SCAN_SAMPLE_LIMIT = 200
+
+# IDE / tooling noise that steals Auto while a real app is broken.
+_NOISE_PROCESS_TOKENS: tuple[str, ...] = (
+    "cursor.exe",
+    "code.exe",
+    "devenv.exe",
+    "studio64.exe",
+    "idea64.exe",
+    "webstorm64.exe",
+    "pycharm64.exe",
+    "rider64.exe",
+    "clion64.exe",
+    "windsurf.exe",
+)
 
 _STEP_PHASES: tuple[tuple[str, frozenset[str]], ...] = (
     ("services", frozenset({"enable_service"})),
@@ -62,6 +81,36 @@ def _exe_label(process: str) -> str:
     return name[:48]
 
 
+def _collapse_ip_batch(ips: list[str]) -> list[str]:
+    """If many peers share a /24, keep the /24 once instead of N singles."""
+    import ipaddress
+    from collections import defaultdict
+
+    buckets: dict[str, list[str]] = defaultdict(list)
+    other: list[str] = []
+    for raw in ips:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        try:
+            addr = ipaddress.ip_address(text)
+            if addr.version != 4:
+                other.append(text)
+                continue
+            net = str(ipaddress.ip_network(f"{text}/24", strict=False))
+            buckets[net].append(text)
+        except ValueError:
+            other.append(text)
+    out: list[str] = []
+    for net, members in buckets.items():
+        if len(members) >= 3:
+            out.append(net)
+        else:
+            out.extend(members)
+    out.extend(other)
+    return list(dict.fromkeys(out))
+
+
 class OrchestratorEngine:
     """Background Auto-mode loop: incidents → classify → tuner → batched cutover → knowledge."""
 
@@ -86,11 +135,10 @@ class OrchestratorEngine:
         self._status: OrchestratorStatus = "idle"
         self._detail = ""
         self._zapret_active = False
-        self._min_incident_interval_s = 12.0
+        self._min_incident_interval_s = 6.0
         self._last_incident_at = 0.0
         self._loop_interval_s = 1.0
         self._last_scan_at = 0.0
-        self._last_discord_probe_at = 0.0
         self._mapper = ServiceMapper()
         self._signals = SignalCollector()
         self._tuner = SmartTuner()
@@ -128,6 +176,23 @@ class OrchestratorEngine:
         except Exception:
             pass
         self._reload_learned_conflicts()
+        # Every attach: verify Auto never left service hosts in battle excludes.
+        try:
+            self.ensure_service_guards()
+        except Exception:
+            pass
+
+    def ensure_service_guards(self) -> dict[str, Any]:
+        """Re-check that Auto did not pollute immutable service catalogs / battle lists."""
+        if self.context is None:
+            return {"ok": False, "error": "no_context"}
+        from zapret_hub.services.orchestrator.auto_overlay import ensure_auto_integrity
+
+        configs = Path(self.context.paths.configs_dir)
+        work_root = Path(self.context.paths.configs_dir).parent
+        report = ensure_auto_integrity(configs, work_root=work_root)
+        self._log("info", "Orchestrator service-guard check", **{str(k): report.get(k) for k in report})
+        return {"ok": True, **report}
 
     def _reload_learned_conflicts(self) -> None:
         knowledge = getattr(self.context, "knowledge", None) if self.context else None
@@ -149,26 +214,156 @@ class OrchestratorEngine:
         return "auto" if str(getattr(settings, field, "manual") or "manual") == "auto" else "manual"
 
     def set_mode(self, mode: str, *, backend: str | None = None) -> dict[str, Any]:
+        """Set Auto/Manual for one bypass.
+
+        Each bypass (zapret / zapret2) has its own control-mode flag. Automation
+        never switches Quick Access between them — only the currently selected
+        bypass is live-tuned; the other flag is stored for when the user selects it.
+        """
         normalized = "auto" if str(mode or "").strip().lower() == "auto" else "manual"
-        selected_backend = backend or "zapret"
-        if self.context is not None and backend is None:
-            selected_backend = self._active_backend(self.context.settings.get())
+        if self.context is None:
+            with self._lock:
+                self._mode = normalized
+                if normalized == "manual":
+                    self._status = "idle"
+                    self._detail = ""
+                    self._drain_queue()
+            snapshot = self.status_snapshot()
+            self._emit_status(snapshot)
+            return snapshot
+
+        settings = self.context.settings.get()
+        active = self._active_backend(settings)
+        target = str(backend or active)
+        if target not in {"zapret", "zapret2"}:
+            target = active
+
+        field = "zapret2_control_mode" if target == "zapret2" else "zapret_control_mode"
+        updates: dict[str, Any] = {field: normalized}
+
+        # Inactive bypass: persist its Auto flag only — do not touch live engine.
+        if target != active:
+            try:
+                self.context.settings.update(**updates)
+            except Exception:
+                pass
+            snapshot = self.status_snapshot()
+            self._emit_status(snapshot)
+            return snapshot
+
         with self._lock:
             self._mode = normalized
             if normalized == "manual":
                 self._status = "idle"
                 self._detail = ""
                 self._drain_queue()
-        if self.context is not None:
+
+        try:
+            if normalized == "auto":
+                before_services = {str(item) for item in (settings.selected_service_ids or [])}
+                merged = merge_auto_default_services(settings.selected_service_ids)
+                updates["selected_service_ids"] = merged
+                if "gaming" in merged and "gaming" not in before_services:
+                    if str(settings.zapret_game_filter_mode or "disabled") == "disabled":
+                        updates["zapret_game_filter_mode"] = "tcpudp"
+                self.context.settings.update(**updates)
+                self._seed_auto_services(merged)
+            else:
+                self.context.settings.update(**updates)
+        except Exception:
             try:
-                field = "zapret2_control_mode" if selected_backend == "zapret2" else "zapret_control_mode"
                 self.context.settings.update(**{field: normalized})
             except Exception:
                 pass
+
         self.sync_lifecycle(zapret_active=self._zapret_active)
         snapshot = self.status_snapshot()
         self._emit_status(snapshot)
         return snapshot
+
+    def _seed_auto_services(self, service_ids: list[str]) -> None:
+        """Overlay-only seed when entering Auto.
+
+        Classic Zapret already materializes stock service hostlists on start.
+        Dumping Cloudflare/gaming CIDRs into ipset-all-user here is what breaks
+        Discord the moment the user switches Manual → Auto.
+        """
+        if self.context is None or not service_ids:
+            return
+        try:
+            from zapret_hub.services.orchestrator import zapret2_hub
+            from zapret_hub.services.orchestrator.auto_overlay import AutoOverlayStore
+
+            configs = Path(self.context.paths.configs_dir)
+            settings = self.context.settings.get()
+            backend = self._active_backend(settings)
+            if backend == "zapret2":
+                # Zapret2 hub lists are separate; seed domains + curated nets there.
+                zapret2_hub.seed_service_lists(configs, list(service_ids), only_missing=True)
+            else:
+                # Classic: domains-only into Auto overlay (never battle user lists).
+                store = AutoOverlayStore(configs)
+                domains = zapret2_hub.harvest_service_domains(list(service_ids))
+                if domains:
+                    store.add_domains(domains, reason="seed_auto_services")
+                try:
+                    zapret2_hub.sanitize_classic_discord_pollution(configs)
+                except Exception:
+                    pass
+        except Exception as error:
+            self._log("warning", "Failed to seed Auto default services", error=str(error))
+
+    def reset_auto_cache(self) -> dict[str, Any]:
+        """Clear Auto overlay + knowledge so learning starts fresh. Battle lists stay intact."""
+        result: dict[str, Any] = {"ok": True, "overlay": False, "knowledge": False, "memory": False}
+        if self.context is None:
+            result["ok"] = False
+            result["error"] = "no_context"
+            return result
+        try:
+            from zapret_hub.services.orchestrator.auto_overlay import (
+                AutoOverlayStore,
+                migrate_legacy_markers_into_overlay,
+            )
+
+            configs = Path(self.context.paths.configs_dir)
+            try:
+                migrate_legacy_markers_into_overlay(configs)
+            except Exception:
+                pass
+            AutoOverlayStore(configs).clear()
+            result["overlay"] = True
+            try:
+                from zapret_hub.services.orchestrator.auto_overlay import ensure_auto_integrity
+
+                ensure_auto_integrity(configs, work_root=Path(self.context.paths.configs_dir).parent)
+                result["battle_scrub"] = True
+            except Exception:
+                pass
+        except Exception as error:
+            result["ok"] = False
+            result["error"] = str(error)
+        try:
+            knowledge = getattr(self.context, "knowledge", None)
+            if knowledge is not None:
+                knowledge.clear()
+                result["knowledge"] = True
+        except Exception:
+            pass
+        try:
+            self._memory.clear()
+            self._memory.clear_tuning_started()
+            result["memory"] = True
+        except Exception:
+            pass
+        try:
+            self.set_status("idle", detail="auto_cache_reset")
+        except Exception:
+            pass
+        snapshot = self.status_snapshot()
+        self._emit_status(snapshot)
+        result["status"] = snapshot
+        return result
 
     def get_mode(self) -> str:
         with self._lock:
@@ -192,17 +387,21 @@ class OrchestratorEngine:
             self._zapret_active = bool(zapret_active)
             should_run = self._mode == "auto" and self._zapret_active
         if should_run:
+            try:
+                self.ensure_service_guards()
+            except Exception:
+                pass
             self.start()
             with self._lock:
                 if self._status == "idle":
                     self._status = "ok"
         else:
-            if self._mode != "auto":
-                self.stop()
-            else:
-                with self._lock:
-                    if not self._zapret_active and self._status != "tuning":
-                        self._status = "idle"
+            # Power-off must halt Auto even mid-tuning — otherwise cutover restarts Zapret.
+            self.stop(clear_tuning=True)
+            with self._lock:
+                if not self._zapret_active or self._mode != "auto":
+                    self._status = "idle"
+                    self._detail = ""
         return self.status_snapshot()
 
     def start(self) -> None:
@@ -219,16 +418,28 @@ class OrchestratorEngine:
             if self._status == "idle" and self._mode == "auto":
                 self._status = "ok"
 
-    def stop(self) -> None:
+    def stop(self, *, clear_tuning: bool = False) -> None:
         thread: threading.Thread | None
         with self._lock:
             thread = self._thread
             self._stop.set()
             self._thread = None
-            if self._mode != "auto":
+            if clear_tuning or self._mode != "auto":
                 self._status = "idle"
+                self._detail = ""
+                self._busy = False
+                self._drain_queue()
+                try:
+                    self._memory.clear_tuning_started()
+                except Exception:
+                    pass
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=2.0)
+
+    def is_live(self) -> bool:
+        """True while Auto may mutate the selected bypass (power must stay on)."""
+        with self._lock:
+            return self._mode == "auto" and self._zapret_active and not self._stop.is_set()
 
     def enqueue(self, incident: dict[str, Any]) -> bool:
         now = time.monotonic()
@@ -443,7 +654,6 @@ class OrchestratorEngine:
             enabled.add("zapret")
             self.context.settings.update(
                 zapret_control_mode="auto",
-                zapret_ipset_mode="any",
                 selected_service_ids=ordered,
                 enabled_component_ids=sorted(enabled),
                 # Keep user's runtime if already zapret; only default when empty/none.
@@ -507,7 +717,7 @@ class OrchestratorEngine:
             self.context.settings.update(
                 selected_zapret_general=trusted,
                 trusted_general=trusted,
-                zapret_ipset_mode=str(chosen.get("ipset_mode") or "any"),
+                zapret_ipset_mode=str(chosen.get("ipset_mode") or settings.zapret_ipset_mode or "loaded"),
                 zapret_game_filter_mode=str(
                     chosen.get("game_mode") or settings.zapret_game_filter_mode or "disabled"
                 ),
@@ -518,12 +728,18 @@ class OrchestratorEngine:
             probe_targets = cutover.probe_for_services(probe_services)
             required_hosts: list[str] = []
             if youtube:
-                required_hosts.append("youtube.com")
-                if not any("youtube" in str(t.get("value", "")).lower() for t in probe_targets):
+                for host in health_hosts_for("youtube") or ("redirector.googlevideo.com", "www.youtube.com"):
+                    if host not in required_hosts:
+                        required_hosts.append(host)
+                if not any("youtube" in str(t.get("value", "")).lower() or "googlevideo" in str(t.get("value", "")).lower() for t in probe_targets):
+                    probe_targets.append({"value": "https://redirector.googlevideo.com/"})
                     probe_targets.append({"value": "https://www.youtube.com/"})
             if discord:
-                required_hosts.append("discord.com")
+                for host in health_hosts_for("discord") or ("updates.discord.com", "discord.com"):
+                    if host not in required_hosts:
+                        required_hosts.append(host)
                 if not any("discord" in str(t.get("value", "")).lower() for t in probe_targets):
+                    probe_targets.append({"value": "https://updates.discord.com/"})
                     probe_targets.append({"value": "https://discord.com/"})
 
             apply_result = cutover.apply_and_start_trusted(
@@ -548,7 +764,7 @@ class OrchestratorEngine:
                         "bootstrap",
                         {
                             "general": trusted,
-                            "ipset": "any",
+                            "ipset": str(self.context.settings.get().zapret_ipset_mode or "loaded"),
                             "services": ["youtube", "discord"],
                             "score": 10.0,
                             "symptom": "bootstrap",
@@ -566,7 +782,7 @@ class OrchestratorEngine:
                 "backend": "zapret",
                 "trustedGeneral": trusted,
                 "services": ordered,
-                "ipset": "any",
+                "ipset": str(self.context.settings.get().zapret_ipset_mode or "loaded"),
             }
         except Exception as error:
             self._log("error", "Bootstrap failed", error=str(error))
@@ -595,7 +811,6 @@ class OrchestratorEngine:
             enabled.add("zapret")
             changes: dict[str, Any] = {
                 "zapret_control_mode": "auto",
-                "zapret_ipset_mode": "any",
                 "selected_service_ids": ordered,
                 "enabled_component_ids": sorted(enabled),
                 "selected_runtime_mode": "zapret",
@@ -664,193 +879,232 @@ class OrchestratorEngine:
         if self.context is None:
             return
         knowledge = getattr(self.context, "knowledge", None)
-        samples = self._signals.snapshot_connections(limit=60)
+        samples = self._signals.snapshot_connections(limit=_SCAN_SAMPLE_LIMIT)
         settings = self.context.settings.get()
         selected = {str(item) for item in (settings.selected_service_ids or [])}
-        now = time.monotonic()
-        if "discord" in selected and (now - self._last_discord_probe_at) >= _DISCORD_PROBE_INTERVAL_S:
-            self._last_discord_probe_at = now
-            discord_probe = self._signals.probe_host_access("discord.com")
-            if discord_probe.ok:
-                self._memory.reset_fail("service:discord")
-            elif self._memory.bump_fail("service:discord") >= 2:
-                self._handle_incident(
-                    {
-                        "domain": "discord.com",
-                        "process": "Discord.exe",
-                        "proto": "tcp",
-                        "remote_port": 443,
-                        "services": ["discord"],
-                        "symptom": classify_failure(discord_probe, domain_in_lists=True),
-                        "selected": list(selected),
-                    }
-                )
-                return
         lists_dirs = self._list_dirs()
         learner = HostlistLearner(Path(self.context.paths.configs_dir))
 
-        batch_domains: list[str] = []
-        batch_ips: list[str] = []
-        batch_missing: list[str] = []
-        batch_services: list[str] = []
-        primary: dict[str, Any] | None = None
-        checked = 0
-
+        # Defer IDE noise unless it maps to a selected service.
+        filtered: list[Any] = []
+        deferred_noise: list[Any] = []
         for sample in samples:
+            blob = (sample.process or "").lower().replace("\\", "/")
+            is_noise = any(token in blob for token in _NOISE_PROCESS_TOKENS)
+            process_services = {hit.service_id for hit in self._mapper.map_process(sample.process)}
+            if is_noise and not (process_services & selected):
+                deferred_noise.append(sample)
+            else:
+                filtered.append(sample)
+        samples = [*filtered, *deferred_noise]
+
+        # Group by process so one Discord launch → one batched incident (all hosts/IPs).
+        by_process: dict[str, list[Any]] = {}
+        for sample in samples:
+            label = _exe_label(sample.process).lower() or f"pid:{int(getattr(sample, 'pid', 0) or 0)}"
+            by_process.setdefault(label, []).append(sample)
+
+        best: dict[str, Any] | None = None
+        best_score = -1
+
+        for _label, group in by_process.items():
             if self._stop.is_set() or self._mode != "auto":
                 return
-            if checked >= 16:
-                break
-            process_services = [hit.service_id for hit in self._mapper.map_process(sample.process)]
-            missing_process_services = [item for item in process_services if item not in selected]
-            if missing_process_services:
-                service_id = missing_process_services[0]
-                activation_key = f"service-activation:{service_id}:{_exe_label(sample.process).lower()}"
-                if self._memory.mark_notified(activation_key, ttl_s=45.0):
-                    self._log(
-                        "info",
-                        "Orchestrator detected an active service process",
-                        process=sample.process,
-                        service=service_id,
+            process = str(group[0].process or "")
+            process_services = [hit.service_id for hit in self._mapper.map_process(process)]
+            domains: list[str] = []
+            ips: list[str] = []
+            services: list[str] = list(process_services)
+            syn_count = 0
+            udp_fail = 0
+            primary_sample = group[0]
+            probed_hosts: set[str] = set()
+
+            for sample in group:
+                state = (sample.state or "").upper()
+                interesting_tcp = state in {"SYN_SENT", "SYN_RECEIVED"}
+                interesting_udp = sample.proto == "udp" and is_interesting_udp_port(sample.remote_port)
+                if interesting_tcp:
+                    syn_count += 1
+                    primary_sample = sample
+                if interesting_udp:
+                    udp_fail += 1
+                    primary_sample = sample
+
+                mapped = [
+                    hit.service_id
+                    for hit in self._mapper.map(
+                        host=sample.domain,
+                        ip=sample.remote_ip,
+                        process=process,
+                        use_dns=bool(sample.domain),
                     )
-                    self._handle_incident(
-                        {
-                            "domain": sample.domain,
-                            "ip": sample.remote_ip,
-                            "process": sample.process,
-                            "proto": sample.proto,
-                            "remote_port": sample.remote_port,
-                            "services": missing_process_services,
-                            "symptom": "service_detected",
-                            "selected": list(selected),
-                        }
-                    )
-                    return
-            state = (sample.state or "").upper()
-            interesting_tcp = state in {"SYN_SENT", "SYN_RECEIVED"}
-            interesting_udp = sample.proto == "udp" and sample.remote_port in {
-                3478,
-                3479,
-                3480,
-                5222,
-                5060,
-                5062,
-                443,
-            }
-            services = [
-                hit.service_id
-                for hit in self._mapper.map(
-                    host=sample.domain, ip=sample.remote_ip, process=sample.process, use_dns=bool(sample.domain)
+                ]
+                for sid in mapped:
+                    if sid not in services:
+                        services.append(sid)
+
+                host = str(sample.domain or "").strip().lower().rstrip(".")
+                if host and host not in domains:
+                    domains.append(host)
+                if sample.remote_ip and sample.remote_ip not in ips:
+                    # Collapse to /24 hints later in tuner via add_ip list; keep raw IPs here.
+                    ips.append(sample.remote_ip)
+
+            if not services and not syn_count and not udp_fail:
+                continue
+
+            missing = [sid for sid in services if sid not in selected]
+            # Known app running but service not selected → activate once with FULL batch.
+            if missing:
+                activation_key = f"service-activation:{missing[0]}:{_exe_label(process).lower()}"
+                if not self._memory.mark_notified(activation_key, ttl_s=30.0):
+                    continue
+                self._log(
+                    "info",
+                    "Orchestrator detected an active service process",
+                    process=process,
+                    service=missing[0],
+                    domains=len(domains),
+                    ips=len(ips),
                 )
-            ]
-            if sample.domain and not services and not learner.domain_in_merged_lists(sample.domain, lists_dirs):
-                # Reverse DNS often returns generic CloudFront/EC2/Google names.
-                # Do not rewrite the runtime for unrelated background traffic.
-                continue
-            if not interesting_tcp and not interesting_udp and not services:
-                continue
-            if sample.proto == "tcp" and not interesting_tcp and not sample.domain and not services:
-                continue
-
-            host = sample.domain or ""
-            key = host or sample.remote_ip
-            if not key:
-                continue
-            if knowledge is not None and (
-                knowledge.is_dead_host(key) or knowledge.on_cooldown(f"host:{key}")
-            ):
-                continue
-
-            if not host:
-                if not services or not (interesting_udp or interesting_tcp):
-                    continue
-                fails = self._memory.bump_fail(sample.remote_ip)
-                if fails < _FAIL_THRESHOLD:
-                    continue
-                checked += 1
-                if sample.remote_ip and sample.remote_ip not in batch_ips:
-                    batch_ips.append(sample.remote_ip)
-                for sid in services:
-                    if sid not in batch_services:
-                        batch_services.append(sid)
-                if primary is None:
-                    primary = {
-                        "domain": "",
-                        "ip": sample.remote_ip,
-                        "process": sample.process,
-                        "proto": sample.proto,
-                        "remote_port": sample.remote_port,
-                        "services": list(services),
-                        "symptom": "external_miss" if sample.proto == "udp" else "tcp_timeout",
+                self._handle_incident(
+                    {
+                        "domain": domains[0] if domains else "",
+                        "ip": ips[0] if ips else str(primary_sample.remote_ip or ""),
+                        "process": process,
+                        "proto": primary_sample.proto,
+                        "remote_port": primary_sample.remote_port,
+                        "services": missing if missing else services,
+                        "symptom": "service_detected",
                         "selected": list(selected),
+                        "domains": domains,
+                        "ips": ips,
+                        "domains_missing": [
+                            host for host in domains if not learner.domain_in_merged_lists(host, lists_dirs)
+                        ],
                     }
+                )
+                return
+
+            # Service already selected — need real failure signals.
+            failing = syn_count > 0 or udp_fail > 0
+            # Process-driven probes: only check remotes THIS process is talking to
+            # (not blind periodic discord.com polls). Cap to keep the scan cheap.
+            if not failing and services:
+                candidates = [h for h in domains if h][:4]
+                if not candidates:
+                    # Resolve a few IPs for process-owned remotes when DNS was empty.
+                    for sample in group[:6]:
+                        if sample.domain or not sample.remote_ip:
+                            continue
+                        if knowledge is not None and knowledge.is_dead_host(sample.remote_ip):
+                            continue
+                        ptr = ""
+                        try:
+                            ptr = self._mapper.reverse_dns(sample.remote_ip)
+                        except Exception:
+                            ptr = ""
+                        if ptr and ptr not in domains:
+                            domains.append(ptr)
+                            candidates.append(ptr)
+                        if len(candidates) >= 3:
+                            break
+                for host in candidates:
+                    if host in probed_hosts:
+                        continue
+                    probed_hosts.add(host)
+                    if knowledge is not None and (
+                        knowledge.is_dead_host(host) or knowledge.on_cooldown(f"host:{host}")
+                    ):
+                        continue
+                    result = self._signals.probe_host_access(host, timeout_s=2.5)
+                    if result.ok:
+                        self._memory.reset_fail(host)
+                        continue
+                    failing = True
+                    primary_sample = next((s for s in group if (s.domain or "").lower().rstrip(".") == host), primary_sample)
+                    in_lists = learner.domain_in_merged_lists(host, lists_dirs)
+                    symptom = classify_failure(result, domain_in_lists=in_lists)
+                    if symptom == "dead_host":
+                        if knowledge is not None:
+                            knowledge.mark_dead_host(host)
+                        continue
+                    threshold = _PROCESS_FAIL_THRESHOLD if process_services else _FAIL_THRESHOLD
+                    if self._memory.bump_fail(host) < threshold:
+                        continue
+                    score = 100 + syn_count * 10 + len(domains) + (20 if set(services) & selected else 0)
+                    incident = {
+                        "domain": host,
+                        "ip": str(primary_sample.remote_ip or ""),
+                        "process": process,
+                        "proto": "tcp",
+                        "remote_port": int(primary_sample.remote_port or 443),
+                        "services": services,
+                        "symptom": symptom,
+                        "selected": list(selected),
+                        "domains": domains,
+                        "ips": ips,
+                        "domains_missing": [
+                            item for item in domains if not learner.domain_in_merged_lists(item, lists_dirs)
+                        ],
+                    }
+                    if score > best_score:
+                        best_score = score
+                        best = incident
+                    break
                 continue
 
-            checked += 1
-            if interesting_tcp:
-                fails = self._memory.bump_fail(host)
-                if fails < _FAIL_THRESHOLD:
+            if not failing:
+                continue
+
+            # SYN_SENT / interesting UDP — trust the OS signal; do not wait for slow probes.
+            # Known apps fire on the first failing scan; unknowns still need a short confirm.
+            if not (process_services and syn_count >= 1):
+                threshold = _PROCESS_FAIL_THRESHOLD if process_services else _FAIL_THRESHOLD
+                fail_key = domains[0] if domains else (ips[0] if ips else _exe_label(process).lower())
+                if self._memory.bump_fail(fail_key) < threshold:
                     continue
-            else:
-                fails = self._memory.bump_fail(f"soft:{host}")
-                if fails < _FAIL_THRESHOLD + 1:
-                    continue
 
-            result = self._signals.probe_host_access(host)
-            if result.ok:
-                self._memory.reset_fail(host)
-                self._memory.reset_fail(f"soft:{host}")
-                continue
-            fails = self._memory.bump_fail(host)
-            if fails < _FAIL_THRESHOLD:
-                continue
-            in_lists = learner.domain_in_merged_lists(host, lists_dirs)
-            symptom = classify_failure(result, domain_in_lists=in_lists)
-            if symptom == "dead_host":
-                if knowledge is not None:
-                    knowledge.mark_dead_host(host)
-                continue
-            if host not in batch_domains:
-                batch_domains.append(host)
-            if not in_lists and host not in batch_missing:
-                batch_missing.append(host)
-            if sample.remote_ip and sample.remote_ip not in batch_ips:
-                batch_ips.append(sample.remote_ip)
-            for sid in services:
-                if sid not in batch_services:
-                    batch_services.append(sid)
-            if primary is None:
-                primary = {
-                    "domain": host,
-                    "ip": sample.remote_ip,
-                    "process": sample.process,
-                    "proto": sample.proto,
-                    "remote_port": sample.remote_port,
-                    "services": list(services),
-                    "symptom": symptom,
-                    "selected": list(selected),
-                }
-            elif symptom == "external_miss" and primary.get("symptom") != "external_miss":
-                primary["symptom"] = "external_miss"
+            symptom = "tcp_timeout" if syn_count else "external_miss"
+            score = 80 + syn_count * 15 + udp_fail * 8 + len(domains) + len(ips)
+            if set(services) & selected:
+                score += 25
+            incident = {
+                "domain": domains[0] if domains else "",
+                "ip": ips[0] if ips else str(primary_sample.remote_ip or ""),
+                "process": process,
+                "proto": primary_sample.proto,
+                "remote_port": primary_sample.remote_port,
+                "services": services,
+                "symptom": symptom,
+                "selected": list(selected),
+                "domains": domains,
+                "ips": ips,
+                "domains_missing": [
+                    host for host in domains if host and not learner.domain_in_merged_lists(host, lists_dirs)
+                ],
+            }
+            if score > best_score:
+                best_score = score
+                best = incident
 
-        if primary is None:
+        if best is None:
             return
-        primary["domains"] = batch_domains
-        primary["ips"] = batch_ips
-        primary["domains_missing"] = batch_missing
-        if batch_services:
-            merged_services = list(dict.fromkeys([*list(primary.get("services") or []), *batch_services]))
-            primary["services"] = merged_services
-        self._handle_incident(primary)
+        self._handle_incident(best)
 
     def _handle_incident(self, incident: dict[str, Any]) -> None:
         if self.context is None or self._mode != "auto":
+            return
+        if not self.is_live():
             return
         if self._busy:
             return
         self._busy = True
         knowledge = getattr(self.context, "knowledge", None)
         try:
+            if not self.is_live():
+                return
             domain = str(incident.get("domain") or "").strip().lower().rstrip(".")
             ip = str(incident.get("ip") or "").strip()
             domains = [
@@ -868,6 +1122,7 @@ class OrchestratorEngine:
                 domains.insert(0, domain)
             if ip and ip not in ips:
                 ips.insert(0, ip)
+            ips = _collapse_ip_batch(ips)
             process = str(incident.get("process") or "")
             proto = str(incident.get("proto") or "")
             remote_port = int(incident.get("remote_port") or 0)
@@ -1041,9 +1296,17 @@ class OrchestratorEngine:
             cutover = self._ensure_cutover()
             # Keep status as «Подбираю конфигурацию…: Discord.exe» — not IPs/CIDRs/knobs.
             self.set_status("tuning", detail=detail)
+            if not self.is_live():
+                self.set_status("idle")
+                self._memory.clear_tuning_started()
+                return
             result: dict[str, Any] = {"ok": False, "applied": [], "error": "no_applicable_stage"}
             attempted_steps: list[Any] = []
             for phase, staged_steps in self._staged_plans(steps):
+                if not self.is_live():
+                    self.set_status("idle")
+                    self._memory.clear_tuning_started()
+                    return
                 attempted_steps = staged_steps
                 phase_labels = _PHASE_LABELS.get(phase, (phase, phase))
                 phase_label = phase_labels[0] if self._language().lower().startswith("ru") else phase_labels[1]
@@ -1132,13 +1395,21 @@ class OrchestratorEngine:
                     except Exception as error:
                         self._log("warning", "Knowledge winner save failed", error=str(error))
             else:
+                err = str(result.get("error") or "")
+                if err in {"power_off", "runtime_mode_changed"}:
+                    self.set_status("idle")
+                    self._memory.clear_tuning_started()
+                    return
                 if knowledge is not None:
                     knowledge.set_cooldown(f"host:{host_key}", _EXHAUSTED_COOLDOWN_S)
                     for item in domains[:8]:
                         knowledge.set_cooldown(f"host:{item}", _EXHAUSTED_COOLDOWN_S)
-                self._log("info", "Orchestrator plan failed", host=host_key, symptom=symptom, error=str(result.get("error") or ""))
+                self._log("info", "Orchestrator plan failed", host=host_key, symptom=symptom, error=err)
 
-            self.set_status("ok")
+            if not self.is_live():
+                self.set_status("idle")
+            else:
+                self.set_status("ok")
             self._memory.clear_tuning_started()
         finally:
             self._busy = False
@@ -1166,9 +1437,12 @@ class OrchestratorEngine:
             rule = SERVICE_RULES.get(service_id)
             if rule is None:
                 continue
-            for _name, value in rule.test_targets[:3]:
+            for host in health_hosts_for(service_id)[:3]:
+                targets.append({"value": f"https://{host}/"})
+                if host not in required:
+                    required.append(host)
+            for _name, value in rule.test_targets[:4]:
                 targets.append({"value": value})
-                # Prefer hostnames from service tests as required when no domain.
                 if not domain and "://" in value:
                     host = value.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
                     if host and host not in required:
@@ -1188,7 +1462,7 @@ class OrchestratorEngine:
                 continue
             seen.add(key)
             unique.append(item)
-        return unique[:8], required[:4]
+        return unique[:10], required[:5]
 
     @staticmethod
     def _staged_plans(steps: list[Any]) -> list[tuple[str, list[Any]]]:

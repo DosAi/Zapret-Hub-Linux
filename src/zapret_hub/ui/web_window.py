@@ -374,6 +374,15 @@ class WebBridge(QObject):
                 return
             if str(status) != "error":
                 return
+            # Mid switch / silent reconfigure / power transition — do not yank the button.
+            # Retry / settle paths reconcile the final status.
+            if self._runtime_transition_status in {"on", "starting", "stopping"}:
+                return
+            if self._want_runtime_power():
+                # Power intended: surface starting so retry can run, not a hard off.
+                self._runtime_transition_status = "starting"
+                self._emit_runtime_status("starting")
+                return
             # Optimistic start reported "on"; process died — correct the power button.
             self._runtime_transition_status = None
             self._emit_runtime_status("error")
@@ -876,6 +885,20 @@ class WebBridge(QObject):
         if engine is None:
             return self._orchestrator_snapshot()
         try:
+            settings = self.context.settings.get()
+            backend = (
+                "zapret2"
+                if str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret") == "zapret2"
+                else "zapret"
+            )
+            field = "zapret2_control_mode" if backend == "zapret2" else "zapret_control_mode"
+            configured = str(getattr(settings, field, "manual") or "manual")
+            # Rebind live Auto to the selected bypass's own control flag.
+            # Never starts the other bypass — set_mode is backend-isolated.
+            if str(engine.get_mode() or "") != (
+                "auto" if configured == "auto" else "manual"
+            ) or str((engine.status_snapshot() or {}).get("backend") or "") != backend:
+                engine.set_mode(configured, backend=backend)
             return engine.sync_lifecycle(zapret_active=self._zapret_runtime_active())
         except Exception:
             return self._orchestrator_snapshot()
@@ -891,28 +914,80 @@ class WebBridge(QObject):
         if self.context is None:
             return self._orchestrator_snapshot()
         settings_before = self.context.settings.get()
-        selected_backend = str(backend or settings_before.selected_runtime_mode or "zapret")
-        if selected_backend not in {"zapret", "zapret2"}:
-            selected_backend = "zapret"
+        # Quick Access mode is the source of truth. Never start Zapret2 just because
+        # the settings panel toggled Zapret2 Auto while classic Zapret is selected.
         active_backend = str(settings_before.selected_runtime_mode or "zapret")
-        states = {item.component_id: item for item in self.context.processes.list_states()}
-        component_state = states.get(selected_backend)
-        was_running = bool(component_state and getattr(component_state, "status", "") == "running")
-        should_restart = was_running or (
-            active_backend == selected_backend and self._runtime_is_powered_fast()
-        )
-        if was_running:
-            self.context.processes.stop_component(selected_backend)
-        setting_name = "zapret2_control_mode" if selected_backend == "zapret2" else "zapret_control_mode"
+        if active_backend not in {"zapret", "zapret2"}:
+            active_backend = "zapret"
+        control_backend = str(backend or active_backend)
+        if control_backend not in {"zapret", "zapret2"}:
+            control_backend = active_backend
+
+        setting_name = "zapret2_control_mode" if control_backend == "zapret2" else "zapret_control_mode"
         self.context.settings.update(**{setting_name: normalized})
+
         engine = getattr(self.context, "orchestrator", None)
-        if engine is not None and active_backend == selected_backend:
-            snapshot = engine.set_mode(normalized, backend=selected_backend)
+        # Only drive the live orchestrator / restart when the control toggle belongs
+        # to the currently selected Quick Access backend.
+        affects_live = control_backend == active_backend
+        was_running = False
+        should_restart = False
+        hold_token: int | None = None
+        if affects_live:
+            states = {item.component_id: item for item in self.context.processes.list_states()}
+            component_state = states.get(active_backend)
+            was_running = bool(component_state and getattr(component_state, "status", "") == "running")
+            should_restart = was_running or self._want_runtime_power()
+            if should_restart:
+                # Silent hold — Manual↔Auto must not flash the power button.
+                hold_token = self._hold_service_power()
+                try:
+                    orch = getattr(self.context, "orchestrator", None)
+                    if orch is not None:
+                        orch.sync_lifecycle(zapret_active=False)
+                except Exception:
+                    pass
+            if was_running:
+                self.context.processes.stop_component(active_backend)
+
+        if engine is not None and affects_live:
+            snapshot = engine.set_mode(normalized, backend=active_backend)
         else:
             snapshot = self._orchestrator_snapshot()
-        if should_restart:
-            self.context.processes.start_component(selected_backend)
-        if engine is not None and active_backend == selected_backend:
+
+        if affects_live and should_restart:
+            try:
+                # Pin mode again — start_* must not flip Zapret ↔ Zapret2.
+                self.context.settings.update(
+                    selected_runtime_mode=active_backend,
+                    goshkow_vpn_pending_start=False,
+                )
+                ok = self._start_component_with_retry(active_backend, show_transition_on_retry=True)
+                if hold_token is not None:
+                    self._release_service_power(hold_token, want_power=ok or self._want_runtime_power())
+                    hold_token = None
+                elif not ok:
+                    self._emit_runtime_status("error")
+            except Exception as error:
+                try:
+                    self.context.logging.log(
+                        "error",
+                        "Failed to restart bypass after control mode change",
+                        error=str(error),
+                        backend=active_backend,
+                    )
+                except Exception:
+                    pass
+                if hold_token is not None:
+                    self._release_service_power(hold_token, want_power=True)
+                    hold_token = None
+                else:
+                    self._emit_runtime_status("starting")
+        elif hold_token is not None:
+            self._release_service_power(hold_token, want_power=True)
+            hold_token = None
+
+        if engine is not None and affects_live:
             snapshot = engine.sync_lifecycle(zapret_active=self._zapret_runtime_active())
         try:
             self.event.emit("orchestrator.status", json.dumps(snapshot, ensure_ascii=False))
@@ -1079,13 +1154,24 @@ class WebBridge(QObject):
 
             # Selecting Zapret/Zapret2 must clear a stale VPN pending flag so autostart
             # / admin-retry cannot rewrite the mode back to goshkow-vpn.
-            if runtime_id in {"zapret", "zapret2", "none"}:
-                self.context.settings.update(
-                    selected_runtime_mode=runtime_id,
-                    goshkow_vpn_pending_start=False,
-                )
+            # Also sync enabled_component_ids so start_enabled_components / Auto cutover
+            # cannot flip Quick Access back to the previous bypass.
+            from zapret_hub.services.backend_worker import _sync_bypass_enabled_for_mode
+
+            if runtime_id in {"zapret", "zapret2", "none", "goshkow-vpn"}:
+                _sync_bypass_enabled_for_mode(self.context, runtime_id)
             else:
                 self.context.settings.update(selected_runtime_mode=runtime_id)
+
+            # Abort in-flight Auto cutover for the previous backend immediately.
+            try:
+                orch = getattr(self.context, "orchestrator", None)
+                if orch is not None:
+                    orch.stop()
+                    orch.sync_lifecycle(zapret_active=False)
+            except Exception:
+                pass
+
             if self.show_onboarding:
                 self._emit_runtime_status(self._peek_runtime_status())
                 return None
@@ -1116,11 +1202,9 @@ class WebBridge(QObject):
                             self._switch_running_runtime(runtime_id, previous_runtime_id, True)
                     if gen != self._runtime_select_gen:
                         return
-                    if was_powered and self._transition_token == select_token:
-                        self._runtime_transition_status = None
                     try:
-                        powered = self._runtime_is_powered_fast()
-                        if powered:
+                        alive = self._runtime_process_alive()
+                        if alive:
                             status = "on"
                         elif was_powered and keep_power:
                             # Browse started while powered — don't leave the button off.
@@ -1129,15 +1213,21 @@ class WebBridge(QObject):
                                     self._set_no_bypass_power(True)
                                     status = "on"
                                 else:
-                                    self.context.processes.start_component(runtime_id)
-                                    powered = self._runtime_is_powered_fast()
-                                    status = "on" if powered else "starting"
+                                    ok = self._start_component_with_retry(
+                                        runtime_id, show_transition_on_retry=True
+                                    )
+                                    status = "on" if ok else "error"
                             except Exception:
                                 status = "starting"
+                        elif was_powered:
+                            # Switch intended power on — never snap to off on a brief gap.
+                            status = "on" if self._runtime_process_alive() else "error"
                         else:
                             status = "off"
                     except Exception:
                         status = "on" if was_powered else "off"
+                    if was_powered and self._transition_token == select_token:
+                        self._runtime_transition_status = None
                     if (not was_powered) or self._transition_token == select_token:
                         self._emit_runtime_status(status)
                     try:
@@ -1155,7 +1245,11 @@ class WebBridge(QObject):
                             self._runtime_transition_status = None
                         try:
                             if (not was_powered) or self._transition_token == select_token:
-                                fallback = "starting" if (was_powered and keep_power) else ("on" if was_powered else self._peek_runtime_status())
+                                fallback = (
+                                    "starting"
+                                    if (was_powered and keep_power)
+                                    else ("on" if was_powered else self._peek_runtime_status())
+                                )
                                 self._emit_runtime_status(fallback)
                         except Exception:
                             pass
@@ -1290,6 +1384,44 @@ class WebBridge(QObject):
                 name=f"zapret-hub-orchestrator-mode-{backend or 'active'}",
             ).start()
             return None
+        if command == "orchestrator.resetAuto":
+            engine = getattr(self.context, "orchestrator", None)
+
+            def _reset_bg() -> None:
+                result: dict[str, Any] = {"ok": False, "error": "no_orchestrator"}
+                try:
+                    if engine is not None:
+                        result = engine.reset_auto_cache()
+                    # Rematerialize live bypass so Manual/Auto lists drop cleared overlay.
+                    try:
+                        want = self._want_runtime_power()
+                        active = str(self.context.settings.get().selected_runtime_mode or "zapret")
+                        if want and active in {"zapret", "zapret2"}:
+                            self._reconfigure_runtimes((active,), lambda: None)
+                    except Exception:
+                        pass
+                    self._schedule_on_gui(lambda: self.emit_state(force=True))
+                    ru = self._ru()
+                    self._schedule_on_gui(
+                        lambda: self._emit_toast(
+                            "Кэш авто-режима сброшен." if ru else "Auto mode cache was reset.",
+                            kind="success",
+                            toast_id="orchestrator-reset-auto",
+                        )
+                    )
+                except Exception as error:
+                    result = {"ok": False, "error": str(error)}
+                    try:
+                        self.context.logging.log("error", "orchestrator.resetAuto failed", error=str(error))
+                    except Exception:
+                        pass
+                try:
+                    self.event.emit("orchestrator.resetAuto", json.dumps(result, ensure_ascii=False))
+                except Exception:
+                    pass
+
+            threading.Thread(target=_reset_bg, daemon=True, name="zapret-hub-orchestrator-reset").start()
+            return {"started": True}
         if command == "orchestrator.bootstrap":
             engine = getattr(self.context, "orchestrator", None)
             youtube = True if not isinstance(payload, dict) else bool(payload.get("youtube", True))
@@ -1744,10 +1876,7 @@ class WebBridge(QObject):
 
             def _vpn_select_bg() -> None:
                 try:
-                    states = {item.component_id: item.status for item in self.context.processes.list_states()}
-                    if states.get("goshkow-vpn") == "running":
-                        self.context.processes.stop_component("goshkow-vpn")
-                        self.context.processes.start_component("goshkow-vpn")
+                    self._reconfigure_runtimes(("goshkow-vpn",), lambda: None)
                 except Exception as error:
                     try:
                         self.context.logging.log("error", "vpn.select-server failed", error=str(error))
@@ -1782,7 +1911,14 @@ class WebBridge(QObject):
             bypass_services = set(ordered) - {"telegram-desktop", "ai"}
             active_backend = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
             if bypass_services:
-                enabled_ids.add("zapret2" if active_backend == "zapret2" else "zapret")
+                if active_backend == "zapret2":
+                    enabled_ids.add("zapret2")
+                    enabled_ids.discard("zapret")
+                    enabled_ids.discard("goshkow-vpn")
+                else:
+                    enabled_ids.add("zapret")
+                    enabled_ids.discard("zapret2")
+                    enabled_ids.discard("goshkow-vpn")
             else:
                 enabled_ids.discard("zapret")
                 enabled_ids.discard("zapret2")
@@ -1806,27 +1942,154 @@ class WebBridge(QObject):
             }
             if "ai" in ordered:
                 changes["dns_profile"] = "xbox"
-            if "discord" in ordered and str(getattr(settings, "zapret_control_mode", "manual")) == "auto":
-                changes["zapret_game_filter_mode"] = "tcpudp"
             self.context.settings.update(**changes)
             self.context.merge.rebuild()
             self.context.files._invalidate_collection_cache()
             self.context.files.rebuild_materialized_collections()
 
         bypass_services = set(ordered) - {"telegram-desktop", "ai"}
+        active_backend = str(getattr(self.context.settings.get(), "selected_runtime_mode", "zapret") or "zapret")
+        if active_backend not in {"zapret", "zapret2"}:
+            active_backend = "zapret"
+        # Only restart the selected Quick Access bypass — never the other one.
+        # Also restart TG/DNS when their enable flags change under live power.
         self._reconfigure_runtimes(
-            ("zapret", "zapret2"),
+            (active_backend, "tg-ws-proxy", "xbox-dns"),
             apply,
-            restart_allowed={"zapret": bool(bypass_services), "zapret2": bool(bypass_services)},
+            restart_allowed={
+                active_backend: bool(bypass_services),
+                "tg-ws-proxy": "telegram-desktop" in ordered,
+                "xbox-dns": "ai" in ordered,
+            },
         )
         if emit:
             self.emit_state()
+
+    def _want_runtime_power(self) -> bool:
+        """True when Quick Access power should stay ON (user intent), even mid-stop."""
+        if self._runtime_transition_status in {"on", "starting"}:
+            return True
+        if self._runtime_transition_status in {"off", "stopping"}:
+            return False
+        if self._last_runtime_status in {"on", "starting"}:
+            return True
+        try:
+            return bool(self._runtime_is_powered_fast())
+        except Exception:
+            return False
+
+    def _hold_service_power(self) -> int:
+        """Pin power UI to lit 'on' during silent background restarts. Returns token."""
+        self._transition_token += 1
+        token = int(self._transition_token)
+        # Hold "on" (not "starting") so the button does not flicker during service work.
+        self._runtime_transition_status = "on"
+        self._last_runtime_status = "on"
+        return token
+
+    def _release_service_power(self, token: int, *, want_power: bool) -> None:
+        if token != int(getattr(self, "_transition_token", 0) or 0):
+            return
+        self._runtime_transition_status = None
+        powered = False
+        try:
+            powered = bool(self._runtime_process_alive())
+        except Exception:
+            powered = False
+        if want_power:
+            # Never drop to off while power is intended — keep lit or soft starting.
+            self._emit_runtime_status("on" if powered else "starting")
+        else:
+            self._emit_runtime_status("on" if powered else "off")
 
     def _component_running(self, component_id: str) -> bool:
         return any(
             item.component_id == component_id and str(item.status or "") == "running"
             for item in self.context.processes.list_states()
         )
+
+    def _runtime_process_alive(self) -> bool:
+        """True when the selected bypass process is actually running (ignores UI transition)."""
+        settings = self.context.settings.get()
+        runtime_id = str(settings.selected_runtime_mode or "zapret")
+        if runtime_id == "none":
+            return bool(settings.no_bypass_power_enabled)
+        try:
+            return self._component_running(runtime_id)
+        except Exception:
+            return False
+
+    def _start_component_with_retry(
+        self,
+        component_id: str,
+        *,
+        show_transition_on_retry: bool = True,
+    ) -> bool:
+        """Stop orphan copies → start. On failure, kill copies and start once more.
+
+        Happy path stays silent (caller may hold power 'on'). The retry attempt
+        shows starting/stopping so the power button reflects the transition.
+        Never leaves two winws/winws2 copies running.
+        """
+        if component_id in {"zapret", "zapret2", "goshkow-vpn"}:
+            try:
+                self.context.processes.stop_running_bypass_copies(component_id)
+            except Exception:
+                pass
+
+        def _attempt() -> bool:
+            try:
+                state = self.context.processes.start_component(component_id)
+            except Exception as error:
+                try:
+                    self.context.logging.log(
+                        "error",
+                        "Component start failed",
+                        component=component_id,
+                        error=str(error),
+                    )
+                except Exception:
+                    pass
+                return False
+            if str(getattr(state, "status", "") or "") != "running":
+                return False
+            # Brief settle — optimistic "running" can die immediately.
+            time.sleep(0.35)
+            return self._component_running(component_id)
+
+        if _attempt():
+            return True
+
+        if show_transition_on_retry:
+            self._runtime_transition_status = "starting"
+            self._emit_runtime_status("starting")
+
+        if component_id in {"zapret", "zapret2", "goshkow-vpn"}:
+            try:
+                self.context.processes.stop_running_bypass_copies(component_id)
+            except Exception:
+                try:
+                    self.context.processes.stop_component(component_id)
+                except Exception:
+                    pass
+        else:
+            try:
+                self.context.processes.stop_component(component_id)
+            except Exception:
+                pass
+            time.sleep(0.15)
+
+        ok = _attempt()
+        if not ok:
+            try:
+                self.context.logging.log(
+                    "error",
+                    "Component start failed after retry",
+                    component=component_id,
+                )
+            except Exception:
+                pass
+        return ok
 
     def _reconfigure_runtimes(
         self,
@@ -1835,26 +2098,104 @@ class WebBridge(QObject):
         *,
         restart_allowed: dict[str, bool] | None = None,
     ) -> Any:
+        """Stop → mutate → start for live components.
+
+        If Quick Access power is ON, the active bypass (and enabled aux in the
+        list) always come back even when the process was already stopped.
+        Happy-path Power UI stays lit — on start failure we show starting and retry once.
+        """
+        want_power = self._want_runtime_power()
+        settings = self.context.settings.get()
+        active = str(getattr(settings, "selected_runtime_mode", "zapret") or "zapret")
+
         with self._runtime_reconfigure_lock:
             running = {component_id: self._component_running(component_id) for component_id in component_ids}
-            for component_id, was_running in running.items():
-                if was_running:
-                    self.context.processes.stop_component(component_id)
+            should_restart: dict[str, bool] = {}
+            for component_id in component_ids:
+                allowed = restart_allowed is None or bool(restart_allowed.get(component_id, True))
+                if not allowed:
+                    should_restart[component_id] = False
+                    continue
+                if running[component_id]:
+                    should_restart[component_id] = True
+                elif want_power and component_id == active and component_id in {"zapret", "zapret2", "goshkow-vpn"}:
+                    should_restart[component_id] = True
+                elif want_power and component_id in {"tg-ws-proxy", "xbox-dns"}:
+                    # restart_allowed already says whether TG/DNS should be on after apply.
+                    should_restart[component_id] = True
+                else:
+                    should_restart[component_id] = False
+
+            will_touch = any(running[cid] or should_restart[cid] for cid in component_ids)
+            token: int | None = None
+            if want_power and will_touch:
+                token = self._hold_service_power()
+
+            orch_paused = False
+            if want_power and any(
+                should_restart.get(cid) for cid in component_ids if cid in {"zapret", "zapret2"}
+            ):
+                try:
+                    orch = getattr(self.context, "orchestrator", None)
+                    if orch is not None:
+                        orch.sync_lifecycle(zapret_active=False)
+                        orch_paused = True
+                except Exception:
+                    pass
+
+            restart_ok = True
             try:
-                return action()
-            finally:
                 for component_id, was_running in running.items():
-                    if not was_running or restart_allowed is not None and not restart_allowed.get(component_id, True):
+                    if not was_running:
                         continue
+                    # Stop even when restart is disallowed (e.g. all services cleared).
                     try:
-                        self.context.processes.start_component(component_id)
+                        self.context.processes.stop_component(component_id)
                     except Exception as error:
-                        self.context.logging.log(
-                            "error",
-                            "Runtime restart after reconfiguration failed",
-                            component=component_id,
-                            error=str(error),
+                        try:
+                            self.context.logging.log(
+                                "warning",
+                                "Runtime stop before reconfiguration failed",
+                                component=component_id,
+                                error=str(error),
+                            )
+                        except Exception:
+                            pass
+                try:
+                    return action()
+                finally:
+                    for component_id, do_restart in should_restart.items():
+                        if not do_restart:
+                            continue
+                        ok = self._start_component_with_retry(
+                            component_id,
+                            show_transition_on_retry=want_power,
                         )
+                        if not ok and component_id in {"zapret", "zapret2", "goshkow-vpn"}:
+                            restart_ok = False
+                    if want_power and any(
+                        should_restart.get(cid)
+                        for cid in component_ids
+                        if cid in {"zapret", "zapret2", "goshkow-vpn"}
+                    ):
+                        try:
+                            self._set_auxiliary_components_power_async(True)
+                        except Exception:
+                            pass
+            finally:
+                if orch_paused:
+                    try:
+                        self._sync_orchestrator_lifecycle()
+                    except Exception:
+                        pass
+                if token is not None:
+                    if want_power and not restart_ok:
+                        # Second start already failed — settle to error, not a stuck starting.
+                        if token == int(getattr(self, "_transition_token", 0) or 0):
+                            self._runtime_transition_status = None
+                            self._emit_runtime_status("error")
+                    else:
+                        self._release_service_power(token, want_power=want_power)
 
     def _queue_mod_toggle(self, backend: str, mod_id: str, enabled: bool) -> None:
         if not mod_id:
@@ -2067,7 +2408,7 @@ class WebBridge(QObject):
                         try:
                             if enabled:
                                 # Prefer component state right after start — owned Popen is enough for "on".
-                                powered = self._runtime_is_powered_fast()
+                                powered = self._runtime_process_alive()
                                 if not powered and runtime_id != "none":
                                     try:
                                         # Plain loop: Nuitka 4.1.3 crashes on dictcomp clone in this try/finally.
@@ -2078,13 +2419,13 @@ class WebBridge(QObject):
                                         if item is not None and str(item.status) == "error":
                                             self._emit_runtime_status("error")
                                         else:
-                                            self._emit_runtime_status("off")
+                                            self._emit_runtime_status("error")
                                     except Exception:
-                                        self._emit_runtime_status("off")
+                                        self._emit_runtime_status("error")
                                 else:
                                     self._emit_runtime_status("on" if powered else "off")
                             else:
-                                powered = self._runtime_is_powered_fast()
+                                powered = self._runtime_process_alive()
                                 self._emit_runtime_status("on" if powered else "off")
                         except Exception:
                             pass
@@ -2212,7 +2553,7 @@ class WebBridge(QObject):
     def _runtime_aux_should_run(self) -> bool:
         """Whether optional components should be running with the current power state."""
         try:
-            return bool(self._runtime_is_powered_fast())
+            return bool(self._want_runtime_power())
         except Exception:
             return False
 
@@ -2439,9 +2780,23 @@ class WebBridge(QObject):
             return
         self._onboarding_configuration_running = True
         self._onboarding_configuration_cancelled = False
+        # "Set up again" while powered: keep Quick Access on and restore after diagnostics.
+        keep_power = False
+        try:
+            keep_power = self._runtime_is_powered_fast() or self._last_runtime_status in {
+                "on",
+                "starting",
+            }
+        except Exception:
+            keep_power = False
+        if keep_power:
+            self._runtime_transition_status = "starting"
+            self._emit_runtime_status("starting")
 
         def worker() -> None:
+            restore_runtime = "zapret"
             try:
+                restore_runtime = str(self.context.settings.get().selected_runtime_mode or "zapret")
                 # Apply the service preset in the same worker before diagnostics.
                 # Running this in a second thread raced list materialization and made
                 # onboarding test an older selection intermittently.
@@ -2515,8 +2870,6 @@ class WebBridge(QObject):
             finally:
                 self._onboarding_configuration_running = False
                 self._cached_generals = None
-                # Always leave zapret stopped after onboarding diagnostics — the user
-                # turns power on explicitly. Restarting here looked like an endless loop.
                 try:
                     self.context.processes.abort_diagnostics()
                 except Exception:
@@ -2524,8 +2877,33 @@ class WebBridge(QObject):
                         self.context.processes.stop_component("zapret")
                     except Exception:
                         pass
-                # Push real power status once diagnostics are fully done (even if the
-                # exit animation already ran — otherwise UI stays "off" while winws lives).
+                # Reconfigure-from-settings: restore the previously powered bypass in
+                # the background so Quick Access stays on while diagnostics finish.
+                # Also restore after cancel — abort_diagnostics must not leave power dead.
+                if keep_power:
+                    try:
+                        if restore_runtime in {"zapret", "zapret2", "goshkow-vpn"}:
+                            self.context.processes.start_component(restore_runtime)
+                            self._set_auxiliary_components_power_async(True)
+                            self._runtime_transition_status = None
+                            self._emit_runtime_status("on")
+                        elif restore_runtime == "none":
+                            self._set_no_bypass_power(True)
+                            self._runtime_transition_status = None
+                            self._emit_runtime_status("on")
+                    except Exception as error:
+                        try:
+                            self.context.logging.log(
+                                "error",
+                                "Failed to restore bypass after onboarding configure",
+                                error=str(error),
+                            )
+                        except Exception:
+                            pass
+                        self._runtime_transition_status = None
+                        self._emit_runtime_status("starting")
+                else:
+                    self._runtime_transition_status = None
                 try:
                     self.emit_state(force=True)
                 except Exception:
@@ -2555,11 +2933,7 @@ class WebBridge(QObject):
             self._set_no_bypass_power(True)
             return
         self.context.settings.update(no_bypass_power_enabled=False)
-        try:
-            self.context.processes.stop_running_bypass_copies(runtime_id)
-        except Exception:
-            pass
-        self.context.processes.start_component(runtime_id)
+        self._start_component_with_retry(runtime_id, show_transition_on_retry=True)
         self._set_auxiliary_components_power_async(True)
 
     def _set_runtime_power(self, runtime_id: str, enabled: bool) -> None:
@@ -2576,20 +2950,65 @@ class WebBridge(QObject):
             else:
                 self.context.settings.update(no_bypass_power_enabled=False)
                 # 1) find + stop already-running copies of this bypass
-                # 2) start Hub-owned instance and keep tracking it via list_states
-                try:
-                    self.context.processes.stop_running_bypass_copies(runtime_id)
-                except Exception:
-                    pass
-                self.context.processes.start_component(runtime_id)
+                # 2) start Hub-owned instance (retry once on failure)
+                self._start_component_with_retry(runtime_id, show_transition_on_retry=True)
                 self._set_auxiliary_components_power_async(True)
             return
 
+        # Halt Auto tuning BEFORE stop so cutover cannot race a restart.
+        try:
+            orch = getattr(self.context, "orchestrator", None)
+            if orch is not None:
+                orch.sync_lifecycle(zapret_active=False)
+        except Exception:
+            pass
         if runtime_id != "none":
-            self.context.processes.stop_component(runtime_id)
+            try:
+                self.context.processes.stop_component(runtime_id)
+            except Exception:
+                pass
+            try:
+                self.context.processes.stop_running_bypass_copies(runtime_id)
+            except Exception:
+                pass
         self._set_no_bypass_power(False)
 
     def _apply_settings(self, patch: dict[str, Any]) -> None:
+        before = self.context.settings.get()
+        zapret_before = (
+            before.zapret_ipset_mode,
+            before.zapret_game_filter_mode,
+            getattr(before, "zapret_gaming_set", "stun-wide-base"),
+            before.zapret_udp_exclude_ports,
+            before.selected_zapret_general,
+        )
+        zapret2_before = (
+            getattr(before, "zapret2_tcp_ports", ""),
+            getattr(before, "zapret2_udp_ports", ""),
+            getattr(before, "zapret2_raw_filter", ""),
+            getattr(before, "zapret2_lua_strategy", ""),
+            getattr(before, "zapret2_strategy_id", ""),
+        )
+        tg_before = (
+            before.tg_proxy_host,
+            before.tg_proxy_port,
+            before.tg_proxy_secret,
+            before.tg_proxy_dc_ip,
+            before.tg_proxy_cfproxy_enabled,
+            before.tg_proxy_cfproxy_priority,
+            before.tg_proxy_cfproxy_domain,
+            before.tg_proxy_fake_tls_domain,
+            before.tg_proxy_buf_kb,
+            before.tg_proxy_pool_size,
+        )
+        vpn_before = (
+            str(getattr(before, "goshkow_vpn_subscription_url", "") or ""),
+            bool(getattr(before, "goshkow_vpn_tun_enabled", True)),
+            str(getattr(before, "goshkow_vpn_routing_mode", "") or ""),
+            str(getattr(before, "goshkow_vpn_system_proxy_mode", "") or ""),
+            str(getattr(before, "goshkow_vpn_processes", "") or ""),
+            bool(getattr(before, "goshkow_vpn_processes_exclude_mode", False)),
+        )
         changes: dict[str, Any] = {}
         aliases = {
             "autoStart": "autostart_windows",
@@ -2644,6 +3063,10 @@ class WebBridge(QObject):
             }.items():
                 if source in zapret2:
                     changes[target] = zapret2[source]
+            if "controlMode" in zapret2:
+                self._set_orchestrator_mode(
+                    str(zapret2.get("controlMode") or "manual"), backend="zapret2", emit_state=False
+                )
         tg = patch.get("tg")
         if isinstance(tg, dict):
             tg_aliases = {
@@ -2684,6 +3107,58 @@ class WebBridge(QObject):
                 "processes": str(vpn.get("processes", "")),
                 "processes_exclude_mode": bool(vpn.get("processesExcludeMode", False)),
             })
+
+        want_power = self._want_runtime_power()
+        after = self.context.settings.get()
+        zapret_after = (
+            after.zapret_ipset_mode,
+            after.zapret_game_filter_mode,
+            getattr(after, "zapret_gaming_set", "stun-wide-base"),
+            after.zapret_udp_exclude_ports,
+            after.selected_zapret_general,
+        )
+        zapret2_after = (
+            getattr(after, "zapret2_tcp_ports", ""),
+            getattr(after, "zapret2_udp_ports", ""),
+            getattr(after, "zapret2_raw_filter", ""),
+            getattr(after, "zapret2_lua_strategy", ""),
+            getattr(after, "zapret2_strategy_id", ""),
+        )
+        tg_after = (
+            after.tg_proxy_host,
+            after.tg_proxy_port,
+            after.tg_proxy_secret,
+            after.tg_proxy_dc_ip,
+            after.tg_proxy_cfproxy_enabled,
+            after.tg_proxy_cfproxy_priority,
+            after.tg_proxy_cfproxy_domain,
+            after.tg_proxy_fake_tls_domain,
+            after.tg_proxy_buf_kb,
+            after.tg_proxy_pool_size,
+        )
+        vpn_after = (
+            str(getattr(after, "goshkow_vpn_subscription_url", "") or ""),
+            bool(getattr(after, "goshkow_vpn_tun_enabled", True)),
+            str(getattr(after, "goshkow_vpn_routing_mode", "") or ""),
+            str(getattr(after, "goshkow_vpn_system_proxy_mode", "") or ""),
+            str(getattr(after, "goshkow_vpn_processes", "") or ""),
+            bool(getattr(after, "goshkow_vpn_processes_exclude_mode", False)),
+        )
+        active = str(getattr(after, "selected_runtime_mode", "zapret") or "zapret")
+        enabled_ids = {str(item) for item in (after.enabled_component_ids or [])}
+        # Background restart while Quick Access stays visually on.
+        if zapret_before != zapret_after and active == "zapret" and (self._component_running("zapret") or want_power):
+            self._reconfigure_runtimes(("zapret",), lambda: None)
+        if zapret2_before != zapret2_after and active == "zapret2" and (self._component_running("zapret2") or want_power):
+            self._reconfigure_runtimes(("zapret2",), lambda: None)
+        if tg_before != tg_after and (
+            self._component_running("tg-ws-proxy") or (want_power and "tg-ws-proxy" in enabled_ids)
+        ):
+            self._reconfigure_runtimes(("tg-ws-proxy",), lambda: None)
+        if vpn_before != vpn_after and active == "goshkow-vpn" and (
+            self._component_running("goshkow-vpn") or want_power
+        ):
+            self._reconfigure_runtimes(("goshkow-vpn",), lambda: None)
 
     def emit_state(self, *, force: bool = False) -> None:
         # During onboarding the UI uses local/event state. Pushing a full
@@ -2793,15 +3268,7 @@ class WebBridge(QObject):
             return True
         if self._runtime_transition_status in {"off", "stopping"}:
             return False
-        settings = self.context.settings.get()
-        runtime_id = str(settings.selected_runtime_mode or "zapret")
-        if runtime_id == "none":
-            return bool(settings.no_bypass_power_enabled)
-        try:
-            states = {item.component_id: item.status for item in self.context.processes.list_states()}
-        except Exception:
-            return False
-        return states.get(runtime_id) == "running"
+        return self._runtime_process_alive()
 
     def _get_file_entries(self) -> list[dict[str, Any]]:
         if self._cached_file_entries is None:
@@ -3054,6 +3521,13 @@ class WebBridge(QObject):
             runtime_status = str(components.get(runtime_id, {}).get("status", "off"))
         if self._runtime_transition_status is not None:
             runtime_status = self._runtime_transition_status
+        elif (
+            runtime_status == "off"
+            and self._last_runtime_status in {"on", "starting"}
+            and not (runtime_id == "none" and not bool(settings.no_bypass_power_enabled))
+        ):
+            # Brief gap while a powered bypass restarts — don't flicker the button off.
+            runtime_status = self._last_runtime_status
         marketplace_mods = self._build_marketplace_mods_payload()
         mods = marketplace_mods["mods"]
         mods2 = marketplace_mods["mods2"]
@@ -3562,12 +4036,28 @@ class WebMainWindow(QMainWindow):
 
     def show_when_ready(self) -> None:
         if self._launch_hidden:
-            self.hide()
+            self.prepare_hidden_tray_launch()
             return
         # Open immediately with the HTML preloader; do not wait for ui.ready.
         self._show_when_ready_requested = False
         if not self.isVisible():
             self._reveal_window()
+
+    def prepare_hidden_tray_launch(self) -> None:
+        """Autostart / start-in-tray: stay in tray without a ghost empty window.
+
+        Clears first-show hide flags so a later tray click can actually restore.
+        """
+        self._launch_hidden = False
+        self._first_show = False
+        try:
+            if self._window_animation is not None:
+                self._window_animation.stop()
+                self._window_animation = None
+        except Exception:
+            pass
+        self.setWindowOpacity(1.0)
+        self.hide()
 
     def start_enabled_components_async(self, *, autostart_only: bool = False) -> None:
         if self.context is None:
@@ -3609,14 +4099,53 @@ class WebMainWindow(QMainWindow):
 
         threading.Thread(target=_run, daemon=True, name="zapret-hub-autostart").start()
 
+    def request_autostart_power(self) -> None:
+        """Turn Quick Access power on with the user's last selected mode/settings."""
+        if self.context is None or self.bridge is None:
+            return
+        bridge = self.bridge
+        try:
+            if getattr(bridge, "_power_user_touched", False):
+                return
+        except Exception:
+            pass
+        try:
+            from zapret_hub.services.backend_worker import _sync_bypass_enabled_for_mode
+
+            runtime_id = str(self.context.settings.get().selected_runtime_mode or "zapret")
+            if runtime_id in {"zapret", "zapret2", "none", "goshkow-vpn"}:
+                _sync_bypass_enabled_for_mode(self.context, runtime_id)
+        except Exception:
+            pass
+        # Same path as the power button — starts selected bypass + aux components.
+        try:
+            bridge._dispatch("runtime.power", {"on": True})
+        except Exception:
+            try:
+                self.start_enabled_components_async(autostart_only=False)
+            except Exception:
+                pass
+
     def restore_from_external_launch(self, *, deeplink: str | None = None) -> None:
+        # Must clear tray-boot flags BEFORE show() — otherwise showEvent re-hides
+        # the window on the first restore after --autostart-launch + start_in_tray.
+        self._launch_hidden = False
+        self._first_show = False
         self._apply_startup_geometry()
-        self.setWindowOpacity(0.0)
+        was_visible = bool(self.isVisible())
+        if not was_visible:
+            self.setWindowOpacity(0.0)
         self.show()
         self.showNormal()
         _bring_widget_to_front(self)
-        self._animate_opacity(0.0, 1.0, 150)
+        if not was_visible:
+            self._animate_opacity(0.0, 1.0, 150)
+        else:
+            self.setWindowOpacity(1.0)
         QTimer.singleShot(0, lambda: _bring_widget_to_front(self))
+        # Autostart tray boot may have pushed state while hidden — refresh subscribers.
+        if self.bridge is not None and self.bridge.context is not None:
+            QTimer.singleShot(50, lambda: self.bridge.emit_state(force=True) if self.bridge and self.bridge.context else None)
         if deeplink:
             QTimer.singleShot(200, lambda: self.handle_deeplink(deeplink))
 
@@ -3626,9 +4155,11 @@ class WebMainWindow(QMainWindow):
         if self._first_show:
             self._first_show = False
             if self._launch_hidden:
+                # Only for accidental first show before prepare_hidden_tray_launch().
                 self._launch_hidden = False
                 QTimer.singleShot(0, self.hide)
-            elif self._opened_as_early_shell:
+                return
+            if self._opened_as_early_shell:
                 self.setWindowOpacity(1.0)
                 _bring_widget_to_front(self)
             else:
@@ -3656,6 +4187,15 @@ class WebMainWindow(QMainWindow):
         context = self.context
         if context is None:
             return
+        config_running = bool(getattr(bridge, "_onboarding_configuration_running", False))
+        diagnostic = False
+        try:
+            diagnostic = bool(getattr(context.processes, "_diagnostic_runtime_override", False))
+        except Exception:
+            diagnostic = False
+        # Hiding to tray / quitting must not stop a healthy powered bypass.
+        if not config_running and not diagnostic:
+            return
 
         def _stop_diagnostic_runtime() -> None:
             try:
@@ -3677,12 +4217,13 @@ class WebMainWindow(QMainWindow):
         if self._force_exit:
             # Previous quit got stuck — hard-kill the process.
             os._exit(0)
-        # Closing the window stops config selection.
+        # Closing the window stops config selection only while it is running.
         # Only minimize keeps selection running in the background.
-        self._cancel_onboarding_configuration()
         bridge = self.bridge
         config_running = bool(bridge and getattr(bridge, "_onboarding_configuration_running", False))
         onboarding_open = bool(bridge and getattr(bridge, "show_onboarding", False))
+        if config_running or onboarding_open:
+            self._cancel_onboarding_configuration()
         status = self._runtime_power_status()
         # Diagnostics temporarily starts zapret, which would otherwise look like
         # "power on" and incorrectly hide to tray instead of quitting.
@@ -3998,10 +4539,7 @@ class WebMainWindow(QMainWindow):
 
         def _apply() -> None:
             try:
-                states = {item.component_id: item.status for item in self.context.processes.list_states()}
-                if states.get("zapret") == "running":
-                    self.context.processes.stop_component("zapret")
-                    self.context.processes.start_component("zapret")
+                self.bridge._reconfigure_runtimes(("zapret",), lambda: None)
             except Exception as error:
                 try:
                     self.context.logging.log("error", "tray general select failed", error=str(error))

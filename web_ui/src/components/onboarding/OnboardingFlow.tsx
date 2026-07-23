@@ -55,7 +55,10 @@ export function OnboardingFlow({
     ? Math.min(5, Math.max(0, Number(new URLSearchParams(window.location.search).get("onboardingStep") ?? 0)))
     : 0;
   const [step, setStep] = useState(() => Math.max(startStep, previewStep));
-  const [picked, setPicked] = useState<string[]>(state?.services.selected ?? []);
+  const stockDefaults = ["cloudflare", "discord", "youtube", "gaming", "clouds"];
+  const [picked, setPicked] = useState<string[]>(
+    (state?.services.selected?.length ? state.services.selected : stockDefaults),
+  );
   const pickedInitialized = useRef(false);
   const [progress, setProgress] = useState({ current: 0, total: 1, name: "", overallCurrent: 0, overallTotal: 1 });
   const [configuration, setConfiguration] = useState<{ status: "running" | "success" | "error"; name: string }>({ status: "running", name: "" });
@@ -253,7 +256,7 @@ export function OnboardingFlow({
         goToStep(setStep, 3);
         bridgeIdle(() => {
           void bridge.call("orchestrator.setMode", { mode: "auto" });
-          void bridge.call("onboarding.configure", { selected: ["youtube", "discord"] });
+          void bridge.call("onboarding.configure", { selected: ["cloudflare", "discord", "youtube", "gaming", "clouds"] });
         });
         return;
       }

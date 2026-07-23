@@ -294,8 +294,8 @@ export function SettingsModal({
             <Row label={L("Запускать вместе с Windows", "Start with Windows")}><IosToggle on={settings.autoStart} onChange={(value) => { void applyLive({ autoStart: value }, null); }} /></Row>
             <AnimatePresence initial={false}>
               {settings.autoStart && <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }} className="overflow-hidden pl-3">
-                <Row label={L("Стартовать в трее", "Start in tray")}><IosToggle on={settings.minimizeToTray} onChange={(value) => { void applyLive({ minimizeToTray: value }, null); }} /></Row>
-                <Row label={L("Автозапуск компонентов", "Auto-start components")}><IosToggle on={settings.autoRunComponents} onChange={(value) => { void applyLive({ autoRunComponents: value }, null); }} /></Row>
+                <Row label={L("Стартовать в трее", "Start in tray")} hint={L("При автозапуске окно не открывается — только иконка в трее", "On Windows startup the window stays closed; only the tray icon appears")}><IosToggle on={settings.minimizeToTray} onChange={(value) => { void applyLive({ minimizeToTray: value }, null); }} /></Row>
+                <Row label={L("Автозапуск компонентов", "Auto-start components")} hint={L("Включает кнопку питания с последним выбранным режимом и настройками", "Turns the power button on with your last selected mode and settings")}><IosToggle on={settings.autoRunComponents} onChange={(value) => { void applyLive({ autoRunComponents: value }, null); }} /></Row>
               </motion.div>}
             </AnimatePresence>
           </Section>
@@ -369,6 +369,23 @@ export function SettingsModal({
                 ]}
               />
             </Row>
+            <Row
+              label={L("Сброс авто-кэша", "Reset Auto cache")}
+              hint={L(
+                "Стирает только то, чему научился Авто (overlay + память). Списки сервисов и ваши файлы не трогает.",
+                "Clears only what Auto learned (overlay + memory). Service lists and your files stay intact.",
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  void bridge.call("orchestrator.resetAuto", { backend: "zapret" });
+                }}
+                className="rounded-[10px] border border-line-1 bg-bg-2 px-3 py-1.5 text-[11px] text-fg transition-colors hover:bg-bg-3"
+              >
+                {L("Сбросить авто-режим", "Reset Auto mode")}
+              </button>
+            </Row>
             {((settings.zapret.controlMode ?? state.orchestrator?.mode ?? "manual") === "auto") && (
               <div className="mb-2 rounded-[10px] border border-line-1 bg-bg-2/70 px-3 py-2 text-[10px] text-fg-dim">
                 {L("Стратегию, IPSet и Gaming сейчас ведёт автоматика — переключитесь на «Вручную», чтобы менять их сами.", "Strategy, IPSet and Gaming are managed by Auto — switch to Manual to edit them yourself.")}
@@ -433,6 +450,23 @@ export function SettingsModal({
                 }}
                 options={[{ value: "manual", label: L("Вручную", "Manual") }, { value: "auto", label: L("Авто", "Auto") }]}
               />
+            </Row>
+            <Row
+              label={L("Сброс авто-кэша", "Reset Auto cache")}
+              hint={L(
+                "Стирает overlay и память Auto для Zapret 2. Боевые list-hub / ваши правки не меняются.",
+                "Clears Auto overlay and memory for Zapret 2. Battle list-hub / your edits stay intact.",
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  void bridge.call("orchestrator.resetAuto", { backend: "zapret2" });
+                }}
+                className="rounded-[10px] border border-line-1 bg-bg-2 px-3 py-1.5 text-[11px] text-fg transition-colors hover:bg-bg-3"
+              >
+                {L("Сбросить авто-режим", "Reset Auto mode")}
+              </button>
             </Row>
             {((settings.zapret2.controlMode ?? "manual") === "auto") && (
               <div className="mt-2 text-[10px] leading-relaxed text-fg-dim">
