@@ -341,32 +341,41 @@ jobs:
           "__ZAPRET_HUB_NOTES__" >> $env:GITHUB_OUTPUT
 
       - name: Remove legacy / sidecar release assets
+        # Best-effort: missing release / missing assets / gh not-found must not block publish.
+        continue-on-error: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ steps.release_meta.outputs.tag }}"
-          $assets = @(gh release view $tag --json assets --jq '.assets[].name' 2>$null)
-          if ($LASTEXITCODE -eq 0) {
-            $version = "${{ steps.release_meta.outputs.version }}"
-            @(
-              "uninstall_zaprethub_${version}_win_x64.exe",
-              "uninstall_zaprethub_${version}_win_arm64.exe",
-              "README_RELEASE.txt",
-              "mirror-update-assets.example.json",
-              "zapret_hub_${version}_portable_win_x64.zip.sha256",
-              "zapret_hub_${version}_portable_win_x64.zip.build_info.json",
-              "zapret_hub_${version}_portable_win_x64.asset.json",
-              "zapret_hub_${version}_portable_win_arm64.zip.sha256",
-              "zapret_hub_${version}_portable_win_arm64.zip.build_info.json",
-              "zapret_hub_${version}_portable_win_arm64.asset.json"
-            ) | ForEach-Object {
-              if ($assets -contains $_) {
-                gh release delete-asset $tag $_ --yes
-                if ($LASTEXITCODE -ne 0) { throw "Failed to remove legacy release asset: $_" }
+          $ErrorActionPreference = 'Continue'
+          $viewOut = gh release view $tag --json assets --jq '.assets[].name' 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "No existing release for $tag (or view failed); skipping sidecar cleanup."
+            exit 0
+          }
+          $assets = @($viewOut | Where-Object { $_ -and ($_ -notmatch '^gh:') })
+          $version = "${{ steps.release_meta.outputs.version }}"
+          @(
+            "uninstall_zaprethub_${version}_win_x64.exe",
+            "uninstall_zaprethub_${version}_win_arm64.exe",
+            "README_RELEASE.txt",
+            "mirror-update-assets.example.json",
+            "zapret_hub_${version}_portable_win_x64.zip.sha256",
+            "zapret_hub_${version}_portable_win_x64.zip.build_info.json",
+            "zapret_hub_${version}_portable_win_x64.asset.json",
+            "zapret_hub_${version}_portable_win_arm64.zip.sha256",
+            "zapret_hub_${version}_portable_win_arm64.zip.build_info.json",
+            "zapret_hub_${version}_portable_win_arm64.asset.json"
+          ) | ForEach-Object {
+            if ($assets -contains $_) {
+              gh release delete-asset $tag $_ --yes 2>&1 | Out-Host
+              if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Could not remove legacy asset $_ (continuing)."
               }
             }
           }
+          exit 0
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
