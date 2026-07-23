@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 import base64
@@ -18,9 +19,10 @@ from typing import Any, Callable
 
 
 class MarketplaceError(RuntimeError):
-    def __init__(self, code: str, message: str = "") -> None:
+    def __init__(self, code: str, message: str = "", *, details: dict[str, Any] | None = None) -> None:
         super().__init__(message or code)
         self.code = code
+        self.details = details if isinstance(details, dict) else {}
 
 
 @dataclass
@@ -34,6 +36,7 @@ class DownloadJob:
     summary: str = ""
     icon_url: str = ""
     project_url: str = ""
+    marketplace_version: str = ""
     status: str = "queued"  # queued|downloading|paused|installing|done|error|cancelled
     progress: float = 0.0
     bytes_done: int = 0
@@ -49,10 +52,16 @@ class MarketplaceService:
 
     BASE_URL = "https://goshkow.com/api/marketplace/v1"
     USER_AGENT = "Zapret-Hub"
-    CONNECT_DEADLINE_SEC = 15.0
-    DOWNLOAD_STALL_SEC = 45.0
-    DOWNLOAD_WALL_SEC = 300.0
+    # Metadata (catalog /latest /project): fail fast — UI must not freeze on a stall.
+    API_DEADLINE_SEC = 8.0
+    TICKET_DEADLINE_SEC = 12.0
+    COMPLETE_DEADLINE_SEC = 6.0
+    # File downloads: soft stall (no hard 15s abort). Server supports Range/206 — use it.
+    DOWNLOAD_STALL_SEC = 75.0
+    DOWNLOAD_WALL_SEC = 900.0
+    DOWNLOAD_ATTEMPTS = 5
     MIN_FREE_SPACE_BYTES = 1024 ** 3
+    UPDATE_CHECK_WORKERS = 6
 
     storage_paths: Any
     logging: Any
@@ -67,6 +76,7 @@ class MarketplaceService:
     _wake: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _busy: bool = field(default=False, init=False, repr=False)
     _active_id: str = field(default="", init=False, repr=False)
+    _active_ticket: str = field(default="", init=False, repr=False)
     _cancel_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _pause_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _update_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
@@ -175,59 +185,86 @@ class MarketplaceService:
             "GET",
             f"/projects/{urllib.parse.quote(slug)}/latest",
             query={"lang": lang if lang in {"ru", "en"} else "ru"},
-            timeout=12,
+            timeout=int(self.API_DEADLINE_SEC),
         )
+        version_id = int(payload.get("version_id") or payload.get("id") or 0) or None
         return {
             "version": str(payload.get("version") or ""),
             "compatibility": str(payload.get("compatibility") or "zapret"),
             "changelog": str(payload.get("changelog") or ""),
-            "versionId": int(payload.get("id") or payload.get("version_id") or 0) or None,
+            "versionId": version_id,
             "size": int(payload.get("size") or 0),
             "sha256": str(payload.get("sha256") or ""),
+            # Docs advertise download_url; live API currently returns download_ticket_url.
+            "downloadUrl": str(payload.get("download_url") or ""),
+            "downloadTicketUrl": str(payload.get("download_ticket_url") or ""),
+            "legacyFallbackUrl": (
+                f"/zapret-hub/marketplace/download/{version_id}" if version_id else ""
+            ),
         }
 
     def check_updates(self, *, lang: str = "ru") -> dict[str, Any]:
-        """Compare installed marketplace mods with /latest. Fast sequential checks."""
+        """Compare installed marketplace mods with /latest in parallel."""
         installed = self._list_marketplace_mods()
         updates: list[dict[str, Any]] = []
         notify: list[dict[str, Any]] = []
-        for item in installed:
-            slug = item["slug"]
+        if not installed:
+            self._update_cache.clear()
+            return {"ok": True, "updates": updates, "notify": notify}
+
+        def _probe(item: dict[str, Any]) -> dict[str, Any] | None:
+            slug = str(item.get("slug") or "")
             try:
                 latest = self.fetch_latest(slug, lang=lang)
             except Exception as error:
                 self._log("warning", "Marketplace update check failed", slug=slug, error=str(error))
-                continue
+                return None
             latest_version = str(latest.get("version") or "")
             current = str(item.get("currentVersion") or "")
             if not latest_version or not self._is_newer(latest_version, current):
+                return {"slug": slug, "fresh": False}
+            return {
+                "slug": slug,
+                "fresh": True,
+                "row": {
+                    **item,
+                    "latestVersion": latest_version,
+                    "changelog": str(latest.get("changelog") or ""),
+                    "versionId": latest.get("versionId"),
+                    "compatibility": str(latest.get("compatibility") or item.get("compatibility") or "zapret"),
+                },
+            }
+
+        workers = max(1, min(self.UPDATE_CHECK_WORKERS, len(installed)))
+        results: list[dict[str, Any] | None] = []
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="zh-mkt-upd") as pool:
+            futures = [pool.submit(_probe, item) for item in installed]
+            for future in as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as error:
+                    self._log("warning", "Marketplace update worker failed", error=str(error))
+
+        # Preserve install order for stable UI.
+        by_slug = {str(item.get("slug") or ""): item for item in results if isinstance(item, dict)}
+        for item in installed:
+            slug = str(item.get("slug") or "")
+            probed = by_slug.get(slug)
+            if not probed:
+                continue
+            if not probed.get("fresh"):
                 self._update_cache.pop(slug, None)
                 continue
-            row = {
-                **item,
-                "latestVersion": latest_version,
-                "changelog": str(latest.get("changelog") or ""),
-                "versionId": latest.get("versionId"),
-                "compatibility": str(latest.get("compatibility") or item.get("compatibility") or "zapret"),
-            }
-            # Prefer cached cover / remote from project if local icon is empty.
-            if not row.get("iconUrl"):
-                try:
-                    detail = self.get_project(slug, lang=lang)
-                    project = detail.get("project") if isinstance(detail.get("project"), dict) else {}
-                    row["iconUrl"] = str(project.get("iconUrl") or "")
-                    row["projectUrl"] = row.get("projectUrl") or str(project.get("projectUrl") or "")
-                    row["summary"] = row.get("summary") or str(project.get("summary") or "")
-                    row["author"] = row.get("author") or str(project.get("author") or "")
-                    row["title"] = row.get("title") or str(project.get("title") or slug)
-                except Exception:
-                    pass
+            row = probed.get("row") if isinstance(probed.get("row"), dict) else None
+            if not isinstance(row, dict):
+                continue
             updates.append(row)
             self._update_cache[slug] = row
+            latest_version = str(row.get("latestVersion") or "")
             dismissed = str(self._dismissals.get(slug) or "")
             if not dismissed or self._is_newer(latest_version, dismissed):
                 notify.append(row)
-        # Drop cache entries for mods no longer installed.
+
         alive = {item["slug"] for item in installed}
         for slug in list(self._update_cache):
             if slug not in alive:
@@ -322,6 +359,7 @@ class MarketplaceService:
         box: dict[str, object] = {}
         errors: list[BaseException] = []
         done = threading.Event()
+        limit = max(0.1, float(timeout))
 
         def _target() -> None:
             try:
@@ -333,13 +371,14 @@ class MarketplaceService:
 
         thread = threading.Thread(target=_target, name="zapret-hub-marketplace-net", daemon=True)
         thread.start()
-        deadline = time.monotonic() + max(0.1, float(timeout))
+        deadline = time.monotonic() + limit
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                seconds = max(1, int(round(limit)))
                 raise MarketplaceError(
                     "timeout",
-                    "Не удалось подключиться к goshkow.com за 15 секунд. Проверьте сеть и попробуйте снова.",
+                    f"Не удалось подключиться к goshkow.com за {seconds} с. Проверьте сеть и попробуйте снова.",
                 )
             if done.wait(timeout=min(0.25, remaining)):
                 break
@@ -358,6 +397,8 @@ class MarketplaceService:
             code = int(getattr(error, "code", 0) or 0)
             if code == 404:
                 return "Модификация не найдена на goshkow.com (HTTP 404)."
+            if code == 409:
+                return "На сервере уже есть активная загрузка. Повторите через несколько секунд."
             if code == 429:
                 return "Слишком много запросов к маркетплейсу. Подождите немного."
             if 500 <= code <= 599:
@@ -375,7 +416,7 @@ class MarketplaceService:
         *,
         query: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
-        timeout: int = 20,
+        timeout: float = 8.0,
     ) -> dict[str, Any]:
         url = path if path.startswith("http") else f"{self.BASE_URL}{path}"
         if query:
@@ -387,9 +428,11 @@ class MarketplaceService:
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+        sock_timeout = max(1.0, float(timeout))
+        wall_timeout = sock_timeout + 1.0
 
         def _load() -> dict[str, Any]:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.urlopen(request, timeout=sock_timeout) as response:
                 raw = response.read().decode("utf-8-sig")
                 if not raw.strip():
                     return {"ok": True}
@@ -399,23 +442,26 @@ class MarketplaceService:
                 return {"ok": True, "data": payload}
 
         try:
-            return self._run_with_deadline(_load, timeout=max(float(timeout) + 1.0, self.CONNECT_DEADLINE_SEC))  # type: ignore[return-value]
+            return self._run_with_deadline(_load, timeout=wall_timeout)  # type: ignore[return-value]
         except MarketplaceError:
             raise
         except urllib.error.HTTPError as error:
             code = "http_error"
+            details: dict[str, Any] = {}
             try:
                 err_body = error.read().decode("utf-8-sig")
                 parsed = json.loads(err_body)
-                if isinstance(parsed, dict) and parsed.get("error"):
-                    code = str(parsed.get("error"))
+                if isinstance(parsed, dict):
+                    details = parsed
+                    if parsed.get("error"):
+                        code = str(parsed.get("error"))
             except Exception:
                 pass
             if error.code == 409:
                 code = "download_active"
             elif error.code == 429:
                 code = "rate_limited"
-            raise MarketplaceError(code, self._friendly_network_message(error)) from error
+            raise MarketplaceError(code, self._friendly_network_message(error), details=details) from error
         except Exception as error:
             raise MarketplaceError("network_error", self._friendly_network_message(error)) from error
 
@@ -444,6 +490,7 @@ class MarketplaceService:
                 "lang": lang if lang in {"ru", "en"} else "ru",
                 "_": int(time.time() * 1000) if refresh else None,
             },
+            timeout=self.API_DEADLINE_SEC,
         )
         projects = payload.get("projects") if isinstance(payload.get("projects"), list) else []
         return {
@@ -460,6 +507,7 @@ class MarketplaceService:
             "GET",
             f"/projects/{urllib.parse.quote(slug)}",
             query={"lang": lang if lang in {"ru", "en"} else "ru"},
+            timeout=self.API_DEADLINE_SEC,
         )
         project = payload.get("project") if isinstance(payload.get("project"), dict) else payload
         if not isinstance(project, dict):
@@ -535,6 +583,7 @@ class MarketplaceService:
         summary: str = "",
         icon_url: str = "",
         project_url: str = "",
+        marketplace_version: str = "",
     ) -> dict[str, Any]:
         slug = str(slug or "").strip()
         if not slug:
@@ -553,6 +602,16 @@ class MarketplaceService:
                 ],
             }
         self._ensure_install_space(compatibility)
+        cached = self._update_cache.get(slug) if isinstance(self._update_cache.get(slug), dict) else {}
+        if not marketplace_version:
+            marketplace_version = str(cached.get("latestVersion") or "")
+        if version_id is None and cached.get("versionId"):
+            try:
+                version_id = int(cached.get("versionId") or 0) or None
+            except Exception:
+                version_id = None
+        if not compatibility:
+            compatibility = str(cached.get("compatibility") or "")
         with self._lock:
             for existing in self._jobs:
                 if existing.slug == slug and existing.status in {"queued", "downloading", "paused", "installing"}:
@@ -574,6 +633,7 @@ class MarketplaceService:
                 summary=summary,
                 icon_url=icon_url,
                 project_url=project_url,
+                marketplace_version=str(marketplace_version or "").strip(),
                 status="queued",
                 message=title or slug,
             )
@@ -705,12 +765,16 @@ class MarketplaceService:
         active = next((j for j in self._jobs if j.status in {"downloading", "installing"}), None)
         items = [self._job_payload(j) for j in self._jobs if j.status in {"queued", "downloading", "paused", "installing"}]
         overall = 0.0
-        if active and active.bytes_total > 0:
-            overall = max(0.0, min(1.0, active.bytes_done / active.bytes_total))
+        if active and active.bytes_total > 0 and active.bytes_done > 0:
+            overall = max(0.01, min(0.99, active.bytes_done / active.bytes_total))
         elif active and active.status == "installing":
             overall = max(0.85, float(active.progress or 0.85))
+        elif active and active.progress > 0:
+            overall = max(0.01, min(0.89, float(active.progress)))
+        elif active:
+            overall = 0.01
         elif items:
-            overall = 0.02
+            overall = 0.01
         return {
             "busy": bool(self._busy),
             "activeSlug": active.slug if active else "",
@@ -823,55 +887,96 @@ class MarketplaceService:
 
     def _run_job(self, job: DownloadJob) -> None:
         self._raise_if_stopped(job)
+        # Ticket is created only when this worker is about to download — one active file request.
         ticket = self._create_ticket(job.slug, version_id=job.version_id)
         self._raise_if_stopped(job)
         filename = str(ticket.get("filename") or f"{job.slug}.zip")
         size = int(ticket.get("size") or 0)
         self._ensure_install_space(job.compatibility, incoming_bytes=size)
         sha256 = str(ticket.get("sha256") or "").lower().removeprefix("sha256:")
-        direct = str(ticket.get("direct_url") or "")
-        fallback = str(ticket.get("fallback_url") or "")
-        ticket_id = str(ticket.get("ticket") or "")
-        temp_dir = Path(self.storage_paths.cache_dir) / "marketplace_downloads"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        target = temp_dir / re.sub(r"[^\w.\-]+", "_", filename)
-        if target.exists():
+        ticket_token = str(ticket.get("ticket") or "")
+        version_from_ticket = self._version_from_ticket(ticket, filename)
+        if version_from_ticket and not job.marketplace_version:
+            job.marketplace_version = version_from_ticket
+        if ticket.get("version_id") and not job.version_id:
             try:
-                target.unlink()
+                job.version_id = int(ticket.get("version_id") or 0) or None
             except Exception:
                 pass
+
+        temp_dir = Path(self.storage_paths.cache_dir) / "marketplace_downloads"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        target = self._partial_path(temp_dir, job.slug, sha256=sha256, version_id=job.version_id, filename=filename)
+        # Keep valid partials for Range resume. Only wipe corrupt/oversize leftovers.
+        if target.exists():
+            try:
+                already = target.stat().st_size
+            except OSError:
+                already = 0
+            if size > 0 and already > size:
+                target.unlink(missing_ok=True)
+                already = 0
+            if already > 0:
+                job.bytes_done = already
+                if size > 0:
+                    job.progress = max(0.01, min(0.89, already / size))
+                self._log("info", "Marketplace resume from partial", slug=job.slug, bytes=already)
+
         job.bytes_total = size
         job.message = filename
         self._emit_job(job)
+
+        with self._lock:
+            self._active_ticket = ticket_token
+        outcome = "error"
         try:
-            self._download_file(direct, fallback, target, expected_size=size, job=job)
+            urls = self._ticket_urls(ticket)
+            self._download_file(urls, target, expected_size=size, job=job)
             self._raise_if_stopped(job)
             self._verify_file(target, expected_size=size, expected_sha256=sha256)
-            if ticket_id:
-                self._complete_ticket(ticket_id, success=True, bytes_sent=target.stat().st_size)
-        except Exception:
-            if ticket_id:
-                try:
-                    self._complete_ticket(ticket_id, success=False, bytes_sent=target.stat().st_size if target.exists() else 0)
-                except Exception:
-                    pass
+            outcome = "success"
+        except MarketplaceError as error:
+            if error.code == "cancelled":
+                outcome = "cancelled"
+            elif error.code == "paused":
+                outcome = "paused"
+            else:
+                outcome = "error"
             raise
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            bytes_sent = target.stat().st_size if target.exists() else 0
+            # Always release the server-side ticket so the next job never sees download_active.
+            if ticket_token:
+                try:
+                    self._complete_ticket(
+                        ticket_token,
+                        success=(outcome == "success"),
+                        bytes_sent=bytes_sent,
+                    )
+                except Exception as error:
+                    self._log("warning", "Marketplace ticket complete raised", error=str(error))
+            with self._lock:
+                if self._active_ticket == ticket_token:
+                    self._active_ticket = ""
 
-        compat = job.compatibility
+        compat = str(job.compatibility or "").strip() or "zapret"
         title = job.title
         author = job.author
         summary = job.summary
         icon_url = job.icon_url
         project_url = job.project_url
-        marketplace_version = ""
-        try:
-            latest = self.fetch_latest(job.slug)
-            marketplace_version = str(latest.get("version") or "")
-            if not compat:
-                compat = str(latest.get("compatibility") or "zapret")
-        except Exception:
-            if not compat:
-                compat = "zapret"
+        marketplace_version = str(job.marketplace_version or version_from_ticket or "").strip()
+        if not marketplace_version or not job.compatibility:
+            try:
+                latest = self.fetch_latest(job.slug)
+                marketplace_version = marketplace_version or str(latest.get("version") or "")
+                if not job.compatibility:
+                    compat = str(latest.get("compatibility") or compat or "zapret")
+            except Exception:
+                pass
         if not title or not icon_url or not project_url or not author or not summary:
             try:
                 detail = self.get_project(job.slug)
@@ -881,7 +986,7 @@ class MarketplaceService:
                 summary = summary or str(project.get("summary") or "")
                 icon_url = icon_url or str(project.get("iconUrl") or "")
                 project_url = project_url or str(project.get("projectUrl") or "")
-                if not compat:
+                if not job.compatibility:
                     compat = str(project.get("compatibility") or compat or "zapret")
             except Exception:
                 pass
@@ -903,11 +1008,55 @@ class MarketplaceService:
             slug=job.slug,
             marketplace_version=marketplace_version,
         )
+        try:
+            target.unlink(missing_ok=True)
+        except Exception:
+            pass
         self.clear_update(job.slug)
         job.progress = 0.99
         job.message = installed_id or job.slug
         job.compatibility = compat
         job.mod_id = installed_id
+
+    @staticmethod
+    def _version_from_ticket(ticket: dict[str, Any], filename: str) -> str:
+        for key in ("version", "marketplace_version"):
+            value = str(ticket.get(key) or "").strip()
+            if value:
+                return value
+        match = re.search(r"-(\d+(?:\.\d+)*)\.zip$", filename, flags=re.IGNORECASE)
+        return match.group(1) if match else ""
+
+    def _partial_path(
+        self,
+        temp_dir: Path,
+        slug: str,
+        *,
+        sha256: str,
+        version_id: int | None,
+        filename: str,
+    ) -> Path:
+        key = (sha256 or str(version_id or "") or filename or slug).strip().lower()
+        digest = hashlib.sha1(f"{slug}:{key}".encode("utf-8")).hexdigest()[:16]
+        safe_slug = re.sub(r"[^\w.\-]+", "_", slug) or "mod"
+        return temp_dir / f"{safe_slug}-{digest}.partial.zip"
+
+    def _ticket_urls(self, ticket: dict[str, Any]) -> list[str]:
+        candidates: list[str] = []
+        for raw in (
+            ticket.get("direct_url"),
+            ticket.get("fallback_url"),
+            ticket.get("legacy_fallback_url"),
+            ticket.get("download_url"),
+        ):
+            url = str(raw or "").strip()
+            if not url:
+                continue
+            if url.startswith("/"):
+                url = urllib.parse.urljoin("https://goshkow.com", url)
+            if url not in candidates:
+                candidates.append(url)
+        return candidates
 
     def _install_root(self, compatibility: str) -> Path:
         if str(compatibility or "").strip().lower() == "zapret2":
@@ -947,15 +1096,45 @@ class MarketplaceService:
                 raise MarketplaceError("paused", "paused")
 
     def _create_ticket(self, slug: str, *, version_id: int | None) -> dict[str, Any]:
-        body: dict[str, Any] = {"slug": slug, "version_id": version_id}
-        # Retry a few times if another download_active ticket is still settling.
+        body: dict[str, Any] = {"slug": slug}
+        if version_id:
+            body["version_id"] = int(version_id)
         last_error: Exception | None = None
-        for attempt in range(4):
+        for attempt in range(3):
             try:
-                return self._request_json("POST", "/downloads", body=body, timeout=30)
+                payload = self._request_json(
+                    "POST",
+                    "/downloads",
+                    body=body,
+                    timeout=self.TICKET_DEADLINE_SEC,
+                )
+                return self._normalize_ticket_payload(payload, slug=slug, version_id=version_id)
             except MarketplaceError as error:
                 last_error = error
-                if error.code in {"http_error", "download_active"}:
+                if error.code == "download_active":
+                    fallback = str(
+                        error.details.get("fallback_url")
+                        or error.details.get("legacy_fallback_url")
+                        or ""
+                    ).strip()
+                    if fallback:
+                        self._log(
+                            "warning",
+                            "Marketplace download_active — using server fallback URL",
+                            slug=slug,
+                            fallback=fallback,
+                        )
+                        return self._direct_download_ticket(
+                            slug,
+                            version_id=version_id,
+                            forced_url=fallback,
+                        )
+                    if attempt < 2:
+                        # Brief settle so a just-cancelled ticket can clear; never open a parallel ticket.
+                        time.sleep(1.0 + attempt)
+                        continue
+                    return self._direct_download_ticket(slug, version_id=version_id)
+                if error.code == "http_error":
                     self._log(
                         "warning",
                         "Marketplace ticket unavailable, using public download route",
@@ -963,12 +1142,40 @@ class MarketplaceService:
                         error=error.code,
                     )
                     return self._direct_download_ticket(slug, version_id=version_id)
-                if error.code != "download_active" or attempt >= 3:
-                    raise
-                time.sleep(1.2 * (attempt + 1))
+                raise
         raise last_error or MarketplaceError("download_active")
 
-    def _direct_download_ticket(self, slug: str, *, version_id: int | None) -> dict[str, Any]:
+    def _normalize_ticket_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        slug: str,
+        version_id: int | None,
+    ) -> dict[str, Any]:
+        filename = str(payload.get("filename") or f"{slug}.zip")
+        return {
+            "ok": bool(payload.get("ok", True)),
+            "ticket": str(payload.get("ticket") or ""),
+            "ticket_id": payload.get("ticket_id"),
+            "version_id": payload.get("version_id") or version_id,
+            "version": str(payload.get("version") or ""),
+            "filename": filename,
+            "size": int(payload.get("size") or 0),
+            "sha256": str(payload.get("sha256") or ""),
+            "direct_url": str(payload.get("direct_url") or ""),
+            "fallback_url": str(payload.get("fallback_url") or ""),
+            "legacy_fallback_url": str(payload.get("legacy_fallback_url") or ""),
+            "download_url": str(payload.get("download_url") or ""),
+            "expires_at": payload.get("expires_at"),
+        }
+
+    def _direct_download_ticket(
+        self,
+        slug: str,
+        *,
+        version_id: int | None,
+        forced_url: str = "",
+    ) -> dict[str, Any]:
         latest: dict[str, Any] = {}
         try:
             latest = self.fetch_latest(slug)
@@ -976,25 +1183,38 @@ class MarketplaceService:
             self._log("warning", "Marketplace latest metadata unavailable", slug=slug, error=str(error))
         latest_id = int(latest.get("versionId") or 0) or None
         selected_id = int(version_id or 0) or latest_id
-        if selected_id and selected_id != latest_id:
+        forced = str(forced_url or "").strip()
+        if forced.startswith("/"):
+            forced = urllib.parse.urljoin("https://goshkow.com", forced)
+        if forced:
+            download_url = forced
+            legacy = ""
+        elif selected_id and selected_id != latest_id:
             download_url = f"https://goshkow.com/zapret-hub/marketplace/download/{selected_id}"
-            size = 0
-            sha256 = ""
+            legacy = download_url
         else:
             download_url = (
                 "https://goshkow.com/zapret-hub/marketplace/projects/"
                 f"{urllib.parse.quote(slug)}/download/latest"
             )
-            size = int(latest.get("size") or 0)
-            sha256 = str(latest.get("sha256") or "")
+            legacy = f"/zapret-hub/marketplace/download/{selected_id}" if selected_id else ""
+        # Prefer documented download_url from /latest when the API provides it.
+        direct_from_latest = str(latest.get("downloadUrl") or "").strip()
+        if direct_from_latest and not forced:
+            download_url = direct_from_latest
+        size = int(latest.get("size") or 0)
+        sha256 = str(latest.get("sha256") or "")
         version = str(latest.get("version") or "").strip()
         filename = f"{slug}-{version}.zip" if version else f"{slug}.zip"
         return {
             "filename": filename,
             "size": size,
             "sha256": sha256,
+            "version": version,
+            "version_id": selected_id,
             "direct_url": download_url,
             "fallback_url": "",
+            "legacy_fallback_url": legacy,
             "ticket": "",
         }
 
@@ -1029,14 +1249,14 @@ class MarketplaceService:
             )
 
             def _load() -> bytes:
-                with urllib.request.urlopen(request, timeout=15) as response:
+                with urllib.request.urlopen(request, timeout=self.API_DEADLINE_SEC) as response:
                     data = response.read(5 * 1024 * 1024 + 1)
                 if len(data) > 5 * 1024 * 1024:
                     raise MarketplaceError("image_too_large", "Marketplace image is too large")
                 return data
 
             try:
-                payload = self._run_with_deadline(_load, timeout=16.0)  # type: ignore[assignment]
+                payload = self._run_with_deadline(_load, timeout=self.API_DEADLINE_SEC + 1.0)  # type: ignore[assignment]
             except Exception as error:
                 raise MarketplaceError("image_download_failed", self._friendly_network_message(error)) from error
             cache_path.write_bytes(payload)
@@ -1061,53 +1281,112 @@ class MarketplaceService:
         return ""
 
     def _complete_ticket(self, ticket: str, *, success: bool, bytes_sent: int) -> None:
-        self._request_json(
-            "POST",
-            f"/downloads/{urllib.parse.quote(ticket)}/complete",
-            body={"success": bool(success), "bytes_sent": int(bytes_sent)},
-            timeout=20,
-        )
+        token = str(ticket or "").strip()
+        if not token:
+            return
+        try:
+            self._request_json(
+                "POST",
+                f"/downloads/{urllib.parse.quote(token, safe='')}/complete",
+                body={"success": bool(success), "bytes_sent": int(bytes_sent)},
+                timeout=self.COMPLETE_DEADLINE_SEC,
+            )
+        except Exception as error:
+            # Never fail the local install/cancel path because complete hung.
+            self._log("warning", "Marketplace ticket complete failed", error=str(error), success=success)
 
     def _download_file(
         self,
-        direct_url: str,
-        fallback_url: str,
+        urls: list[str] | str,
         target: Path,
         *,
         expected_size: int,
         job: DownloadJob | None = None,
+        fallback_url: str = "",
     ) -> None:
-        if not direct_url and not fallback_url:
-            raise MarketplaceError("no_url", "No download URL in ticket")
-        candidates: list[str] = []
-        for raw in (direct_url, fallback_url):
+        """Download with one logical stream at a time; resume via HTTP Range on reconnect."""
+        if isinstance(urls, str):
+            candidates = [urls, fallback_url]
+        else:
+            candidates = list(urls)
+            if fallback_url:
+                candidates.append(fallback_url)
+        normalized: list[str] = []
+        for raw in candidates:
             url = str(raw or "").strip()
             if not url:
                 continue
             if url.startswith("/"):
                 url = urllib.parse.urljoin("https://goshkow.com", url)
-            if url not in candidates:
-                candidates.append(url)
+            if url not in normalized:
+                normalized.append(url)
+        if not normalized:
+            raise MarketplaceError("no_url", "No download URL in ticket")
+
         last_error: BaseException | None = None
-        for index, url in enumerate(candidates):
+        wall_started = time.monotonic()
+        attempt = 0
+        while attempt < self.DOWNLOAD_ATTEMPTS:
+            attempt += 1
+            if time.monotonic() - wall_started >= self.DOWNLOAD_WALL_SEC:
+                raise MarketplaceError(
+                    "timeout",
+                    "Загрузка модификации превысила лимит времени. Попробуйте снова.",
+                )
             already = target.stat().st_size if target.exists() else 0
-            resume = already if index > 0 and already and expected_size and already < expected_size else 0
+            if expected_size > 0 and already >= expected_size:
+                return
+            if job is not None:
+                self._raise_if_stopped(job)
+                job.bytes_done = already
+                if expected_size > 0 and already > 0:
+                    job.progress = max(job.progress, min(0.89, already / expected_size))
+                    self._emit_job(job)
+
+            url = normalized[(attempt - 1) % len(normalized)]
             try:
-                self._stream_to_file(url, target, resume_from=resume, job=job)
+                self._stream_to_file(url, target, resume_from=already, job=job)
+                done = target.stat().st_size if target.exists() else 0
+                if expected_size > 0 and done < expected_size:
+                    # Incomplete body — keep partial and retry with Range.
+                    last_error = MarketplaceError(
+                        "incomplete_body",
+                        f"Incomplete download: {done}/{expected_size}",
+                    )
+                    self._log(
+                        "warning",
+                        "Marketplace incomplete body, resuming with Range",
+                        bytes=done,
+                        expected=expected_size,
+                        attempt=attempt,
+                    )
+                    time.sleep(min(2.0, 0.4 * attempt))
+                    continue
                 return
             except MarketplaceError as error:
                 if error.code in {"cancelled", "paused"}:
                     raise
                 last_error = error
-            except Exception as error:
-                last_error = error
-            if index + 1 < len(candidates):
                 self._log(
                     "warning",
-                    "Marketplace download source failed, trying fallback",
+                    "Marketplace download attempt failed, will resume",
                     source=url,
-                    error=str(last_error),
+                    error=str(error),
+                    attempt=attempt,
+                    bytes=(target.stat().st_size if target.exists() else 0),
                 )
+                time.sleep(min(2.5, 0.5 * attempt))
+            except Exception as error:
+                last_error = error
+                self._log(
+                    "warning",
+                    "Marketplace download attempt failed, will resume",
+                    source=url,
+                    error=str(error),
+                    attempt=attempt,
+                )
+                time.sleep(min(2.5, 0.5 * attempt))
+
         if isinstance(last_error, MarketplaceError):
             raise last_error
         if last_error is not None:
@@ -1115,15 +1394,18 @@ class MarketplaceService:
         raise MarketplaceError("no_url", "No usable download URL")
 
     def _stream_to_file(self, url: str, target: Path, *, resume_from: int, job: DownloadJob | None = None) -> None:
-        headers = {"User-Agent": self.USER_AGENT, "X-Zapret-Device": self._device_id}
+        headers = {
+            "User-Agent": self.USER_AGENT,
+            "X-Zapret-Device": self._device_id,
+            "Accept": "*/*",
+        }
         mode = "wb"
         if resume_from > 0:
             headers["Range"] = f"bytes={resume_from}-"
             mode = "ab"
         request = urllib.request.Request(url, headers=headers, method="GET")
-        # Open + read MUST stay on the same thread. Opening via _run_with_deadline
-        # and reading here caused hangs (progress stuck near 0).
-        sock_timeout = max(15.0, float(self.DOWNLOAD_STALL_SEC))
+        # Open + read MUST stay on the same thread. Soft stall timeout (not a hard 15s abort).
+        sock_timeout = float(self.DOWNLOAD_STALL_SEC)
         try:
             response = urllib.request.urlopen(request, timeout=sock_timeout)
         except MarketplaceError:
@@ -1132,19 +1414,30 @@ class MarketplaceService:
             raise MarketplaceError("network_error", self._friendly_network_message(error)) from error
 
         try:
-            status = getattr(response, "status", None) or response.getcode()
-            if resume_from > 0 and int(status) == 200:
+            status = int(getattr(response, "status", None) or response.getcode() or 0)
+            if resume_from > 0 and status == 200:
                 # Server ignored Range — rewrite to avoid corrupt concat.
                 mode = "wb"
                 resume_from = 0
-            if job is not None and job.bytes_total <= 0:
-                try:
-                    header_len = int(response.headers.get("Content-Length") or 0)
-                except Exception:
-                    header_len = 0
-                if header_len > 0:
-                    job.bytes_total = int(resume_from) + header_len
+            elif resume_from > 0 and status not in {206, 200}:
+                raise MarketplaceError("http_error", f"Unexpected resume status HTTP {status}")
+
+            content_length = 0
+            try:
+                content_length = int(response.headers.get("Content-Length") or 0)
+            except Exception:
+                content_length = 0
+            if job is not None:
+                if job.bytes_total <= 0 and content_length > 0:
+                    job.bytes_total = int(resume_from) + content_length
                     self._emit_job(job)
+                elif job.bytes_total <= 0:
+                    content_range = str(response.headers.get("Content-Range") or "")
+                    match = re.search(r"/(\d+)\s*$", content_range)
+                    if match:
+                        job.bytes_total = int(match.group(1))
+                        self._emit_job(job)
+
             done = int(resume_from)
             last_emit = 0.0
             started = time.monotonic()

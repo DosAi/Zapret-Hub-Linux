@@ -31,9 +31,10 @@ class UpdatesManager:
     MIRROR_INFO_URL = MIRROR_BASE_URL + "/zapret-hub/info"
     _EXE_NAMES = ("zapret_hub.exe", "Zapret_Hub.exe")
     # Hard ceilings so UI never sticks on "Скачиваем обновление…" forever.
-    META_DEADLINE_SEC = 15.0
-    DOWNLOAD_DEADLINE_SEC = 180.0
-    DOWNLOAD_STALL_SEC = 45.0
+    META_DEADLINE_SEC = 10.0
+    DOWNLOAD_DEADLINE_SEC = 600.0
+    DOWNLOAD_STALL_SEC = 75.0
+    DOWNLOAD_ATTEMPTS = 5
 
     def __init__(
         self,
@@ -225,21 +226,24 @@ class UpdatesManager:
         return box.get("value")
 
     def _request_json(self, url: str, *, timeout: int) -> object:
+        sock_timeout = max(1, int(timeout))
+
         def _load() -> object:
             request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "Zapret-Hub"})
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.urlopen(request, timeout=sock_timeout) as response:
                 return json.loads(response.read().decode("utf-8-sig"))
 
-        return self._run_with_deadline(_load, timeout=max(float(timeout) + 1.0, self.META_DEADLINE_SEC))
+        # Respect the requested timeout — do not force a 15s floor that feels like a hang.
+        return self._run_with_deadline(_load, timeout=float(sock_timeout) + 1.0)
 
     def _fetch_mirror_update(self) -> object:
         primary, fallback = self._mirror_urls()
         try:
-            return self._request_json(primary, timeout=12)
+            return self._request_json(primary, timeout=int(self.META_DEADLINE_SEC))
         except Exception as primary_error:
             if fallback and fallback != primary:
                 try:
-                    return self._request_json(fallback, timeout=12)
+                    return self._request_json(fallback, timeout=int(self.META_DEADLINE_SEC))
                 except Exception:
                     raise primary_error
             raise primary_error
@@ -251,36 +255,124 @@ class UpdatesManager:
         timeout: int,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> bytes:
-        stall_limit = self.DOWNLOAD_STALL_SEC
-        wall_limit = max(float(timeout), self.DOWNLOAD_DEADLINE_SEC)
+        """Compatibility wrapper — prefer file download with Range resume."""
+        with tempfile.NamedTemporaryFile(prefix="zapret_hub_dl_", suffix=".bin", delete=False) as handle:
+            temp_path = Path(handle.name)
+        try:
+            self._download_to_path(url, temp_path, timeout=timeout, progress_callback=progress_callback)
+            return temp_path.read_bytes()
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
-        def _load() -> bytes:
-            request = urllib.request.Request(url, headers={"User-Agent": "Zapret-Hub"})
-            started = time.monotonic()
-            last_chunk = started
-            chunks: list[bytes] = []
-            with urllib.request.urlopen(request, timeout=min(60, int(timeout))) as response:
-                total = int(response.headers.get("Content-Length") or 0)
-                downloaded = 0
+    def _download_to_path(
+        self,
+        url: str,
+        target: Path,
+        *,
+        timeout: int,
+        expected_size: int = 0,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Single active file request with HTTP Range resume on reconnect."""
+        stall_limit = float(self.DOWNLOAD_STALL_SEC)
+        wall_limit = max(float(timeout), float(self.DOWNLOAD_DEADLINE_SEC))
+        wall_started = time.monotonic()
+        last_error: BaseException | None = None
+
+        for attempt in range(1, self.DOWNLOAD_ATTEMPTS + 1):
+            if time.monotonic() - wall_started >= wall_limit:
+                raise TimeoutError("Загрузка обновления превысила лимит времени.")
+            already = target.stat().st_size if target.exists() else 0
+            if expected_size > 0 and already >= expected_size:
                 if progress_callback is not None:
-                    progress_callback(0, total)
-                while True:
-                    now = time.monotonic()
-                    if now - started >= wall_limit:
-                        raise TimeoutError("Загрузка обновления превысила лимит времени.")
-                    if now - last_chunk >= stall_limit:
-                        raise TimeoutError("Загрузка обновления зависла (нет данных).")
-                    chunk = response.read(1024 * 256)
-                    if not chunk:
-                        break
-                    last_chunk = time.monotonic()
-                    chunks.append(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback is not None:
-                        progress_callback(downloaded, total)
-            return b"".join(chunks)
+                    progress_callback(already, expected_size)
+                return
+            if progress_callback is not None and already > 0:
+                progress_callback(already, expected_size or already)
 
-        return self._run_with_deadline(_load, timeout=wall_limit + 2.0)
+            headers = {"User-Agent": "Zapret-Hub", "Accept": "*/*"}
+            mode = "wb"
+            resume_from = already
+            if resume_from > 0:
+                headers["Range"] = f"bytes={resume_from}-"
+                mode = "ab"
+
+            try:
+                request = urllib.request.Request(url, headers=headers, method="GET")
+                # Stay on this thread (same rule as Marketplace): open+read together.
+                with urllib.request.urlopen(request, timeout=stall_limit) as response:
+                    status = int(getattr(response, "status", None) or 0)
+                    if status <= 0:
+                        getcode = getattr(response, "getcode", None)
+                        if callable(getcode):
+                            try:
+                                status = int(getcode() or 0)
+                            except Exception:
+                                status = 0
+                    local_resume = resume_from
+                    local_mode = mode
+                    if local_resume > 0 and status == 200:
+                        local_mode = "wb"
+                        local_resume = 0
+                    total = expected_size
+                    try:
+                        content_length = int(response.headers.get("Content-Length") or 0)
+                    except Exception:
+                        content_length = 0
+                    if total <= 0 and content_length > 0:
+                        total = local_resume + content_length
+                    if total <= 0:
+                        content_range = str(response.headers.get("Content-Range") or "")
+                        match = re.search(r"/(\d+)\s*$", content_range)
+                        if match:
+                            total = int(match.group(1))
+                    if expected_size <= 0 and total > 0:
+                        expected_size = total
+                    downloaded = local_resume
+                    last_chunk = time.monotonic()
+                    if progress_callback is not None:
+                        progress_callback(downloaded, total or expected_size)
+                    with target.open(local_mode) as handle:
+                        while True:
+                            now = time.monotonic()
+                            if now - wall_started >= wall_limit:
+                                raise TimeoutError("Загрузка обновления превысила лимит времени.")
+                            if now - last_chunk >= stall_limit:
+                                raise TimeoutError("Загрузка обновления зависла (нет данных).")
+                            chunk = response.read(1024 * 256)
+                            if not chunk:
+                                break
+                            last_chunk = time.monotonic()
+                            handle.write(chunk)
+                            downloaded += len(chunk)
+                            if progress_callback is not None:
+                                progress_callback(downloaded, total or expected_size)
+                done = target.stat().st_size if target.exists() else 0
+                if expected_size > 0 and done < expected_size:
+                    last_error = TimeoutError(f"Incomplete update download: {done}/{expected_size}")
+                    time.sleep(min(2.0, 0.4 * attempt))
+                    continue
+                return
+            except Exception as error:
+                last_error = error
+                try:
+                    self.logging.log(
+                        "warning",
+                        "App update download attempt failed, will resume",
+                        attempt=attempt,
+                        error=str(error),
+                        bytes=(target.stat().st_size if target.exists() else 0),
+                    )
+                except Exception:
+                    pass
+                time.sleep(min(2.5, 0.5 * attempt))
+
+        if last_error is not None:
+            raise last_error
+        raise TimeoutError("Загрузка обновления не удалась.")
 
     def _is_certificate_error(self, error: Exception) -> bool:
         return "CERTIFICATE_VERIFY_FAILED" in str(error).upper()
@@ -505,11 +597,14 @@ class UpdatesManager:
             if progress_callback is not None:
                 progress_callback(phase, current, total)
 
-        archive_bytes = self._download_bytes(
+        self._download_to_path(
             asset_url,
-            timeout=120,
+            zip_path,
+            timeout=int(self.DOWNLOAD_DEADLINE_SEC),
+            expected_size=expected_size,
             progress_callback=lambda current, total: report("download", current, total or expected_size),
         )
+        archive_bytes = zip_path.read_bytes()
         report("verify", len(archive_bytes), len(archive_bytes))
         if expected_size and len(archive_bytes) != expected_size:
             raise ValueError("Размер загруженного обновления не совпадает с данными зеркала.")
@@ -519,7 +614,7 @@ class UpdatesManager:
             actual_digest = hashlib.sha256(archive_bytes).hexdigest()
             if actual_digest != expected_digest:
                 raise ValueError("SHA-256 загруженного обновления не совпадает с данными зеркала.")
-        zip_path.write_bytes(archive_bytes)
+        # Keep zip_path on disk for extract; bytes already verified.
 
         extract_root = temp_root / "payload"
         extract_root.mkdir(parents=True, exist_ok=True)
