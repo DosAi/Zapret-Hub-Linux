@@ -471,8 +471,8 @@ export function SettingsModal({
             {((settings.zapret2.controlMode ?? "manual") === "auto") && (
               <div className="mt-2 text-[10px] leading-relaxed text-fg-dim">
                 {L(
-                  "Авто пишет hostlist/ipset и Lua (hub-orchestrator.lua). Домены/IP подхватываются без рестарта; смена Lua-стратегии перезапускает winws2.",
-                  "Auto writes hostlist/ipset and Lua (hub-orchestrator.lua). Domains/IPs reload without restart; changing the Lua strategy restarts winws2.",
+                  "Авто пишет hostlist/ipset и Lua (hub-orchestrator.lua). Домены, IP и смена Lua-профиля подхватываются без рестарта winws2.",
+                  "Auto writes hostlist/ipset and Lua (hub-orchestrator.lua). Domains, IPs, and Lua profile changes reload without restarting winws2.",
                 )}
               </div>
             )}
@@ -488,8 +488,8 @@ export function SettingsModal({
             </div>
           </Section>
           <Section title="winws2">
-            <Row label="TCP ports" hint="--wf-tcp-in / --wf-tcp-out"><input disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.tcpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, tcpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
-            <Row label="UDP ports" hint="--wf-udp-in / --wf-udp-out"><input disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.udpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, udpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
+            <Row label="TCP ports" hint="--wf-tcp-out (Discord media ports merge automatically)"><input disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.tcpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, tcpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
+            <Row label="UDP ports" hint="--wf-udp-out (Discord voice ports merge automatically)"><input disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.udpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, udpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
             <Row label="WinDivert filter" hint={L("Дополнительный фильтр --wf-raw-part", "Additional --wf-raw-part filter")}><textarea disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.rawFilter} onChange={(event) => patch({ zapret2: { ...settings.zapret2, rawFilter: event.target.value } })} className="h-16 w-[250px] resize-none rounded-[10px] border border-line-1 bg-bg-1 p-2.5 text-[11px] text-fg outline-none focus:border-line-2 disabled:cursor-not-allowed disabled:opacity-50" /></Row>
           </Section>
           <Section title="Lua desync">
@@ -505,9 +505,8 @@ export function SettingsModal({
                 onChange={(value) => patch({ zapret2: { ...settings.zapret2, youtubeDiscordBypass: value } })}
               />
             </Row>
-            <Row label={L("Профиль Lua", "Lua profile")} hint={L("Hub-стратегия (Auto). Custom ниже — только Manual.", "Hub strategy (Auto). Custom below is Manual-only.")}>
+            <Row label={L("Профиль Lua", "Lua profile")} hint={L("Hub-стратегия для Manual и Auto (hot-reload без рестарта).", "Hub strategy for Manual and Auto (hot-reload, no restart).")}>
               <SelectField
-                disabled={(settings.zapret2.controlMode ?? "manual") === "auto"}
                 value={settings.zapret2.strategyId || "balanced"}
                 onChange={(value) => patch({ zapret2: { ...settings.zapret2, strategyId: value } })}
                 options={[
@@ -517,7 +516,7 @@ export function SettingsModal({
                 ]}
               />
             </Row>
-            <Row label={L("Своя стратегия", "Custom strategy")} hint={L("Аргументы --filter/--lua-desync. В Auto игнорируется.", "--filter/--lua-desync args. Ignored in Auto.")}><textarea disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.luaStrategy} onChange={(event) => patch({ zapret2: { ...settings.zapret2, luaStrategy: event.target.value } })} className="h-28 w-[250px] resize-none rounded-[10px] border border-line-1 bg-bg-1 p-2.5 font-mono text-[10px] text-fg outline-none focus:border-line-2 disabled:cursor-not-allowed disabled:opacity-50" /></Row>
+            <Row label={L("Своя стратегия", "Custom strategy")} hint={L("Доп. --filter/--lua-desync после стандартных профилей (Discord не отключается). В Auto игнорируется.", "Extra --filter/--lua-desync after default profiles (Discord stays). Ignored in Auto.")}><textarea disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.luaStrategy} onChange={(event) => patch({ zapret2: { ...settings.zapret2, luaStrategy: event.target.value } })} className="h-28 w-[250px] resize-none rounded-[10px] border border-line-1 bg-bg-1 p-2.5 font-mono text-[10px] text-fg outline-none focus:border-line-2 disabled:cursor-not-allowed disabled:opacity-50" /></Row>
           </Section>
         </>}
 

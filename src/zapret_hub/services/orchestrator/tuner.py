@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from zapret_hub.services.orchestrator.noise import filter_learnable_hosts, is_infra_noise_host
+
 
 @dataclass(frozen=True, slots=True)
 class TunerStep:
@@ -16,6 +18,8 @@ class TunerStep:
 
 _OVERBLOCK_SYMPTOMS = frozenset({"suspect_overblock", "tls_fail", "http_block", "tcp_timeout"})
 _MISS_SYMPTOMS = frozenset({"external_miss"})
+# Confirmed connectivity failures that may justify strategy cutovers (never service_detected).
+_STRATEGY_SYMPTOMS = frozenset({"tcp_timeout", "tls_fail", "http_block", "suspect_overblock", "external_miss"})
 # Real gaming stacks that need GameFilter / Gaming Set. Stock Discord/YouTube are
 # hostlist services — Auto must not treat them as reasons to widen WinDivert.
 _GAMING_SERVICES = frozenset(
@@ -122,7 +126,7 @@ class SmartTuner:
         batch_domains: list[str] = []
         for item in list(domains or []) + ([domain] if domain else []):
             cleaned = str(item or "").strip().lower().rstrip(".")
-            if cleaned and cleaned not in batch_domains:
+            if cleaned and cleaned not in batch_domains and not is_infra_noise_host(cleaned):
                 batch_domains.append(cleaned)
         batch_ips: list[str] = []
         for item in list(ips or []) + ([ip] if ip else []):
@@ -134,9 +138,13 @@ class SmartTuner:
             if cleaned not in batch_ips:
                 batch_ips.append(cleaned)
 
+        # service_detected = "this app is running, enable its service once".
+        # Never escalate to GameFilter / Gaming Set / mods / generals from that alone.
+        detection_only = symptom == "service_detected"
+
         # 0) Knowledge priors only when same symptom/app context.
         use_winner = False
-        if knowledge_winner:
+        if knowledge_winner and not detection_only:
             same_symptom = not winner_symptom or winner_symptom == symptom
             same_app = not winner_app or not process or winner_app.lower() in process.lower()
             use_winner = bool(same_symptom and same_app)
@@ -186,9 +194,9 @@ class SmartTuner:
                     )
 
         # 1) List learn — one step for all domains / all IPs (cutover writes once).
-        if symptom in _MISS_SYMPTOMS:
+        if symptom in _MISS_SYMPTOMS or detection_only:
             if domains_missing is not None:
-                to_add_domains = [d for d in domains_missing if d]
+                to_add_domains = filter_learnable_hosts([d for d in domains_missing if d])
             elif not domain_in_merged:
                 to_add_domains = list(batch_domains)
             else:
@@ -208,12 +216,13 @@ class SmartTuner:
                     TunerStep(
                         kind="add_domain",
                         value="\n".join(unique_domains),
-                        reason="external_miss",
+                        reason="external_miss" if not detection_only else "service_detected",
                         label_ru=f"Добавляю {preview} в списки",
                         label_en=f"Adding {preview} to lists",
                     )
                 )
-            if batch_ips:
+            # Skip random CDN IP seeding for detection / miss unless a real app failure.
+            if batch_ips and not detection_only and symptom in _MISS_SYMPTOMS:
                 preview_ip = batch_ips[0] if len(batch_ips) == 1 else f"{len(batch_ips)} адресов"
                 add(
                     TunerStep(
@@ -251,6 +260,7 @@ class SmartTuner:
                 configs_hint = str(current.get("configs_dir") or "")
                 if configs_hint:
                     harvested = zapret2_hub.missing_domains(Path(configs_hint), harvested)
+                harvested = filter_learnable_hosts(harvested)
                 if harvested:
                     preview = harvested[0] if len(harvested) == 1 else f"{len(harvested)} доменов"
                     add(
@@ -274,11 +284,12 @@ class SmartTuner:
             if not should_seed:
                 continue
             harvested = zapret2_hub.harvest_service_domains([service_id])
-            harvested_ips = zapret2_hub.harvest_service_ips([service_id])
+            harvested_ips = [] if detection_only else zapret2_hub.harvest_service_ips([service_id])
             configs_hint = str(current.get("configs_dir") or "")
             if configs_hint:
                 harvested = zapret2_hub.missing_domains(Path(configs_hint), harvested)
                 harvested_ips = zapret2_hub.missing_ips(Path(configs_hint), harvested_ips)
+            harvested = filter_learnable_hosts(harvested)
             if harvested:
                 preview = harvested[0] if len(harvested) == 1 else f"{len(harvested)} доменов"
                 add(
@@ -302,6 +313,9 @@ class SmartTuner:
                     )
                 )
 
+        if detection_only:
+            return steps[: max(1, max_steps)]
+
         # 3) Conflict / overblock.
         if known_conflict:
             fix = str(known_conflict.get("fix_gaming_set") or known_conflict.get("gaming_set") or "").strip()
@@ -318,7 +332,7 @@ class SmartTuner:
 
         if symptom in _OVERBLOCK_SYMPTOMS and domain and domain_in_merged:
             # Never Auto-exclude stock catalog hosts (Discord/YouTube/CF/…).
-            if not _is_protected_catalog_host(domain):
+            if not _is_protected_catalog_host(domain) and not is_infra_noise_host(domain):
                 add(
                     TunerStep(
                         kind="exclude_domain",
@@ -407,7 +421,25 @@ class SmartTuner:
                     )
                 )
 
-        # 8) Generals / Lua strategies.
+        # 8) Generals / Lua strategies — LAST RESORT only after lists/services, and only
+        # for confirmed failure symptoms. Never chase CDN PTR noise with strategy swaps.
+        allow_strategy = symptom in _STRATEGY_SYMPTOMS
+        list_fix_pending = any(s.kind in {"add_domain", "add_ip"} for s in steps)
+        # Soft HTTPS domain learning: lists first, strategy later if still broken.
+        # UDP/gaming failures may need strategy in the same plan (Fortnite voice etc.).
+        soft_list_miss = (
+            symptom == "external_miss"
+            and list_fix_pending
+            and not domain_in_merged
+            and proto != "udp"
+            and not (service_set & _GAMING_SERVICES)
+            and "fortnite" not in service_set
+        )
+        if soft_list_miss:
+            allow_strategy = False
+        if not allow_strategy:
+            return steps[: max(1, max_steps)]
+
         generals: list[str] = []
         if trusted_general:
             generals.append(trusted_general)
@@ -472,7 +504,7 @@ class SmartTuner:
                 )
             )
             added_generals += 1
-            if added_generals >= 3:
+            if added_generals >= 2:  # was 3 — fewer aimless strategy swaps
                 break
 
         return steps[: max(1, max_steps)]

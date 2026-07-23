@@ -2144,6 +2144,7 @@ class WebBridge(QObject):
         action: Callable[[], Any],
         *,
         restart_allowed: dict[str, bool] | None = None,
+        force_process_restart: dict[str, bool] | None = None,
     ) -> Any:
         """Stop → mutate → start for live components.
 
@@ -2195,9 +2196,13 @@ class WebBridge(QObject):
                 for component_id, was_running in running.items():
                     if not was_running:
                         continue
-                    # Zapret: keep live winws until after mutation, then seamless cutover.
+                    # Keep live bypass processes until after mutation.
                     if component_id == "zapret" and should_restart.get("zapret"):
                         continue
+                    if component_id == "zapret2" and should_restart.get("zapret2"):
+                        # Hot-reload path: keep winws2. Forced CLI refresh stops later.
+                        if not bool((force_process_restart or {}).get("zapret2")):
+                            continue
                     try:
                         self.context.processes.stop_component(component_id)
                     except Exception as error:
@@ -2223,6 +2228,18 @@ class WebBridge(QObject):
                             except Exception:
                                 ok = self._start_component_with_retry(
                                     component_id,
+                                    show_transition_on_retry=want_power,
+                                )
+                        elif component_id == "zapret2":
+                            force_z2 = bool((force_process_restart or {}).get("zapret2"))
+                            if force_z2:
+                                ok = self._start_component_with_retry(
+                                    "zapret2",
+                                    show_transition_on_retry=want_power,
+                                )
+                            else:
+                                ok = self._finish_zapret2_reconfigure(
+                                    was_running=bool(running.get("zapret2")),
                                     show_transition_on_retry=want_power,
                                 )
                         else:
@@ -2255,6 +2272,39 @@ class WebBridge(QObject):
                             self._emit_runtime_status("error")
                     else:
                         self._release_service_power(token, want_power=want_power)
+
+    def _hot_reload_zapret2_files(self) -> None:
+        """Rematerialize Zapret2 lists/strategy Lua so live winws2 picks changes without kill."""
+        from pathlib import Path
+
+        from zapret_hub.services.orchestrator import zapret2_hub
+
+        configs = Path(self.context.paths.configs_dir)
+        auto_root = Path(self.context.paths.runtime_dir) / "zapret2" / "lists_auto"
+        try:
+            self.context.mods2.rebuild_merge()
+        except Exception:
+            pass
+        zapret2_hub.materialize_auto_lists(configs, auto_root)
+        strategy_id = str(getattr(self.context.settings.get(), "zapret2_strategy_id", "balanced") or "balanced")
+        zapret2_hub.write_hub_strategy_lua(configs, strategy_id)
+
+    def _finish_zapret2_reconfigure(self, *, was_running: bool, show_transition_on_retry: bool) -> bool:
+        """Prefer hot-reload when winws2 is already up; start only if it was down."""
+        if was_running and self._component_running("zapret2"):
+            try:
+                self._hot_reload_zapret2_files()
+                try:
+                    self.context.logging.log("info", "Zapret2 reconfigure applied via hot-reload (no process restart)")
+                except Exception:
+                    pass
+                return True
+            except Exception as error:
+                try:
+                    self.context.logging.log("warning", "Zapret2 hot-reload failed; falling back to restart", error=str(error))
+                except Exception:
+                    pass
+        return self._start_component_with_retry("zapret2", show_transition_on_retry=show_transition_on_retry)
 
     def _queue_mod_toggle(self, backend: str, mod_id: str, enabled: bool) -> None:
         if not mod_id:
@@ -2766,11 +2816,7 @@ class WebBridge(QObject):
                                 "current": bool(
                                     version
                                     and current_version
-                                    and (
-                                        version == current_version
-                                        or current_version.startswith(version)
-                                        or version.startswith(current_version)
-                                    )
+                                    and version.lstrip("vV").lower() == current_version.lstrip("vV").lower()
                                 ),
                             }
                         )
@@ -3114,6 +3160,8 @@ class WebBridge(QObject):
             getattr(before, "zapret2_strategy_id", ""),
             bool(getattr(before, "zapret2_youtube_discord_bypass", True)),
         )
+        zapret2_cli_before = zapret2_before[:4] + zapret2_before[5:]
+        zapret2_strategy_before = zapret2_before[4]
         tg_before = (
             before.tg_proxy_host,
             before.tg_proxy_port,
@@ -3251,6 +3299,8 @@ class WebBridge(QObject):
             getattr(after, "zapret2_strategy_id", ""),
             bool(getattr(after, "zapret2_youtube_discord_bypass", True)),
         )
+        zapret2_cli_after = zapret2_after[:4] + zapret2_after[5:]
+        zapret2_strategy_after = zapret2_after[4]
         tg_after = (
             after.tg_proxy_host,
             after.tg_proxy_port,
@@ -3276,8 +3326,19 @@ class WebBridge(QObject):
         # Background restart while Quick Access stays visually on.
         if zapret_before != zapret_after and active == "zapret" and (self._component_running("zapret") or want_power):
             self._reconfigure_runtimes(("zapret",), lambda: None)
-        if zapret2_before != zapret2_after and active == "zapret2" and (self._component_running("zapret2") or want_power):
-            self._reconfigure_runtimes(("zapret2",), lambda: None)
+        if active == "zapret2" and (self._component_running("zapret2") or want_power):
+            if zapret2_cli_before != zapret2_cli_after:
+                # Ports / raw filter / custom CLI / bypass init need a process refresh.
+                self._reconfigure_runtimes(("zapret2",), lambda: None, force_process_restart={"zapret2": True})
+            elif zapret2_strategy_before != zapret2_strategy_after:
+                try:
+                    self._hot_reload_zapret2_files()
+                except Exception as error:
+                    try:
+                        self.context.logging.log("warning", "Zapret2 strategy hot-reload failed", error=str(error))
+                    except Exception:
+                        pass
+                    self._reconfigure_runtimes(("zapret2",), lambda: None)
         if tg_before != tg_after and (
             self._component_running("tg-ws-proxy") or (want_power and "tg-ws-proxy" in enabled_ids)
         ):

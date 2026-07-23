@@ -104,6 +104,8 @@ def test_zapret2_release_uses_bol_van_zapret2_tags() -> None:
 
 
 def test_zapret2_auto_discord_capture_includes_voice_udp_ranges() -> None:
+    from zapret_hub.services.components import DISCORD_MEDIA_TCP_PORTS, DISCORD_VOICE_UDP_PORTS
+
     process = ProcessManager.__new__(ProcessManager)
     process.settings = SimpleNamespace(
         get=lambda: SimpleNamespace(
@@ -111,15 +113,40 @@ def test_zapret2_auto_discord_capture_includes_voice_udp_ranges() -> None:
             zapret2_udp_ports="443",
             selected_service_ids=["discord"],
             zapret2_control_mode="auto",
+            zapret2_youtube_discord_bypass=False,
         )
     )
     udp_ports = process._normalize_zapret2_ports("443", "443")
-    udp_ports = process._merge_zapret2_ports(udp_ports, "3478-3497,19294-19344,42377-62133")
-    assert udp_ports == "443,3478-3497,19294-19344,42377-62133"
+    udp_ports = process._merge_zapret2_ports(udp_ports, DISCORD_VOICE_UDP_PORTS)
+    assert udp_ports == "443,19294-19344,50000-50100"
+    assert "42377" not in udp_ports
     tcp_ports = process._normalize_zapret2_ports("80,443", "80,443")
-    tcp_ports = process._merge_zapret2_ports(tcp_ports, "2053,2083,2087,2096,8443")
+    tcp_ports = process._merge_zapret2_ports(tcp_ports, DISCORD_MEDIA_TCP_PORTS)
     assert "2053" in tcp_ports
     assert "8443" in tcp_ports
+
+
+def test_zapret2_default_profiles_include_discord_media_and_voice() -> None:
+    from zapret_hub.services.orchestrator import zapret2_hub
+
+    lists = {
+        "hub": Path("hub.txt"),
+        "auto": Path("auto.txt"),
+        "exclude": Path("exclude.txt"),
+        "ipset": Path("ipset.txt"),
+    }
+    args = zapret2_hub.build_default_profile_args(
+        lists=lists,
+        asset_roots=[],
+        tcp_ports="80,443,2053,2083,2087,2096,8443",
+        include_hostlist_auto=False,
+    )
+    joined = " ".join(args)
+    assert "--filter-tcp=2053,2083,2087,2096,8443" in joined
+    assert "--hostlist-domains=discord.media" in joined
+    assert "--filter-udp=19294-19344,50000-50100" in joined
+    assert "--filter-l7=discord,stun" in joined
+    assert "--lua-desync=hub_discord" in joined
 
 
 def test_zapret_bundles_keep_installed_layer_order(tmp_path: Path) -> None:

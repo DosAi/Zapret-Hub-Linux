@@ -11,6 +11,15 @@ from zapret_hub.services.orchestrator.cutover import CutoverManager
 from zapret_hub.services.orchestrator.learner import HostlistLearner
 from zapret_hub.services.orchestrator.mapper import ServiceMapper
 from zapret_hub.services.orchestrator.memory import WorkingMemory
+from zapret_hub.services.orchestrator.noise import (
+    IDE_PROCESS_TOKENS,
+    cdn_family_key,
+    exe_basename,
+    filter_learnable_hosts,
+    is_browser_process,
+    is_infra_noise_host,
+    is_noise_process,
+)
 from zapret_hub.services.orchestrator.signals import SignalCollector, classify_failure, is_interesting_udp_port
 from zapret_hub.services.orchestrator.tuner import SmartTuner
 from zapret_hub.services.service_catalog import SERVICE_PRESETS
@@ -35,25 +44,17 @@ _STATUS_TEXT = {
 _LONG_TUNE_S = 30.0
 _FAIL_THRESHOLD = 2
 _PROCESS_FAIL_THRESHOLD = 1  # SYN_SENT from a known app is enough
+_BROWSER_FAIL_THRESHOLD = 4  # browsers flap SYN_SENT constantly — need stronger confirm
 _SCAN_INTERVAL_S = 4.0
 _MAX_STEPS = 12
-_EXHAUSTED_COOLDOWN_S = 900.0
+_EXHAUSTED_COOLDOWN_S = 1800.0  # 30m — stop endless general retries on the same host
+_BROWSER_COOLDOWN_S = 3600.0  # after a failed browser tune, stay quiet
+_SERVICE_ACTIVATION_TTL_S = 1800.0
 _SYN_SENT_MIN_AGE_HINT = 2  # require repeated fails; SYN_SENT alone is normal
 _SCAN_SAMPLE_LIMIT = 200
 
-# IDE / tooling noise that steals Auto while a real app is broken.
-_NOISE_PROCESS_TOKENS: tuple[str, ...] = (
-    "cursor.exe",
-    "code.exe",
-    "devenv.exe",
-    "studio64.exe",
-    "idea64.exe",
-    "webstorm64.exe",
-    "pycharm64.exe",
-    "rider64.exe",
-    "clion64.exe",
-    "windsurf.exe",
-)
+# Back-compat alias for tests / callers that referenced the old constant.
+_NOISE_PROCESS_TOKENS = IDE_PROCESS_TOKENS
 
 _STEP_PHASES: tuple[tuple[str, frozenset[str]], ...] = (
     ("services", frozenset({"enable_service"})),
@@ -560,26 +561,40 @@ class OrchestratorEngine:
                 self.context.settings.update(**changes)
                 if runtime == "zapret2":
                     try:
-                        if any(
+                        running = any(
                             getattr(s, "component_id", "") == "zapret2" and getattr(s, "status", "") == "running"
                             for s in self.context.processes.list_states()
-                        ):
-                            self.context.processes.stop_component("zapret2")
-                        self.context.processes.start_component("zapret2")
+                        )
+                        if running:
+                            # winws2 hot-loads lists/strategy — do not kill the live process.
+                            from zapret_hub.services.orchestrator import zapret2_hub
+
+                            configs = Path(self.context.paths.configs_dir)
+                            auto_root = Path(self.context.paths.runtime_dir) / "zapret2" / "lists_auto"
+                            zapret2_hub.materialize_auto_lists(configs, auto_root)
+                            strategy_id = str(getattr(self.context.settings.get(), "zapret2_strategy_id", "balanced") or "balanced")
+                            zapret2_hub.write_hub_strategy_lua(configs, strategy_id)
+                        else:
+                            self.context.processes.start_component("zapret2")
                     except Exception as error:
-                        self._log("warning", "Resume zapret2 restart failed", error=str(error))
+                        self._log("warning", "Resume zapret2 hot-reload/start failed", error=str(error))
                 else:
                     try:
                         self.context.merge.rebuild()
                         self.context.files._invalidate_collection_cache()
                         self.context.files.rebuild_materialized_collections()
                         self.context.processes.rebuild_zapret_runtime_snapshot()
-                        if any(
+                        running = any(
                             getattr(s, "component_id", "") == "zapret" and getattr(s, "status", "") == "running"
                             for s in self.context.processes.list_states()
-                        ):
-                            self.context.processes.stop_component("zapret")
-                        self.context.processes.start_component("zapret")
+                        )
+                        if running and hasattr(self.context.processes, "seamless_restart_zapret"):
+                            self.context.processes.seamless_restart_zapret()
+                        elif running and hasattr(self.context.processes, "hot_replace_zapret_runtime"):
+                            slot = self.context.processes.stage_zapret_candidate_runtime()
+                            self.context.processes.hot_replace_zapret_runtime(slot)
+                        else:
+                            self.context.processes.start_component("zapret")
                     except Exception as error:
                         self._log("warning", "Resume zapret rebuild/restart failed", error=str(error))
                 cutover.snapshot()
@@ -900,14 +915,18 @@ class OrchestratorEngine:
         lists_dirs = self._list_dirs()
         learner = HostlistLearner(Path(self.context.paths.configs_dir))
 
-        # Defer IDE noise unless it maps to a selected service.
+        # Prefer real apps. Drop IDE/browser noise unless the process itself maps
+        # to a selected service (e.g. Discord Update.exe). Domain/IP maps from
+        # Edge→Akamai must never promote a browser into the primary scan.
         filtered: list[Any] = []
         deferred_noise: list[Any] = []
         for sample in samples:
-            blob = (sample.process or "").lower().replace("\\", "/")
-            is_noise = any(token in blob for token in _NOISE_PROCESS_TOKENS)
             process_services = {hit.service_id for hit in self._mapper.map_process(sample.process)}
-            if is_noise and not (process_services & selected):
+            if is_noise_process(sample.process) and not process_services:
+                # Pure browser/IDE traffic — only consider later, and never for service_detected.
+                deferred_noise.append(sample)
+                continue
+            if is_noise_process(sample.process) and not (process_services & selected):
                 deferred_noise.append(sample)
             else:
                 filtered.append(sample)
@@ -926,7 +945,14 @@ class OrchestratorEngine:
             if self._stop.is_set() or self._mode != "auto":
                 return
             process = str(group[0].process or "")
+            process_is_noise = is_noise_process(process)
+            process_is_browser = is_browser_process(process)
             process_services = [hit.service_id for hit in self._mapper.map_process(process)]
+            if knowledge is not None and process_is_noise:
+                exe = exe_basename(process)
+                if knowledge.on_cooldown(f"process:{exe}") or knowledge.on_cooldown("browser-tune"):
+                    continue
+
             domains: list[str] = []
             ips: list[str] = []
             services: list[str] = list(process_services)
@@ -939,6 +965,10 @@ class OrchestratorEngine:
                 state = (sample.state or "").upper()
                 interesting_tcp = state in {"SYN_SENT", "SYN_RECEIVED"}
                 interesting_udp = sample.proto == "udp" and is_interesting_udp_port(sample.remote_port)
+                host = str(sample.domain or "").strip().lower().rstrip(".")
+                # Browsers flap SYN_SENT to CDN PTRs constantly — ignore that signal.
+                if process_is_noise and host and is_infra_noise_host(host):
+                    interesting_tcp = False
                 if interesting_tcp:
                     syn_count += 1
                     primary_sample = sample
@@ -946,34 +976,36 @@ class OrchestratorEngine:
                     udp_fail += 1
                     primary_sample = sample
 
-                mapped = [
-                    hit.service_id
-                    for hit in self._mapper.map(
-                        host=sample.domain,
-                        ip=sample.remote_ip,
-                        process=process,
-                        use_dns=bool(sample.domain),
-                    )
-                ]
-                for sid in mapped:
-                    if sid not in services:
-                        services.append(sid)
+                # Domain/IP evidence is useful for known apps; browsers must not
+                # invent "epic-games" from an Akamai PTR and force activation.
+                if not process_is_noise:
+                    mapped = [
+                        hit.service_id
+                        for hit in self._mapper.map(
+                            host=sample.domain,
+                            ip=sample.remote_ip,
+                            process=process,
+                            use_dns=bool(sample.domain),
+                        )
+                    ]
+                    for sid in mapped:
+                        if sid not in services:
+                            services.append(sid)
 
-                host = str(sample.domain or "").strip().lower().rstrip(".")
-                if host and host not in domains:
+                if host and host not in domains and not is_infra_noise_host(host):
+                    domains.append(host)
+                elif host and host not in domains and not process_is_noise:
+                    # Keep infra hosts for known apps (rare); browsers drop them.
                     domains.append(host)
                 if sample.remote_ip and sample.remote_ip not in ips:
-                    # Collapse to /24 hints later in tuner via add_ip list; keep raw IPs here.
                     ips.append(sample.remote_ip)
 
-            if not services and not syn_count and not udp_fail:
-                continue
-
-            missing = [sid for sid in services if sid not in selected]
-            # Known app running but service not selected → activate once with FULL batch.
-            if missing:
+            # Activate missing services ONLY from process evidence (Discord.exe etc.).
+            # Never from Edge talking to a CDN that reverse-maps to epic-games.
+            missing = [sid for sid in process_services if sid not in selected]
+            if missing and not process_is_noise:
                 activation_key = f"service-activation:{missing[0]}:{_exe_label(process).lower()}"
-                if not self._memory.mark_notified(activation_key, ttl_s=30.0):
+                if not self._memory.mark_notified(activation_key, ttl_s=_SERVICE_ACTIVATION_TTL_S):
                     continue
                 self._log(
                     "info",
@@ -990,24 +1022,31 @@ class OrchestratorEngine:
                         "process": process,
                         "proto": primary_sample.proto,
                         "remote_port": primary_sample.remote_port,
-                        "services": missing if missing else services,
+                        "services": missing,
                         "symptom": "service_detected",
                         "selected": list(selected),
                         "domains": domains,
                         "ips": ips,
-                        "domains_missing": [
-                            host for host in domains if not learner.domain_in_merged_lists(host, lists_dirs)
-                        ],
+                        "domains_missing": filter_learnable_hosts(
+                            [host for host in domains if not learner.domain_in_merged_lists(host, lists_dirs)]
+                        ),
                     }
                 )
                 return
+
+            if process_is_noise and not process_services and not syn_count and not udp_fail:
+                # Browser/IDE with only ESTABLISHED infra noise — nothing to fix.
+                continue
+
+            if not services and not syn_count and not udp_fail and not process_is_browser:
+                continue
 
             # Service already selected — need real failure signals.
             failing = syn_count > 0 or udp_fail > 0
             # Process-driven probes: only check remotes THIS process is talking to
             # (not blind periodic discord.com polls). Cap to keep the scan cheap.
-            if not failing and services:
-                candidates = [h for h in domains if h][:4]
+            if not failing and services and not process_is_noise:
+                candidates = [h for h in domains if h and not is_infra_noise_host(h)][:4]
                 if not candidates:
                     # Resolve a few IPs for process-owned remotes when DNS was empty.
                     for sample in group[:6]:
@@ -1020,6 +1059,8 @@ class OrchestratorEngine:
                             ptr = self._mapper.reverse_dns(sample.remote_ip)
                         except Exception:
                             ptr = ""
+                        if ptr and is_infra_noise_host(ptr):
+                            continue
                         if ptr and ptr not in domains:
                             domains.append(ptr)
                             candidates.append(ptr)
@@ -1032,6 +1073,9 @@ class OrchestratorEngine:
                     if knowledge is not None and (
                         knowledge.is_dead_host(host) or knowledge.on_cooldown(f"host:{host}")
                     ):
+                        continue
+                    family = cdn_family_key(host)
+                    if knowledge is not None and family and knowledge.on_cooldown(f"cdn:{family}"):
                         continue
                     result = self._signals.probe_host_access(host, timeout_s=2.5)
                     if result.ok:
@@ -1060,14 +1104,48 @@ class OrchestratorEngine:
                         "selected": list(selected),
                         "domains": domains,
                         "ips": ips,
-                        "domains_missing": [
-                            item for item in domains if not learner.domain_in_merged_lists(item, lists_dirs)
-                        ],
+                        "domains_missing": filter_learnable_hosts(
+                            [item for item in domains if not learner.domain_in_merged_lists(item, lists_dirs)]
+                        ),
                     }
                     if score > best_score:
                         best_score = score
                         best = incident
                     break
+                continue
+
+            # Browsers: only act on learnable missing domains with sustained fails —
+            # never escalate SYN_SENT alone into strategy thrash.
+            if process_is_browser:
+                learnable_missing = filter_learnable_hosts(
+                    [host for host in domains if host and not learner.domain_in_merged_lists(host, lists_dirs)]
+                )
+                if not learnable_missing:
+                    continue
+                fail_key = learnable_missing[0]
+                if self._memory.bump_fail(fail_key) < _BROWSER_FAIL_THRESHOLD:
+                    continue
+                if knowledge is not None and (
+                    knowledge.is_dead_host(fail_key) or knowledge.on_cooldown(f"host:{fail_key}")
+                ):
+                    continue
+                score = 40 + len(learnable_missing)
+                incident = {
+                    "domain": fail_key,
+                    "ip": ips[0] if ips else str(primary_sample.remote_ip or ""),
+                    "process": process,
+                    "proto": primary_sample.proto,
+                    "remote_port": primary_sample.remote_port,
+                    "services": list(process_services) or list(services),
+                    "symptom": "external_miss",
+                    "selected": list(selected),
+                    "domains": learnable_missing,
+                    "ips": [],  # don't seed random CDN IPs from browser scans
+                    "domains_missing": learnable_missing,
+                }
+                if score > best_score:
+                    best_score = score
+                    best = incident
                 continue
 
             if not failing:
@@ -1085,6 +1163,9 @@ class OrchestratorEngine:
             score = 80 + syn_count * 15 + udp_fail * 8 + len(domains) + len(ips)
             if set(services) & selected:
                 score += 25
+            # Prefer real apps over leftover IDE noise.
+            if process_is_noise:
+                score -= 50
             incident = {
                 "domain": domains[0] if domains else "",
                 "ip": ips[0] if ips else str(primary_sample.remote_ip or ""),
@@ -1096,9 +1177,9 @@ class OrchestratorEngine:
                 "selected": list(selected),
                 "domains": domains,
                 "ips": ips,
-                "domains_missing": [
-                    host for host in domains if host and not learner.domain_in_merged_lists(host, lists_dirs)
-                ],
+                "domains_missing": filter_learnable_hosts(
+                    [host for host in domains if host and not learner.domain_in_merged_lists(host, lists_dirs)]
+                ),
             }
             if score > best_score:
                 best_score = score
@@ -1144,10 +1225,28 @@ class OrchestratorEngine:
             host_key = domain or ip or (domains[0] if domains else "") or (ips[0] if ips else "") or process.lower()
             if not host_key:
                 return
+            if is_infra_noise_host(host_key) and is_noise_process(process):
+                # Never open a full tune on browser→CDN PTR noise.
+                return
             if knowledge is not None and (
                 knowledge.is_dead_host(host_key) or knowledge.on_cooldown(f"host:{host_key}")
             ):
                 return
+            family = cdn_family_key(host_key)
+            if knowledge is not None and family and knowledge.on_cooldown(f"cdn:{family}"):
+                return
+            if knowledge is not None and is_noise_process(process):
+                exe = exe_basename(process)
+                if knowledge.on_cooldown(f"process:{exe}") or knowledge.on_cooldown("browser-tune"):
+                    return
+
+            domains = filter_learnable_hosts(domains) or ([domain] if domain and not is_infra_noise_host(domain) else [])
+            domains_missing = filter_learnable_hosts(domains_missing)
+            if domain and is_infra_noise_host(domain):
+                domain = domains[0] if domains else ""
+                host_key = domain or ip or process.lower()
+                if not host_key:
+                    return
 
             services = list(incident.get("services") or [])
             if not services:
@@ -1419,6 +1518,12 @@ class OrchestratorEngine:
                     knowledge.set_cooldown(f"host:{host_key}", _EXHAUSTED_COOLDOWN_S)
                     for item in domains[:8]:
                         knowledge.set_cooldown(f"host:{item}", _EXHAUSTED_COOLDOWN_S)
+                    family = cdn_family_key(host_key)
+                    if family:
+                        knowledge.set_cooldown(f"cdn:{family}", _EXHAUSTED_COOLDOWN_S)
+                    if is_noise_process(process):
+                        knowledge.set_cooldown(f"process:{exe_basename(process)}", _BROWSER_COOLDOWN_S)
+                        knowledge.set_cooldown("browser-tune", _BROWSER_COOLDOWN_S)
                 self._log("info", "Orchestrator plan failed", host=host_key, symptom=symptom, error=err)
 
             if not self.is_live():
@@ -1442,7 +1547,7 @@ class OrchestratorEngine:
         required: list[str] = []
         for host in [domain, *(extra_domains or [])]:
             host = str(host or "").strip().lower().rstrip(".")
-            if not host:
+            if not host or is_infra_noise_host(host):
                 continue
             targets.append({"value": f"https://{host}/"})
             targets.append({"value": host})
@@ -1453,6 +1558,8 @@ class OrchestratorEngine:
             if rule is None:
                 continue
             for host in health_hosts_for(service_id)[:3]:
+                if is_infra_noise_host(host):
+                    continue
                 targets.append({"value": f"https://{host}/"})
                 if host not in required:
                     required.append(host)
@@ -1460,10 +1567,10 @@ class OrchestratorEngine:
                 targets.append({"value": value})
                 if not domain and "://" in value:
                     host = value.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
-                    if host and host not in required:
+                    if host and host not in required and not is_infra_noise_host(host):
                         required.append(host)
                 elif not domain and value and not value.upper().startswith("PING:"):
-                    if value not in required:
+                    if value not in required and not is_infra_noise_host(value):
                         required.append(value)
         if not required and ip:
             # IP-only gaming: require at least one service target if present; else soft-pass on any ok.

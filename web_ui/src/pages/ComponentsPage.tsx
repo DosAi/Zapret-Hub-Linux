@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useAppState, useBridge, patchOptimistic } from "@/hooks/useBridgeState";
 import { useLocale } from "@/hooks/useLocale";
 import { IosToggle } from "@/components/ui/IosToggle";
@@ -53,9 +53,36 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
   const [optimisticToggle, setOptimisticToggle] = useState<Partial<Record<ComponentId, boolean>>>({});
   const toggleTimers = useRef<Partial<Record<ComponentId, number>>>({});
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const versionListRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (optimisticDns === state?.settings.dns.profile) setOptimisticDns(null);
   }, [optimisticDns, state?.settings.dns.profile]);
+  // Keep wheel scroll inside the version list (do not scroll the page behind the modal).
+  useLayoutEffect(() => {
+    if (!updateCheck) return;
+    let list: HTMLDivElement | null = null;
+    let onWheel: ((event: WheelEvent) => void) | null = null;
+    const frame = window.requestAnimationFrame(() => {
+      list = versionListRef.current;
+      if (!list) return;
+      onWheel = (event: WheelEvent) => {
+        // Capture phase: stop before parent modal/page handlers steal the wheel.
+        event.stopPropagation();
+        const canScroll = list!.scrollHeight > list!.clientHeight + 1;
+        const atTop = list!.scrollTop <= 0;
+        const atBottom = list!.scrollTop + list!.clientHeight >= list!.scrollHeight - 1;
+        if (!canScroll || (event.deltaY < 0 && atTop) || (event.deltaY > 0 && atBottom)) {
+          event.preventDefault();
+        }
+        // Else: native overflow scroll moves the list only.
+      };
+      list.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (list && onWheel) list.removeEventListener("wheel", onWheel, { capture: true });
+    };
+  }, [updateCheck]);
   useEffect(() => {
     if (!state) return;
     setOptimisticToggle((current) => {
@@ -240,7 +267,8 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
             );
           })}
         </div>
-        <AnimatePresence>
+      </div>
+      <AnimatePresence>
           {dnsOpen && (
             <motion.div className="fixed inset-0 z-[80] grid place-items-center bg-black/45 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDnsOpen(false)}>
               <motion.div initial={{ opacity: 0, y: 10, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 7, scale: 0.98 }} className="w-[620px] rounded-[18px] border border-line-2 bg-bg-1 p-4 shadow-[0_20px_48px_-24px_rgba(0,0,0,.8)]" onClick={(event) => event.stopPropagation()}>
@@ -279,11 +307,10 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
             </motion.div>
           )}
         </AnimatePresence>
-      </div>
       <AnimatePresence>
         {updateCheck && (
-          <motion.div className="fixed inset-0 z-[80] grid place-items-center bg-black/45 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => { setUpdateCheck(null); setSelectedVersion(null); }}>
-            <motion.div initial={{ opacity: 0, y: 12, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.98 }} className={`rounded-[18px] border border-line-1 bg-bg-1 p-5 shadow-2xl ${(updateCheck.versions?.length ?? 0) > 0 ? "w-[440px]" : "w-[390px]"}`} onClick={(event) => event.stopPropagation()}>
+          <motion.div className="fixed inset-0 z-[80] grid place-items-center bg-black/45 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => { setUpdateCheck(null); setSelectedVersion(null); }} onWheel={(event) => { event.stopPropagation(); event.preventDefault(); }}>
+            <motion.div initial={{ opacity: 0, y: 12, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.98 }} className={`rounded-[18px] border border-line-1 bg-bg-1 p-5 shadow-2xl ${(updateCheck.versions?.length ?? 0) > 0 ? "w-[440px]" : "w-[390px]"}`} onClick={(event) => event.stopPropagation()} onWheel={(event) => { event.stopPropagation(); event.preventDefault(); }}>
               {(() => {
                 const hasVersions = GITHUB_VERSION_IDS.includes(updateCheck.id) && (updateCheck.versions?.length ?? 0) > 0;
                 const versionChanged = Boolean(selectedVersion && selectedVersion !== updateCheck.currentVersion);
@@ -295,6 +322,11 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
                     : updateCheck.available
                       ? t("update.found")
                       : t("update.uptodate");
+                const normVersion = (value: string) => value.trim().replace(/^v/i, "").toLowerCase();
+                const currentNorm = normVersion(updateCheck.currentVersion || "");
+                const currentExact = updateCheck.versions?.find((item) => item.current)?.version
+                  || updateCheck.versions?.find((item) => normVersion(item.version) === currentNorm)?.version
+                  || "";
                 return (
                   <>
               <h3 className="text-[15px] font-semibold text-fg">{title}</h3>
@@ -308,10 +340,13 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
                     <div className="mt-3">
                       <div className="mb-1.5 text-[11px] font-medium text-fg">{t("update.chooseVersion")}</div>
                       <p className="mb-2 text-[10px] leading-relaxed text-fg-dim">{t("update.versionsHint")}</p>
-                      <div className="max-h-[220px] space-y-1.5 overflow-auto pr-1">
+                      <div
+                        ref={versionListRef}
+                        className="scroll-area max-h-[220px] space-y-1.5 overflow-y-auto overscroll-contain pr-1"
+                      >
                         {updateCheck.versions!.map((release) => {
                           const selected = (selectedVersion ?? updateCheck.currentVersion) === release.version;
-                          const isCurrent = Boolean(release.current) || release.version === updateCheck.currentVersion;
+                          const isCurrent = currentExact !== "" && release.version === currentExact;
                           return (
                             <button
                               key={release.version}
@@ -372,7 +407,6 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
           </motion.div>
         )}
       </AnimatePresence>
-      </div>
       <ConfirmModal
         open={confirmManualOpen}
         title={t("component.mode.confirmTitle")}
