@@ -476,12 +476,34 @@ export function createMockBridge(): ZapretHubBridge {
         return undefined as Commands[K]["out"];
       case "component.check-update": {
         const p = payload as Commands["component.check-update"]["in"];
+        const versions =
+          p.id === "zapret" ? [
+            { version: "1.10.0", publishedAt: "2026-07-22T05:18:59Z", recommended: true, current: state.components.zapret.version === "1.10.0" },
+            { version: "1.9.9c", publishedAt: "2026-06-15T12:00:00Z", recommended: false, current: state.components.zapret.version === "1.9.9c" },
+            { version: "1.9.9b", publishedAt: "2026-06-14T17:46:35Z", recommended: false, current: state.components.zapret.version === "1.9.9b" },
+            { version: "1.9.9a", publishedAt: "2026-06-01T10:00:00Z", recommended: false, current: false },
+          ]
+          : p.id === "zapret2" ? [
+            { version: "1.0.3", publishedAt: "2026-07-20T12:00:00Z", recommended: true, current: state.components.zapret2.version === "1.0.3" },
+            { version: "1.0.2", publishedAt: "2026-06-16T13:00:43Z", recommended: false, current: state.components.zapret2.version === "1.0.2" },
+            { version: "1.0.1", publishedAt: "2026-06-10T12:00:00Z", recommended: false, current: state.components.zapret2.version === "1.0.1" },
+            { version: "1.0", publishedAt: "2026-06-01T12:00:00Z", recommended: false, current: false },
+          ]
+          : p.id === "tg-ws-proxy" ? [
+            { version: "1.8.1", publishedAt: "2026-07-01T12:00:00Z", recommended: true, current: state.components["tg-ws-proxy"].version === "1.8.1" },
+            { version: "1.8.0", publishedAt: "2026-06-20T12:00:00Z", recommended: false, current: state.components["tg-ws-proxy"].version === "1.8.0" },
+            { version: "1.7.3", publishedAt: "2026-05-10T12:00:00Z", recommended: false, current: false },
+          ]
+          : undefined;
+        const latestVersion = versions?.[0]?.version || (p.id === "zapret2" ? "master" : "latest");
         setTimeout(() => emit("component.update-check", {
           requestId: p.requestId,
           id: p.id,
-          available: true,
+          available: state.components[p.id].version !== latestVersion,
           currentVersion: state.components[p.id].version,
-          latestVersion: p.id === "zapret2" ? "master" : "latest",
+          latestVersion,
+          recommendedVersion: versions?.find((item) => item.recommended)?.version || latestVersion,
+          versions,
         }), 450);
         return undefined as Commands[K]["out"];
       }
@@ -492,7 +514,7 @@ export function createMockBridge(): ZapretHubBridge {
         pushState();
         setTimeout(() => {
           state.components[p.id].status = "on";
-          state.components[p.id].version = p.id === "zapret2" ? "f4cf5dde162a" : "latest";
+          state.components[p.id].version = p.version || (p.id === "zapret2" ? "1.0.3" : p.id === "zapret" ? "1.10.0" : p.id === "tg-ws-proxy" ? "1.8.1" : "latest");
           pushState();
           emit("component.update-result", { id: p.id, status: "success", version: state.components[p.id].version });
         }, 900);

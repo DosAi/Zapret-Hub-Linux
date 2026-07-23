@@ -11,6 +11,7 @@ import { ScrollGlassHeader } from "@/components/ui/ScrollGlassHeader";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 
 const ORDER: ComponentId[] = ["zapret", "zapret2", "goshkow-vpn", "tg-ws-proxy", "xbox-dns"];
+const GITHUB_VERSION_IDS: ComponentId[] = ["zapret", "zapret2", "tg-ws-proxy"];
 
 const componentIcon: Record<ComponentId, string> = {
   zapret: "component_zapret.svg", zapret2: "component_zapret2.svg", "goshkow-vpn": "vpn.svg", "tg-ws-proxy": "component_tg.svg", "xbox-dns": "component_xbox_dns.svg",
@@ -44,6 +45,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
   const [checkingId, setCheckingId] = useState<ComponentId | null>(null);
   const [updatingId, setUpdatingId] = useState<ComponentId | null>(null);
   const [updateCheck, setUpdateCheck] = useState<ComponentUpdateCheck | null>(null);
+  const [selectedVersion, setSelectedVersion] = useState<string | null>(null);
   const [dnsOpen, setDnsOpen] = useState(false);
   const [confirmManualOpen, setConfirmManualOpen] = useState(false);
   const [confirmManualBackend, setConfirmManualBackend] = useState<"zapret" | "zapret2">("zapret");
@@ -90,6 +92,14 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
   useEffect(() => bridge.subscribe("component.update-check", (result) => {
     setCheckingId(null);
     setUpdateCheck(result);
+    if (GITHUB_VERSION_IDS.includes(result.id) && (result.versions?.length ?? 0) > 0) {
+      const preferred = result.available
+        ? (result.latestVersion || result.versions?.find((item) => item.recommended)?.version || result.currentVersion)
+        : (result.versions?.find((item) => item.current)?.version || result.currentVersion);
+      setSelectedVersion(preferred || null);
+    } else {
+      setSelectedVersion(null);
+    }
   }), [bridge]);
   useEffect(() => bridge.subscribe("component.update-result", (result) => {
     setUpdatingId(result.status === "started" ? result.id : null);
@@ -272,19 +282,92 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
       </div>
       <AnimatePresence>
         {updateCheck && (
-          <motion.div className="fixed inset-0 z-[80] grid place-items-center bg-black/45 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setUpdateCheck(null)}>
-            <motion.div initial={{ opacity: 0, y: 12, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.98 }} className="w-[390px] rounded-[18px] border border-line-1 bg-bg-1 p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
-              <h3 className="text-[15px] font-semibold text-fg">{updateCheck.error ? t("update.checkFailed") : updateCheck.available ? t("update.found") : t("update.uptodate")}</h3>
+          <motion.div className="fixed inset-0 z-[80] grid place-items-center bg-black/45 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => { setUpdateCheck(null); setSelectedVersion(null); }}>
+            <motion.div initial={{ opacity: 0, y: 12, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.98 }} className={`rounded-[18px] border border-line-1 bg-bg-1 p-5 shadow-2xl ${(updateCheck.versions?.length ?? 0) > 0 ? "w-[440px]" : "w-[390px]"}`} onClick={(event) => event.stopPropagation()}>
+              {(() => {
+                const hasVersions = GITHUB_VERSION_IDS.includes(updateCheck.id) && (updateCheck.versions?.length ?? 0) > 0;
+                const versionChanged = Boolean(selectedVersion && selectedVersion !== updateCheck.currentVersion);
+                const canInstall = !updateCheck.error && (versionChanged || (updateCheck.available && !hasVersions));
+                const title = updateCheck.error
+                  ? t("update.checkFailed")
+                  : hasVersions
+                    ? t("update.changeTitle")
+                    : updateCheck.available
+                      ? t("update.found")
+                      : t("update.uptodate");
+                return (
+                  <>
+              <h3 className="text-[15px] font-semibold text-fg">{title}</h3>
               {updateCheck.error ? <p className="mt-2 text-[11px] leading-relaxed text-err">{updateCheck.error}</p> : (
-                <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl border border-line-1 bg-bg-2 p-3 text-[11px]">
-                  <div><div className="text-fg-mute">{t("update.current")}</div><div className="mt-1 font-semibold text-fg">{updateCheck.currentVersion}</div></div>
-                  <div><div className="text-fg-mute">{t("update.latest")}</div><div className="mt-1 font-semibold text-fg">{updateCheck.latestVersion}</div></div>
-                </div>
+                <>
+                  <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl border border-line-1 bg-bg-2 p-3 text-[11px]">
+                    <div><div className="text-fg-mute">{t("update.current")}</div><div className="mt-1 font-semibold text-fg">{updateCheck.currentVersion}</div></div>
+                    <div><div className="text-fg-mute">{t("update.latest")}</div><div className="mt-1 font-semibold text-fg">{updateCheck.latestVersion}</div></div>
+                  </div>
+                  {hasVersions && (
+                    <div className="mt-3">
+                      <div className="mb-1.5 text-[11px] font-medium text-fg">{t("update.chooseVersion")}</div>
+                      <p className="mb-2 text-[10px] leading-relaxed text-fg-dim">{t("update.versionsHint")}</p>
+                      <div className="max-h-[220px] space-y-1.5 overflow-auto pr-1">
+                        {updateCheck.versions!.map((release) => {
+                          const selected = (selectedVersion ?? updateCheck.currentVersion) === release.version;
+                          const isCurrent = Boolean(release.current) || release.version === updateCheck.currentVersion;
+                          return (
+                            <button
+                              key={release.version}
+                              type="button"
+                              disabled={updatingId === updateCheck.id}
+                              onClick={() => setSelectedVersion(release.version)}
+                              className="flex w-full items-center justify-between gap-2 rounded-[11px] border px-3 py-2 text-left transition-colors disabled:opacity-50"
+                              style={{
+                                borderColor: selected ? "var(--ok)" : "var(--line-1)",
+                                background: selected ? "color-mix(in srgb, var(--ok) 8%, var(--bg-2))" : "var(--bg-2)",
+                              }}
+                            >
+                              <div className="min-w-0">
+                                <div className="truncate text-[12px] font-semibold text-fg">{release.version}</div>
+                                {release.publishedAt && (
+                                  <div className="mt-0.5 text-[9px] text-fg-mute">
+                                    {new Date(release.publishedAt).toLocaleDateString(locale === "ru" ? "ru-RU" : "en-US")}
+                                  </div>
+                                )}
+                              </div>
+                              <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                                {isCurrent && <span className="rounded-full bg-fg/10 px-1.5 py-0.5 text-[9px] text-fg-dim">{t("update.currentBadge")}</span>}
+                                {release.recommended && <span className="rounded-full bg-ok/15 px-1.5 py-0.5 text-[9px] text-ok">{t("update.recommended")}</span>}
+                                {release.prerelease && <span className="rounded-full bg-warn/15 px-1.5 py-0.5 text-[9px] text-warn">{t("update.prerelease")}</span>}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
               <div className="mt-4 flex justify-end gap-2">
-                <button onClick={() => setUpdateCheck(null)} className="rounded-[10px] border border-line-1 px-3 py-2 text-[11px] text-fg-dim hover:bg-bg-2">{updateCheck.available ? t("update.keep") : t("settings.close")}</button>
-                {updateCheck.available && !updateCheck.error && <button onClick={() => { setUpdatingId(updateCheck.id); bridge.call("component.install-update", { id: updateCheck.id }); setUpdateCheck(null); }} className="rounded-[10px] bg-fg px-3 py-2 text-[11px] font-semibold text-bg-0 hover:opacity-90">{t("component.update")}</button>}
+                <button onClick={() => { setUpdateCheck(null); setSelectedVersion(null); }} className="rounded-[10px] border border-line-1 px-3 py-2 text-[11px] text-fg-dim hover:bg-bg-2">{canInstall ? t("update.keep") : t("settings.close")}</button>
+                {canInstall && (
+                  <button
+                    disabled={updatingId === updateCheck.id}
+                    onClick={() => {
+                      const version = hasVersions
+                        ? (selectedVersion && selectedVersion !== updateCheck.currentVersion ? selectedVersion : (updateCheck.available ? updateCheck.latestVersion : undefined))
+                        : (updateCheck.available ? updateCheck.latestVersion : undefined);
+                      setUpdatingId(updateCheck.id);
+                      bridge.call("component.install-update", { id: updateCheck.id, ...(version ? { version } : {}) });
+                      setUpdateCheck(null);
+                      setSelectedVersion(null);
+                    }}
+                    className="rounded-[10px] bg-fg px-3 py-2 text-[11px] font-semibold text-bg-0 hover:opacity-90 disabled:opacity-50"
+                  >
+                    {updatingId === updateCheck.id ? t("update.installing") : t("update.installVersion")}
+                  </button>
+                )}
               </div>
+                  </>
+                );
+              })()}
             </motion.div>
           </motion.div>
         )}

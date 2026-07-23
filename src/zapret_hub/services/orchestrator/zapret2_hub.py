@@ -643,22 +643,68 @@ def bundle_winws_root(winws2_path: Path) -> Path:
     return Path(winws2_path).resolve().parent
 
 
-def _filter_file(bundle_root: Path, name: str) -> Path | None:
-    candidate = bundle_root / "windivert.filter" / name
-    return candidate if candidate.is_file() else None
+def zapret2_asset_roots(winws2_path: Path | None = None, runtime_root: Path | None = None) -> list[Path]:
+    """Roots that may contain lua/ and windivert filters (release + win-bundle layouts)."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            resolved = Path(path).resolve()
+        except OSError:
+            resolved = Path(path)
+        key = str(resolved).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(resolved)
+
+    if winws2_path is not None:
+        parent = Path(winws2_path).resolve().parent
+        add(parent)
+        # Official release: .../binaries/windows-x86_64/winws2.exe → tree root
+        if parent.name.lower() in {"windows-x86_64", "win64", "windows"} and parent.parent.name.lower() == "binaries":
+            add(parent.parent.parent)
+        # Win-bundle: .../zapret-winws/winws2.exe → bundle root one level up
+        if parent.name.lower() == "zapret-winws":
+            add(parent.parent)
+    add(runtime_root)
+    return roots
 
 
-def find_bundle_lua(bundle_root: Path, filename: str) -> Path | None:
-    for candidate in (bundle_root / "lua" / filename, bundle_root / filename):
-        if candidate.is_file():
-            return candidate
+def _filter_file(asset_roots: Path | list[Path], name: str) -> Path | None:
+    roots = asset_roots if isinstance(asset_roots, list) else [asset_roots]
+    for root in roots:
+        for candidate in (
+            Path(root) / "windivert.filter" / name,
+            Path(root) / "init.d" / "windivert.filter.examples" / name,
+            Path(root) / "zapret-winws" / "windivert.filter" / name,
+        ):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def find_bundle_lua(asset_roots: Path | list[Path], filename: str) -> Path | None:
+    roots = asset_roots if isinstance(asset_roots, list) else [asset_roots]
+    for root in roots:
+        for candidate in (
+            Path(root) / "lua" / filename,
+            Path(root) / filename,
+            Path(root) / "zapret-winws" / "lua" / filename,
+        ):
+            if candidate.is_file():
+                return candidate
     return None
 
 
 def build_default_profile_args(
     *,
     lists: dict[str, Path],
-    bundle_root: Path,
+    asset_roots: Path | list[Path] | None = None,
+    bundle_root: Path | None = None,
     tcp_ports: str,
     strategy_id: str = "balanced",
     include_hostlist_auto: bool = True,
@@ -669,6 +715,13 @@ def build_default_profile_args(
     are not applied — services, mods, and user lists still use hostlist/ipset.
     """
     _ = strategy_id
+    roots: list[Path]
+    if asset_roots is not None:
+        roots = asset_roots if isinstance(asset_roots, list) else [asset_roots]
+    elif bundle_root is not None:
+        roots = [bundle_root]
+    else:
+        roots = []
     hub = str(lists["hub"])
     auto = str(lists["auto"])
     exclude = str(lists["exclude"])
@@ -694,8 +747,9 @@ def build_default_profile_args(
         "windivert_part.discord_media.txt",
         "windivert_part.stun.txt",
         "windivert_part.quic_initial_ietf.txt",
+        "windivert_part.wireguard.txt",
     ):
-        path = _filter_file(bundle_root, name)
+        path = _filter_file(roots, name)
         if path is not None:
             args.append(f"--wf-raw-part=@{path}")
 
@@ -705,6 +759,7 @@ def build_default_profile_args(
             "--filter-l7=http",
             *hostlist_args,
             *auto_args,
+            "--out-range=-d10",
             "--payload=http_req",
             "--lua-desync=hub_http",
             "--lua-desync=hub_http_b",
@@ -713,6 +768,7 @@ def build_default_profile_args(
             "--filter-l7=tls",
             *hostlist_args,
             *auto_args,
+            "--out-range=-d10",
             "--payload=tls_client_hello",
             "--lua-desync=hub_tls",
             "--lua-desync=hub_tls_b",

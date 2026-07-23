@@ -35,9 +35,9 @@ from zapret_hub.services.service_rules import SERVICE_RULES
 from zapret_hub.services.settings import SettingsManager
 from zapret_hub.services.storage import StorageManager
 
-# Hub ships / prefers Flowseal 1.9.9c (not newer 1.10.x) as the default Zapret binary.
-PINNED_ZAPRET_VERSION = "1.9.9c"
-PINNED_ZAPRET_TAG = "1.9.9c"
+# Hub ships / prefers the latest Flowseal Zapret release as the default binary.
+PINNED_ZAPRET_VERSION = "1.10.0"
+PINNED_ZAPRET_TAG = "1.10.0"
 PINNED_ZAPRET_ZIP_URL = (
     "https://github.com/Flowseal/zapret-discord-youtube/releases/download/"
     f"{PINNED_ZAPRET_TAG}/zapret-discord-youtube-{PINNED_ZAPRET_VERSION}.zip"
@@ -1098,7 +1098,7 @@ foreach ($adapter in @($payload.adapters)) {
 }
 """.replace("__PAYLOAD__", payload)
         proc = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            ["powershell", "-NoProfile", "-Command", script],
             capture_output=True,
             text=True,
             check=False,
@@ -1161,7 +1161,7 @@ foreach ($adapter in @($payload.adapters)) {
 }
 """.replace("__PAYLOAD__", payload)
         proc = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            ["powershell", "-NoProfile", "-Command", script],
             capture_output=True,
             text=True,
             check=False,
@@ -1528,24 +1528,63 @@ foreach ($adapter in @($payload.adapters)) {
 
     def _ensure_zapret2_runtime(self) -> Path:
         runtime_root = self.storage.paths.runtime_dir / "zapret2"
-        if self._find_zapret2_winws(runtime_root) is not None:
+        if self._zapret2_runtime_is_ready(runtime_root):
             return runtime_root
         return self._install_zapret2_archive()
 
+    def _zapret2_runtime_is_ready(self, runtime_root: Path) -> bool:
+        """True when a real bol-van/zapret2 release tree (or stamped valid install) is present."""
+        winws = self._find_zapret2_winws(runtime_root)
+        if winws is None:
+            return False
+        if (runtime_root / "binaries" / "windows-x86_64" / "winws2.exe").is_file():
+            return True
+        if (runtime_root / "lua" / "zapret-lib.lua").is_file() and (runtime_root / "zapret-winws" / "winws2.exe").is_file():
+            return True
+        version = ""
+        try:
+            version = (runtime_root / ".zapret-hub-version").read_text(encoding="utf-8").strip().lstrip("vV")
+        except OSError:
+            version = ""
+        # Nested zapret-win-bundle-master without a semver stamp is the old wrong install.
+        if "zapret-win-bundle" in str(winws).replace("\\", "/").lower():
+            return bool(version) and version not in {"master", "unknown"} and any(ch.isdigit() for ch in version)
+        return bool(version) and version not in {"master", "unknown"}
+
     def _install_zapret2_archive(self, *, archive_url: str = "", version: str = "") -> Path:
         runtime_root = self.storage.paths.runtime_dir / "zapret2"
-        # Windows binaries are published in zapret-win-bundle; the zapret2
-        # source archive itself does not contain winws2.exe.
+        # Prefer bol-van/zapret2 release archives; win-bundle is a Windows binary fallback.
+        if not archive_url:
+            try:
+                release = self.fetch_latest_zapret2_release()
+                archive_url = str(
+                    release.get("asset_url")
+                    or release.get("source_url")
+                    or release.get("zipball_url")
+                    or ""
+                ).strip()
+                version = version or str(release.get("latest_version") or "").strip()
+            except Exception:
+                archive_url = ""
         archive_url = archive_url or "https://codeload.github.com/bol-van/zapret-win-bundle/zip/refs/heads/master"
         temp_root = Path(tempfile.mkdtemp(prefix="zapret_hub_zapret2_"))
         try:
-            zip_path = temp_root / "zapret2-master.zip"
+            zip_path = temp_root / "zapret2-release.zip"
             self._download_to_file(archive_url, zip_path, timeout=90)
             extract_root = temp_root / "extract"
             extract_root.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(zip_path, "r") as archive:
                 archive.extractall(extract_root)
             source_root = self._find_extracted_zapret2_root(extract_root)
+            if source_root is None and "zapret-win-bundle" not in archive_url:
+                bundle_zip = temp_root / "zapret2-win-bundle.zip"
+                bundle_url = "https://codeload.github.com/bol-van/zapret-win-bundle/zip/refs/heads/master"
+                self._download_to_file(bundle_url, bundle_zip, timeout=90)
+                bundle_extract = temp_root / "bundle_extract"
+                bundle_extract.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(bundle_zip, "r") as archive:
+                    archive.extractall(bundle_extract)
+                source_root = self._find_extracted_zapret2_root(bundle_extract)
             if source_root is None:
                 raise FileNotFoundError("Downloaded Zapret2 archive does not contain winws2.exe.")
             backup = self.storage.create_backup(runtime_root, "pre-update-zapret2") if runtime_root.exists() else None
@@ -1553,7 +1592,7 @@ foreach ($adapter in @($payload.adapters)) {
                 shutil.rmtree(runtime_root, ignore_errors=True)
             shutil.copytree(source_root, runtime_root, dirs_exist_ok=True)
             if version:
-                (runtime_root / ".zapret-hub-version").write_text(version, encoding="utf-8")
+                (runtime_root / ".zapret-hub-version").write_text(version.lstrip("vV"), encoding="utf-8")
             self.storage.ensure_layout()
             self.logging.log(
                 "info",
@@ -1567,8 +1606,17 @@ foreach ($adapter in @($payload.adapters)) {
             shutil.rmtree(temp_root, ignore_errors=True)
 
     def _find_extracted_zapret2_root(self, extract_root: Path) -> Path | None:
-        candidates = [extract_root]
-        candidates.extend(path for path in extract_root.iterdir() if path.is_dir())
+        """Prefer official release tree root (binaries/windows-x86_64 + lua), then win-bundle."""
+        candidates: list[Path] = [extract_root]
+        try:
+            candidates.extend(path for path in extract_root.iterdir() if path.is_dir())
+        except OSError:
+            pass
+        for candidate in candidates:
+            if (candidate / "binaries" / "windows-x86_64" / "winws2.exe").is_file():
+                return candidate
+            if (candidate / "zapret-winws" / "winws2.exe").is_file():
+                return candidate
         for candidate in candidates:
             if self._find_zapret2_winws(candidate) is not None:
                 return candidate
@@ -1581,10 +1629,10 @@ foreach ($adapter in @($payload.adapters)) {
         if not runtime_root.exists():
             return None
         preferred = [
+            runtime_root / "binaries" / "windows-x86_64" / "winws2.exe",
+            runtime_root / "binaries" / "win64" / "winws2.exe",
             runtime_root / "zapret-winws" / "winws2.exe",
             runtime_root / "zapret-win-bundle-master" / "zapret-winws" / "winws2.exe",
-            runtime_root / "binaries" / "win64" / "winws2.exe",
-            runtime_root / "binaries" / "windows-x86_64" / "winws2.exe",
             runtime_root / "bin" / "winws2.exe",
             runtime_root / "winws2.exe",
         ]
@@ -1622,18 +1670,17 @@ foreach ($adapter in @($payload.adapters)) {
         if bypass_yt_discord or (control_mode == "auto" and "discord" in selected_services):
             udp_ports = self._merge_zapret2_ports(udp_ports, DISCORD_VOICE_UDP_PORTS)
         bundle_root = zapret2_hub.bundle_winws_root(winws2_path)
-        lua_lib = self._zapret2_lua_arg(runtime_root, "zapret-lib.lua")
-        lua_antidpi = self._zapret2_lua_arg(runtime_root, "zapret-antidpi.lua")
+        asset_roots = zapret2_hub.zapret2_asset_roots(winws2_path, runtime_root)
+        lua_lib = self._zapret2_lua_arg(runtime_root, "zapret-lib.lua", winws2_path=winws2_path)
+        lua_antidpi = self._zapret2_lua_arg(runtime_root, "zapret-antidpi.lua", winws2_path=winws2_path)
         command = [
             str(winws2_path),
-            f"--wf-tcp-in={tcp_ports}",
             f"--wf-tcp-out={tcp_ports}",
-            f"--wf-udp-in={udp_ports}",
             f"--wf-udp-out={udp_ports}",
             f"--lua-init=@{lua_lib}",
             f"--lua-init=@{lua_antidpi}",
         ]
-        auto_lua = zapret2_hub.find_bundle_lua(bundle_root, "zapret-auto.lua")
+        auto_lua = zapret2_hub.find_bundle_lua(asset_roots, "zapret-auto.lua")
         if auto_lua is not None:
             command.append(f"--lua-init=@{auto_lua}")
 
@@ -1696,7 +1743,7 @@ foreach ($adapter in @($payload.adapters)) {
         command.extend(
             zapret2_hub.build_default_profile_args(
                 lists=lists,
-                bundle_root=bundle_root,
+                asset_roots=asset_roots,
                 tcp_ports=tcp_ports,
                 strategy_id=strategy_id,
                 include_hostlist_auto=include_hostlist_auto,
@@ -1742,14 +1789,15 @@ foreach ($adapter in @($payload.adapters)) {
     def _merge_zapret2_ports(self, *values: str) -> str:
         return self._normalize_zapret2_ports(",".join(values), "443")
 
-    def _zapret2_lua_arg(self, runtime_root: Path, filename: str) -> str:
-        for candidate in (runtime_root / "lua" / filename, runtime_root / filename):
-            if candidate.exists():
-                try:
-                    return str(candidate.relative_to(runtime_root))
-                except ValueError:
-                    return str(candidate)
-        return str(Path("lua") / filename)
+    def _zapret2_lua_arg(self, runtime_root: Path, filename: str, *, winws2_path: Path | None = None) -> str:
+        """Return absolute path to a zapret2 Lua file (works for release + win-bundle layouts)."""
+        from zapret_hub.services.orchestrator import zapret2_hub
+
+        roots = zapret2_hub.zapret2_asset_roots(winws2_path, runtime_root) if winws2_path is not None else [Path(runtime_root)]
+        found = zapret2_hub.find_bundle_lua(roots, filename)
+        if found is not None:
+            return str(found.resolve())
+        return str((Path(runtime_root) / "lua" / filename).resolve())
 
     def _zapret_log_indicates_capture_started(self, text: str | None) -> bool:
         normalized = str(text or "").lower()
@@ -2608,8 +2656,6 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             [
                 "powershell",
                 "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
                 "-Command",
                 script,
             ],
@@ -4136,20 +4182,108 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return []
 
     def fetch_latest_zapret_release(self) -> dict[str, str]:
-        # Hub defaults to Flowseal 1.9.9c — do not follow GitHub /latest (1.10.x).
+        """Resolve the newest Flowseal release (for update checks / install latest)."""
+        releases = self.list_zapret_releases(limit=1)
+        if releases:
+            item = releases[0]
+            return {
+                "latest_version": str(item.get("version") or ""),
+                "asset_url": str(item.get("asset_url") or ""),
+                "asset_name": str(item.get("asset_name") or ""),
+                "zipball_url": str(item.get("zipball_url") or ""),
+                "tag": str(item.get("tag") or ""),
+            }
+        # Offline / API failure: fall back to Hub default pin.
         return {
             "latest_version": PINNED_ZAPRET_VERSION,
             "asset_url": PINNED_ZAPRET_ZIP_URL,
             "asset_name": f"zapret-discord-youtube-{PINNED_ZAPRET_VERSION}.zip",
             "zipball_url": PINNED_ZAPRET_ZIPBALL_URL,
+            "tag": PINNED_ZAPRET_TAG,
             "pinned": "1",
         }
 
+    def list_zapret_releases(self, *, limit: int = 25) -> list[dict[str, str]]:
+        """List Flowseal zapret-discord-youtube releases (newest first)."""
+        repository = "Flowseal/zapret-discord-youtube"
+        api_url = f"https://api.github.com/repos/{repository}/releases?per_page={max(1, min(int(limit), 40))}"
+        try:
+            payload = self.github.github_json(api_url, timeout=25, purpose="zapret-releases")
+        except Exception as error:
+            self.logging.log("warning", "Zapret releases API failed", error=str(error))
+            return [
+                {
+                    "version": PINNED_ZAPRET_VERSION,
+                    "tag": PINNED_ZAPRET_TAG,
+                    "asset_url": PINNED_ZAPRET_ZIP_URL,
+                    "asset_name": f"zapret-discord-youtube-{PINNED_ZAPRET_VERSION}.zip",
+                    "zipball_url": PINNED_ZAPRET_ZIPBALL_URL,
+                    "published_at": "",
+                    "prerelease": "0",
+                    "recommended": "1",
+                }
+            ]
+        if not isinstance(payload, list):
+            return []
+        out: list[dict[str, str]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            if bool(item.get("draft")):
+                continue
+            tag = str(item.get("tag_name") or "").strip()
+            version = tag.lstrip("vV") or str(item.get("name") or "").strip().lstrip("vV")
+            if not version:
+                continue
+            assets = [a for a in list(item.get("assets") or []) if isinstance(a, dict)]
+            zip_asset = next(
+                (
+                    a
+                    for a in assets
+                    if str(a.get("name") or "").lower().endswith(".zip")
+                    and "zapret-discord-youtube" in str(a.get("name") or "").lower()
+                ),
+                None,
+            )
+            if zip_asset is None:
+                zip_asset = next(
+                    (a for a in assets if str(a.get("name") or "").lower().endswith(".zip")),
+                    None,
+                )
+            asset_url = str((zip_asset or {}).get("browser_download_url") or "").strip()
+            asset_name = str((zip_asset or {}).get("name") or "").strip() or f"zapret-discord-youtube-{version}.zip"
+            if not asset_url:
+                asset_url = (
+                    f"https://github.com/{repository}/releases/download/"
+                    f"{urllib.parse.quote(tag)}/zapret-discord-youtube-{urllib.parse.quote(version)}.zip"
+                )
+            zipball = str(item.get("zipball_url") or "").strip() or (
+                f"https://codeload.github.com/{repository}/zip/refs/tags/{urllib.parse.quote(tag)}"
+            )
+            out.append(
+                {
+                    "version": version,
+                    "tag": tag or version,
+                    "asset_url": asset_url,
+                    "asset_name": asset_name,
+                    "zipball_url": zipball,
+                    "published_at": str(item.get("published_at") or item.get("created_at") or ""),
+                    "prerelease": "1" if bool(item.get("prerelease")) else "0",
+                    "recommended": "1" if version == PINNED_ZAPRET_VERSION else "0",
+                }
+            )
+        return out
+
     def ensure_pinned_zapret_runtime(self, *, force: bool = False) -> dict[str, str]:
-        """Install/downgrade bundled Zapret binary tree to PINNED_ZAPRET_VERSION when needed."""
+        """Install Hub default Zapret only when runtime is missing (never overwrite user choice)."""
         current = str(self.storage._detect_zapret_version() or "").strip()
-        if not force and current == PINNED_ZAPRET_VERSION:
+        runtime_root = self.storage.paths.runtime_dir / "zapret-discord-youtube"
+        has_bin = (runtime_root / "bin").exists()
+        if not force and current and has_bin:
             return {"status": "up-to-date", "version": current}
+        if not force and has_bin and not current:
+            # Runtime present but version unknown — leave it alone.
+            return {"status": "up-to-date", "version": current or "unknown"}
         self.logging.log(
             "info",
             "Ensuring pinned Zapret runtime",
@@ -4163,6 +4297,50 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 (PINNED_ZAPRET_ZIPBALL_URL, "zapret-source.zip"),
             ],
         )
+
+    def install_zapret_version(self, version: str) -> dict[str, str]:
+        """Download and install a specific Flowseal Zapret release (upgrade or rollback)."""
+        wanted = str(version or "").strip().lstrip("vV")
+        if not wanted:
+            return {"status": "error", "error": "Version is required"}
+        current = str(self.storage._detect_zapret_version() or "").strip()
+        if current and current == wanted:
+            return {"status": "up-to-date", "version": current}
+
+        release: dict[str, str] | None = None
+        for item in self.list_zapret_releases(limit=40):
+            if str(item.get("version") or "").strip() == wanted or str(item.get("tag") or "").strip().lstrip("vV") == wanted:
+                release = item
+                break
+        if release is None and wanted == PINNED_ZAPRET_VERSION:
+            release = {
+                "version": PINNED_ZAPRET_VERSION,
+                "tag": PINNED_ZAPRET_TAG,
+                "asset_url": PINNED_ZAPRET_ZIP_URL,
+                "asset_name": f"zapret-discord-youtube-{PINNED_ZAPRET_VERSION}.zip",
+                "zipball_url": PINNED_ZAPRET_ZIPBALL_URL,
+            }
+        if release is None:
+            # Best-effort direct URLs when the release list missed the tag.
+            tag = wanted
+            release = {
+                "version": wanted,
+                "tag": tag,
+                "asset_url": (
+                    "https://github.com/Flowseal/zapret-discord-youtube/releases/download/"
+                    f"{urllib.parse.quote(tag)}/zapret-discord-youtube-{urllib.parse.quote(wanted)}.zip"
+                ),
+                "asset_name": f"zapret-discord-youtube-{wanted}.zip",
+                "zipball_url": (
+                    f"https://codeload.github.com/Flowseal/zapret-discord-youtube/zip/refs/tags/{urllib.parse.quote(tag)}"
+                ),
+            }
+        candidates = [
+            (str(release.get("asset_url") or "").strip(), str(release.get("asset_name") or f"zapret-discord-youtube-{wanted}.zip")),
+            (str(release.get("zipball_url") or "").strip(), "zapret-source.zip"),
+        ]
+        candidates = [(url, name) for url, name in candidates if url]
+        return self._install_zapret_archive(version=wanted, candidates=candidates)
 
     def fetch_latest_tg_ws_proxy_release(self) -> dict[str, str]:
         api_url = "https://api.github.com/repos/Flowseal/tg-ws-proxy/releases/latest"
@@ -4227,24 +4405,265 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return {"tag": tag, "latest_version": tag.lstrip("vV")}
 
     def fetch_latest_zapret2_release(self) -> dict[str, str]:
-        repository = "bol-van/zapret-win-bundle"
-        feed_url = f"https://github.com/{repository}/commits/master.atom"
-        payload = self.github.github_bytes(feed_url, timeout=20, purpose="zapret2-bundle-feed")
-        root = ET.fromstring(payload)
-        namespace = {"atom": "http://www.w3.org/2005/Atom"}
-        entry = root.find("atom:entry", namespace)
-        if entry is None:
-            raise ValueError("Zapret2 bundle feed is empty")
-        link = entry.find("atom:link[@rel='alternate']", namespace)
-        href = str(link.get("href") if link is not None else "")
-        marker = "/commit/"
-        commit = href.split(marker, 1)[1].strip("/") if marker in href else ""
-        if not commit:
-            raise ValueError("Zapret2 bundle feed has no commit")
+        releases = self.list_zapret2_releases(limit=1)
+        if releases:
+            item = releases[0]
+            return {
+                "latest_version": str(item.get("version") or ""),
+                "source_url": str(item.get("asset_url") or item.get("source_url") or item.get("zipball_url") or ""),
+                "tag": str(item.get("tag") or ""),
+                "asset_url": str(item.get("asset_url") or ""),
+                "asset_name": str(item.get("asset_name") or ""),
+                "zipball_url": str(item.get("zipball_url") or ""),
+            }
+        # Offline fallback: still try the tagged zipball naming for a known pin.
         return {
-            "latest_version": commit[:12],
-            "source_url": f"https://codeload.github.com/{repository}/zip/{commit}",
+            "latest_version": "1.0.3",
+            "tag": "v1.0.3",
+            "source_url": "https://github.com/bol-van/zapret2/releases/download/v1.0.3/zapret2-v1.0.3.zip",
+            "asset_url": "https://github.com/bol-van/zapret2/releases/download/v1.0.3/zapret2-v1.0.3.zip",
+            "asset_name": "zapret2-v1.0.3.zip",
+            "zipball_url": "https://codeload.github.com/bol-van/zapret2/zip/refs/tags/v1.0.3",
         }
+
+    def list_zapret2_releases(self, *, limit: int = 25) -> list[dict[str, str]]:
+        """List bol-van/zapret2 GitHub releases (newest first)."""
+        repository = "bol-van/zapret2"
+        capped = max(1, min(int(limit), 40))
+        api_url = f"https://api.github.com/repos/{repository}/releases?per_page={capped}"
+        try:
+            payload = self.github.github_json(api_url, timeout=25, purpose="zapret2-releases")
+        except Exception as error:
+            self.logging.log("warning", "Zapret2 releases API failed", error=str(error))
+            return []
+        if not isinstance(payload, list):
+            return []
+        out: list[dict[str, str]] = []
+        for item in payload:
+            if not isinstance(item, dict) or bool(item.get("draft")):
+                continue
+            tag = str(item.get("tag_name") or "").strip()
+            version = tag.lstrip("vV") or str(item.get("name") or "").strip().lstrip("vV")
+            if not version:
+                continue
+            assets = [a for a in list(item.get("assets") or []) if isinstance(a, dict)]
+            zip_asset = next(
+                (
+                    a
+                    for a in assets
+                    if str(a.get("name") or "").lower().endswith(".zip")
+                    and "openwrt" not in str(a.get("name") or "").lower()
+                    and "zapret2" in str(a.get("name") or "").lower()
+                ),
+                None,
+            )
+            if zip_asset is None:
+                zip_asset = next(
+                    (
+                        a
+                        for a in assets
+                        if str(a.get("name") or "").lower().endswith(".zip")
+                        and "openwrt" not in str(a.get("name") or "").lower()
+                    ),
+                    None,
+                )
+            asset_url = str((zip_asset or {}).get("browser_download_url") or "").strip()
+            asset_name = str((zip_asset or {}).get("name") or "").strip() or f"zapret2-v{version}.zip"
+            if not asset_url:
+                asset_url = (
+                    f"https://github.com/{repository}/releases/download/"
+                    f"{urllib.parse.quote(tag)}/zapret2-{urllib.parse.quote(tag)}.zip"
+                )
+            zipball = str(item.get("zipball_url") or "").strip() or (
+                f"https://codeload.github.com/{repository}/zip/refs/tags/{urllib.parse.quote(tag)}"
+            )
+            out.append(
+                {
+                    "version": version,
+                    "tag": tag or f"v{version}",
+                    "asset_url": asset_url,
+                    "asset_name": asset_name,
+                    "source_url": asset_url or zipball,
+                    "zipball_url": zipball,
+                    "published_at": str(item.get("published_at") or item.get("created_at") or ""),
+                    "prerelease": "1" if bool(item.get("prerelease")) else "0",
+                    "recommended": "1" if not out else "0",
+                }
+            )
+        return out
+
+    def install_zapret2_version(self, version: str) -> dict[str, str]:
+        """Download and install a specific bol-van/zapret2 release (upgrade or rollback)."""
+        wanted = str(version or "").strip().lstrip("vV")
+        if not wanted:
+            return {"status": "error", "error": "Version is required"}
+        current = str(self.storage._detect_zapret2_version() or "").strip().lstrip("vV")
+        if current and current == wanted:
+            return {"status": "up-to-date", "version": current}
+
+        release: dict[str, str] | None = None
+        for item in self.list_zapret2_releases(limit=40):
+            item_version = str(item.get("version") or "").strip().lstrip("vV")
+            item_tag = str(item.get("tag") or "").strip().lstrip("vV")
+            if wanted in {item_version, item_tag}:
+                release = item
+                break
+        if release is None:
+            tag = f"v{wanted}"
+            release = {
+                "version": wanted,
+                "tag": tag,
+                "asset_url": (
+                    f"https://github.com/bol-van/zapret2/releases/download/"
+                    f"{urllib.parse.quote(tag)}/zapret2-{urllib.parse.quote(tag)}.zip"
+                ),
+                "asset_name": f"zapret2-{tag}.zip",
+                "source_url": (
+                    f"https://github.com/bol-van/zapret2/releases/download/"
+                    f"{urllib.parse.quote(tag)}/zapret2-{urllib.parse.quote(tag)}.zip"
+                ),
+                "zipball_url": f"https://codeload.github.com/bol-van/zapret2/zip/refs/tags/{urllib.parse.quote(tag)}",
+            }
+
+        candidates = [
+            str(release.get("asset_url") or "").strip(),
+            str(release.get("source_url") or "").strip(),
+            str(release.get("zipball_url") or "").strip(),
+            # Windows winws2 lives in the binary bundle; keep as last-resort fallback.
+            "https://codeload.github.com/bol-van/zapret-win-bundle/zip/refs/heads/master",
+        ]
+        last_error = ""
+        was_running = self._is_image_running("winws2.exe")
+        if was_running:
+            self.stop_component("zapret2")
+        runtime_root: Path | None = None
+        for archive_url in candidates:
+            if not archive_url:
+                continue
+            try:
+                runtime_root = self._install_zapret2_archive(archive_url=archive_url, version=wanted)
+                last_error = ""
+                break
+            except Exception as error:
+                last_error = str(error)
+                self.logging.log("warning", "Zapret2 archive install failed", url=archive_url, error=last_error)
+        if runtime_root is None:
+            if was_running:
+                try:
+                    self.start_component("zapret2")
+                except Exception:
+                    pass
+            return {"status": "error", "error": last_error or "Zapret2 install failed"}
+        if was_running:
+            self.start_component("zapret2")
+        return {"status": "updated", "version": wanted, "path": str(runtime_root)}
+
+    def list_tg_ws_proxy_releases(self, *, limit: int = 25) -> list[dict[str, str]]:
+        """List Flowseal/tg-ws-proxy GitHub releases (newest first)."""
+        repository = "Flowseal/tg-ws-proxy"
+        capped = max(1, min(int(limit), 40))
+        api_url = f"https://api.github.com/repos/{repository}/releases?per_page={capped}"
+        try:
+            payload = self.github.github_json(api_url, timeout=25, purpose="tg-ws-proxy-releases")
+        except Exception as error:
+            self.logging.log("warning", "TG WS Proxy releases API failed", error=str(error))
+            try:
+                latest = self.fetch_latest_tg_ws_proxy_release()
+                version = str(latest.get("latest_version") or "")
+                if not version:
+                    return []
+                return [
+                    {
+                        "version": version,
+                        "tag": f"v{version}",
+                        "source_url": str(latest.get("source_url") or ""),
+                        "exe_url": str(latest.get("exe_url") or ""),
+                        "exe_name": str(latest.get("exe_name") or "TgWsProxy_windows.exe"),
+                        "zipball_url": str(latest.get("source_url") or ""),
+                        "published_at": "",
+                        "prerelease": "0",
+                        "recommended": "1",
+                    }
+                ]
+            except Exception:
+                return []
+        if not isinstance(payload, list):
+            return []
+        out: list[dict[str, str]] = []
+        for item in payload:
+            if not isinstance(item, dict) or bool(item.get("draft")):
+                continue
+            tag = str(item.get("tag_name") or "").strip()
+            version = tag.lstrip("vV") or str(item.get("name") or "").strip().lstrip("vV")
+            if not version:
+                continue
+            assets = [a for a in list(item.get("assets") or []) if isinstance(a, dict)]
+            windows_asset = next(
+                (
+                    a
+                    for a in assets
+                    if str(a.get("name") or "").strip().lower() == "tgwsproxy_windows.exe"
+                ),
+                None,
+            )
+            exe_url = str((windows_asset or {}).get("browser_download_url") or "").strip()
+            exe_name = str((windows_asset or {}).get("name") or "").strip() or "TgWsProxy_windows.exe"
+            if not exe_url:
+                exe_url = (
+                    f"https://github.com/{repository}/releases/download/"
+                    f"{urllib.parse.quote(tag)}/TgWsProxy_windows.exe"
+                )
+            source_url = str(item.get("zipball_url") or "").strip() or (
+                f"https://codeload.github.com/{repository}/zip/refs/tags/{urllib.parse.quote(tag)}"
+            )
+            out.append(
+                {
+                    "version": version,
+                    "tag": tag or version,
+                    "source_url": source_url,
+                    "zipball_url": source_url,
+                    "exe_url": exe_url,
+                    "exe_name": exe_name,
+                    "published_at": str(item.get("published_at") or item.get("created_at") or ""),
+                    "prerelease": "1" if bool(item.get("prerelease")) else "0",
+                    "recommended": "1" if not out else "0",
+                }
+            )
+        return out
+
+    def install_tg_ws_proxy_version(self, version: str) -> dict[str, str]:
+        wanted = str(version or "").strip().lstrip("vV")
+        if not wanted:
+            return {"status": "error", "error": "Version is required"}
+        current = str(self.storage._detect_tgws_version() or "").strip()
+        if current and current == wanted:
+            return {"status": "up-to-date", "version": current}
+        release: dict[str, str] | None = None
+        for item in self.list_tg_ws_proxy_releases(limit=40):
+            if str(item.get("version") or "").strip() == wanted or str(item.get("tag") or "").strip().lstrip("vV") == wanted:
+                release = item
+                break
+        if release is None:
+            tag = f"v{wanted}" if not str(version).startswith("v") else str(version)
+            release = {
+                "latest_version": wanted,
+                "version": wanted,
+                "tag": tag,
+                "source_url": f"https://codeload.github.com/Flowseal/tg-ws-proxy/zip/refs/tags/{urllib.parse.quote(tag)}",
+                "exe_url": (
+                    "https://github.com/Flowseal/tg-ws-proxy/releases/download/"
+                    f"{urllib.parse.quote(tag)}/TgWsProxy_windows.exe"
+                ),
+                "exe_name": "TgWsProxy_windows.exe",
+            }
+        else:
+            release = {
+                "latest_version": str(release.get("version") or wanted),
+                "source_url": str(release.get("source_url") or ""),
+                "exe_url": str(release.get("exe_url") or ""),
+                "exe_name": str(release.get("exe_name") or "TgWsProxy_windows.exe"),
+            }
+        return self._install_tg_ws_proxy_release(release)
 
     def update_zapret_runtime(self) -> dict[str, str]:
         release = self.fetch_latest_zapret_release()
@@ -4320,20 +4739,11 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
     def update_zapret2_runtime(self) -> dict[str, str]:
         release = self.fetch_latest_zapret2_release()
-        latest_version = str(release.get("latest_version") or "").strip()
-        current_version = self.storage._detect_zapret2_version()
+        latest_version = str(release.get("latest_version") or "").strip().lstrip("vV")
+        current_version = str(self.storage._detect_zapret2_version() or "").strip().lstrip("vV")
         if latest_version and current_version == latest_version:
             return {"status": "up-to-date", "version": current_version}
-        was_running = self._is_image_running("winws2.exe")
-        if was_running:
-            self.stop_component("zapret2")
-        runtime_root = self._install_zapret2_archive(
-            archive_url=str(release.get("source_url") or ""),
-            version=latest_version,
-        )
-        if was_running:
-            self.start_component("zapret2")
-        return {"status": "updated", "version": latest_version or current_version, "path": str(runtime_root)}
+        return self.install_zapret2_version(latest_version or current_version)
 
     def _download_to_file(self, url: str, destination: Path, timeout: int = 60) -> None:
         self.github.github_download(url, destination, timeout=timeout, purpose=f"download:{Path(destination).name}", min_bytes=1024)
@@ -4390,8 +4800,10 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._rebuild_visible_zapret_runtime_snapshot()
 
     def update_tg_ws_proxy_runtime(self) -> dict[str, str]:
-        release = self.fetch_latest_tg_ws_proxy_release()
-        latest_version = str(release.get("latest_version", "")).strip()
+        return self._install_tg_ws_proxy_release(self.fetch_latest_tg_ws_proxy_release())
+
+    def _install_tg_ws_proxy_release(self, release: dict[str, str]) -> dict[str, str]:
+        latest_version = str(release.get("latest_version") or release.get("version") or "").strip()
         current_version = self.storage._detect_tgws_version()
         if latest_version and current_version == latest_version:
             return {"status": "up-to-date", "version": current_version}
