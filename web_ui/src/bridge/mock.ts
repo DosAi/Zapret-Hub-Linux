@@ -223,7 +223,7 @@ const initialState: AppState = {
         { id: "general|general (ALT11).bat", name: "general (ALT11).bat" },
       ],
     },
-    zapret2: { controlMode: "manual", tcpPorts: "80,443", udpPorts: "443", rawFilter: "", luaStrategy: "", strategyId: "balanced" },
+    zapret2: { controlMode: "manual", tcpPorts: "80,443", udpPorts: "443", rawFilter: "", luaStrategy: "", strategyId: "balanced", youtubeDiscordBypass: true },
     vpn: {
       subscriptionUrl: "",
       subscriptionState: "empty",

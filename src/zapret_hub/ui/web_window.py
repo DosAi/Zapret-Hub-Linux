@@ -985,7 +985,9 @@ class WebBridge(QObject):
                 except Exception:
                     pass
             if was_running:
-                self.context.processes.stop_component(active_backend)
+                # Zapret: keep process alive until after set_mode, then seamless cutover.
+                if active_backend != "zapret":
+                    self.context.processes.stop_component(active_backend)
 
         if engine is not None and affects_live:
             snapshot = engine.set_mode(normalized, backend=active_backend)
@@ -999,7 +1001,14 @@ class WebBridge(QObject):
                     selected_runtime_mode=active_backend,
                     goshkow_vpn_pending_start=False,
                 )
-                ok = self._start_component_with_retry(active_backend, show_transition_on_retry=True)
+                if active_backend == "zapret":
+                    try:
+                        state = self.context.processes.seamless_restart_zapret()
+                        ok = str(getattr(state, "status", "") or "") == "running"
+                    except Exception:
+                        ok = self._start_component_with_retry(active_backend, show_transition_on_retry=True)
+                else:
+                    ok = self._start_component_with_retry(active_backend, show_transition_on_retry=True)
                 if hold_token is not None:
                     self._release_service_power(hold_token, want_power=ok or self._want_runtime_power())
                     hold_token = None
@@ -2185,7 +2194,9 @@ class WebBridge(QObject):
                 for component_id, was_running in running.items():
                     if not was_running:
                         continue
-                    # Stop even when restart is disallowed (e.g. all services cleared).
+                    # Zapret: keep live winws until after mutation, then seamless cutover.
+                    if component_id == "zapret" and should_restart.get("zapret"):
+                        continue
                     try:
                         self.context.processes.stop_component(component_id)
                     except Exception as error:
@@ -2204,10 +2215,20 @@ class WebBridge(QObject):
                     for component_id, do_restart in should_restart.items():
                         if not do_restart:
                             continue
-                        ok = self._start_component_with_retry(
-                            component_id,
-                            show_transition_on_retry=want_power,
-                        )
+                        if component_id == "zapret":
+                            try:
+                                state = self.context.processes.seamless_restart_zapret()
+                                ok = str(getattr(state, "status", "") or "") == "running"
+                            except Exception:
+                                ok = self._start_component_with_retry(
+                                    component_id,
+                                    show_transition_on_retry=want_power,
+                                )
+                        else:
+                            ok = self._start_component_with_retry(
+                                component_id,
+                                show_transition_on_retry=want_power,
+                            )
                         if not ok and component_id in {"zapret", "zapret2", "goshkow-vpn"}:
                             restart_ok = False
                     if want_power and any(
@@ -3025,6 +3046,7 @@ class WebBridge(QObject):
             getattr(before, "zapret2_raw_filter", ""),
             getattr(before, "zapret2_lua_strategy", ""),
             getattr(before, "zapret2_strategy_id", ""),
+            bool(getattr(before, "zapret2_youtube_discord_bypass", True)),
         )
         tg_before = (
             before.tg_proxy_host,
@@ -3097,6 +3119,7 @@ class WebBridge(QObject):
                 "luaStrategy": "zapret2_lua_strategy",
                 "strategyId": "zapret2_strategy_id",
                 "controlMode": "zapret2_control_mode",
+                "youtubeDiscordBypass": "zapret2_youtube_discord_bypass",
             }.items():
                 if source in zapret2:
                     changes[target] = zapret2[source]
@@ -3160,6 +3183,7 @@ class WebBridge(QObject):
             getattr(after, "zapret2_raw_filter", ""),
             getattr(after, "zapret2_lua_strategy", ""),
             getattr(after, "zapret2_strategy_id", ""),
+            bool(getattr(after, "zapret2_youtube_discord_bypass", True)),
         )
         tg_after = (
             after.tg_proxy_host,
@@ -3635,6 +3659,7 @@ class WebBridge(QObject):
                     "rawFilter": settings.zapret2_raw_filter,
                     "luaStrategy": settings.zapret2_lua_strategy,
                     "strategyId": str(getattr(settings, "zapret2_strategy_id", "balanced") or "balanced"),
+                    "youtubeDiscordBypass": bool(getattr(settings, "zapret2_youtube_discord_bypass", True)),
                 },
                 "vpn": {
                     "subscriptionUrl": str(vpn_state.get("subscription_url", "") or settings.goshkow_vpn_subscription_url),
@@ -4060,7 +4085,7 @@ class WebMainWindow(QMainWindow):
 
         payload = {
             "currentVersion": str(__version__),
-            "latestVersion": "3.0.0",
+            "latestVersion": "3.0.1",
             "changelog": (
                 "• Улучшения интерфейса быстрого доступа\n"
                 "• Исправления стабильности переключения страниц\n"

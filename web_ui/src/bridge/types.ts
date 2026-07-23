@@ -129,6 +129,7 @@ export interface Settings {
     rawFilter: string;
     luaStrategy: string;
     strategyId?: string;
+    youtubeDiscordBypass?: boolean;
   };
   vpn: {
     subscriptionUrl: string;
