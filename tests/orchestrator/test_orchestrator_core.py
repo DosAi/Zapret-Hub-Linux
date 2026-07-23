@@ -241,7 +241,8 @@ def test_staged_plans_try_generals_as_alternatives():
 
 
 def test_tuner_multi_general_and_order():
-    steps = SmartTuner().plan(
+    # List work still pending → no strategy in the same plan.
+    pending = SmartTuner().plan(
         symptom="external_miss",
         domain="example.com",
         service_ids=["youtube"],
@@ -252,13 +253,122 @@ def test_tuner_multi_general_and_order():
         domain_in_merged=False,
         max_steps=10,
     )
-    kinds = [s.kind for s in steps]
-    assert kinds[0] == "add_domain"
-    assert "enable_service" in kinds
+    assert [s.kind for s in pending][0] == "add_domain"
+    assert "enable_service" in [s.kind for s in pending]
+    assert not any(s.kind == "general" for s in pending)
+
+    # After domain is already in lists, strategy is allowed as last resort.
+    steps = SmartTuner().plan(
+        symptom="tcp_timeout",
+        domain="example.com",
+        service_ids=["youtube"],
+        selected_services={"youtube"},
+        current={"general": "general.bat", "ipset": "loaded", "game_filter": "disabled", "gaming_set": "stun-wide-base"},
+        ranked_generals=[("alt1.bat", 5.0), ("alt2.bat", 4.0), ("alt3.bat", 3.0), ("alt4.bat", 2.0)],
+        trusted_general="trusted.bat",
+        domain_in_merged=True,
+        max_steps=10,
+    )
     generals = [s.value for s in steps if s.kind == "general"]
     assert "trusted.bat" in generals
-    assert len(generals) <= 3
+    assert len(generals) <= 2
     assert "alt4.bat" not in generals
+
+
+def test_tuner_service_detected_skips_strategy():
+    steps = SmartTuner().plan(
+        symptom="service_detected",
+        process="msedge.exe",
+        domain="lt-in-f95.1e100.net",
+        service_ids=["epic-games"],
+        selected_services=set(),
+        current={"general": "general.bat", "ipset": "loaded", "game_filter": "disabled", "gaming_set": "stun-wide-base"},
+        ranked_generals=[("alt1.bat", 5.0)],
+        trusted_general="trusted.bat",
+        domains=["lt-in-f95.1e100.net", "epicgames.com"],
+        domains_missing=["lt-in-f95.1e100.net", "epicgames.com"],
+        max_steps=12,
+    )
+    kinds = [s.kind for s in steps]
+    assert "enable_service" in kinds
+    assert "general" not in kinds
+    assert "game_filter" not in kinds
+    assert "gaming_set" not in kinds
+    assert not any(s.kind == "add_domain" and "1e100.net" in s.value for s in steps)
+    assert any(s.kind == "add_domain" and "epicgames.com" in s.value for s in steps)
+
+
+def test_passive_scan_ignores_browser_cdn_ptr(tmp_path: Path):
+    engine = __import__(
+        "zapret_hub.services.orchestrator.engine", fromlist=["OrchestratorEngine"]
+    ).OrchestratorEngine()
+    settings = SimpleNamespace(selected_service_ids=["discord", "youtube"])
+    engine.context = SimpleNamespace(
+        settings=SimpleNamespace(get=lambda: settings),
+        paths=SimpleNamespace(configs_dir=tmp_path, merged_runtime_dir=tmp_path),
+        processes=SimpleNamespace(_current_zapret_runtime=None),
+        knowledge=None,
+        logging=None,
+    )
+    engine._mode = "auto"
+    engine._signals = SimpleNamespace(
+        snapshot_connections=lambda limit=200: [
+            ConnSample(
+                remote_ip="2.16.53.65",
+                remote_port=443,
+                proto="tcp",
+                state="SYN_SENT",
+                pid=11,
+                process="msedge.exe",
+                domain="a2-16-53-65.deploy.static.akamaitechnologies.com",
+            ),
+            ConnSample(
+                remote_ip="142.250.185.95",
+                remote_port=443,
+                proto="tcp",
+                state="SYN_SENT",
+                pid=11,
+                process="msedge.exe",
+                domain="lt-in-f95.1e100.net",
+            ),
+        ]
+    )
+    incidents: list[dict[str, Any]] = []
+    engine._handle_incident = incidents.append
+    engine._passive_scan()
+    assert incidents == []
+
+
+def test_passive_scan_does_not_activate_epic_from_edge_akamai(tmp_path: Path):
+    engine = __import__(
+        "zapret_hub.services.orchestrator.engine", fromlist=["OrchestratorEngine"]
+    ).OrchestratorEngine()
+    settings = SimpleNamespace(selected_service_ids=["discord"])
+    engine.context = SimpleNamespace(
+        settings=SimpleNamespace(get=lambda: settings),
+        paths=SimpleNamespace(configs_dir=tmp_path, merged_runtime_dir=tmp_path),
+        processes=SimpleNamespace(_current_zapret_runtime=None),
+        knowledge=None,
+        logging=None,
+    )
+    engine._mode = "auto"
+    engine._signals = SimpleNamespace(
+        snapshot_connections=lambda limit=200: [
+            ConnSample(
+                remote_ip="2.16.53.65",
+                remote_port=443,
+                proto="tcp",
+                state="ESTABLISHED",
+                pid=11,
+                process="msedge.exe",
+                domain="a2-16-53-65.deploy.static.akamaitechnologies.com",
+            )
+        ]
+    )
+    incidents: list[dict[str, Any]] = []
+    engine._handle_incident = incidents.append
+    engine._passive_scan()
+    assert incidents == []
 
 
 def test_tuner_fortnite_enables_mod_and_alt9_general():
@@ -725,4 +835,6 @@ def test_tuner_discord_seed_batches_catalog():
     blob = "\n".join(s.value for s in domain_steps)
     assert "discord.com" in blob
     assert "gateway.discord.gg" in blob
-    assert any(step.kind == "game_filter" and step.value == "tcpudp" for step in steps)
+    # Soft HTTPS miss: lists/services only — no GameFilter / strategy thrash.
+    assert not any(step.kind == "game_filter" for step in steps)
+    assert not any(step.kind == "general" for step in steps)

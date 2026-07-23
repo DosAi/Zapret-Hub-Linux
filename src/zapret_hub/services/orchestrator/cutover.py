@@ -27,16 +27,18 @@ _SETTINGS_KEYS = (
 
 # Classic list applies still restart winws (hostlists must land), but not on every
 # domain tick — adaptive spacing + deferred flush (FluxRoute-style calm).
-_LIST_RESTART_BASE_S = 35.0
-_LIST_RESTART_MAX_S = 180.0
+_LIST_RESTART_BASE_S = 45.0
+_LIST_RESTART_MAX_S = 300.0
 _LIST_RESTART_WINDOW_S = 300.0
-_LIST_DEBOUNCE_QUIET_S = 12.0
+_LIST_DEBOUNCE_QUIET_S = 18.0
+_SESSION_LOCK_DEFER_S = 120.0
 
 
 class CutoverManager:
-    """Warm A/B cutover with settings↔runtime always restored together on failure.
+    """Warm A/B cutover: stage B → start B beside A → kill A only after B is alive.
 
-    Batches multiple tuner steps into one materialize → stop A → start B → probe.
+    Settings↔runtime always restored together on failure. Never leave the machine
+    without a running classic winws when a cutover is attempted.
     """
 
     def __init__(
@@ -174,10 +176,8 @@ class CutoverManager:
         required_hosts: list[str] | None = None,
         restart: bool | None = None,
     ) -> dict[str, Any]:
-        """Classic Zapret: list changes still restart, but adaptively (not every domain).
-
-        Strategy/mods/knobs → immediate process cutover.
-        Hostlist-only → write overlay now; restart now if spacing allows, else defer one flush.
+        """Classic Zapret: strategy/mods/knobs → warm process cutover.
+        Hostlist-only → rewrite live lists without killing winws (Discord-safe).
         """
         normalized = self._normalize_steps(steps)
         normalized = self._coalesce_list_steps(normalized)
@@ -225,9 +225,18 @@ class CutoverManager:
                 }
 
             if hard_restart:
-                self._clear_deferred_list_restart()
                 if list_changed:
                     self._hot_reload_classic_lists()
+                deferred = self._defer_classic_for_session(
+                    applied=applied,
+                    probe_targets=probe_targets,
+                    required_hosts=required_hosts,
+                    hot_reload=list_changed,
+                )
+                if deferred is not None:
+                    self.snapshot()
+                    return deferred
+                self._clear_deferred_list_restart()
                 return self._classic_cutover_and_probe(
                     applied=applied,
                     baseline=baseline,
@@ -237,44 +246,22 @@ class CutoverManager:
                 )
 
             if list_changed:
+                # Domain/IP learning: rewrite lists under live runtime — never cut over.
                 self._hot_reload_classic_lists()
-                batch_size = sum(1 for item in applied if item.get("kind") in {"add_domain", "add_ip", "exclude_domain"})
-                if self._list_restart_allowed(batch_size=max(1, batch_size or len(applied))):
-                    self._clear_deferred_list_restart()
-                    result = self._classic_cutover_and_probe(
-                        applied=applied,
-                        baseline=baseline,
-                        overlay_checkpoint=overlay_checkpoint,
-                        probe_targets=probe_targets,
-                        required_hosts=required_hosts,
-                    )
-                    if result.get("ok") and result.get("restarted"):
-                        self._note_list_restart()
-                    return result
-                due_in = self._arm_deferred_list_restart(
-                    probe_targets=probe_targets,
-                    required_hosts=required_hosts,
-                )
+                self._clear_deferred_list_restart()
                 try:
                     self.context.processes.pin_orchestrator_runtime(None)
                 except Exception:
                     pass
                 self.snapshot()
-                self._log(
-                    "info",
-                    "Orchestrator deferred classic list restart",
-                    due_in_s=round(due_in, 1),
-                    interval_s=round(self._adaptive_list_restart_interval_s(batch_size=max(1, batch_size)), 1),
-                    steps=len(applied),
-                )
+                self._log("info", "Orchestrator hot-reloaded classic lists (no process cutover)")
                 return {
                     "ok": True,
                     "applied": applied,
                     "skipped": [],
-                    "results": [{"ok": True, "restarted": False, "deferred_restart": True, "hot_reload": True}],
+                    "results": [{"ok": True, "restarted": False, "hot_reload": True}],
                     "restarted": False,
-                    "deferred_restart": True,
-                    "due_in_s": due_in,
+                    "hot_reload": True,
                     "backend": "zapret",
                 }
 
@@ -336,18 +323,22 @@ class CutoverManager:
         *,
         probe_targets: list[dict[str, str]] | None,
         required_hosts: list[str] | None,
+        force_due_in: float | None = None,
     ) -> float:
         now = time.monotonic()
-        interval = self._adaptive_list_restart_interval_s()
-        if self._last_list_restart_at > 0:
-            due = self._last_list_restart_at + interval
+        if force_due_in is not None:
+            due = now + max(5.0, float(force_due_in))
         else:
-            due = now + _LIST_DEBOUNCE_QUIET_S
-        # While domains keep arriving, wait a short quiet period — but never past MAX.
-        if self._deferred_list_restart:
-            due = max(due, now + _LIST_DEBOUNCE_QUIET_S)
-        cap = (self._last_list_restart_at or now) + _LIST_RESTART_MAX_S
-        due = min(max(due, now + 1.0), cap)
+            interval = self._adaptive_list_restart_interval_s()
+            if self._last_list_restart_at > 0:
+                due = self._last_list_restart_at + interval
+            else:
+                due = now + _LIST_DEBOUNCE_QUIET_S
+            # While domains keep arriving, wait a short quiet period — but never past MAX.
+            if self._deferred_list_restart:
+                due = max(due, now + _LIST_DEBOUNCE_QUIET_S)
+            cap = (self._last_list_restart_at or now) + _LIST_RESTART_MAX_S
+            due = min(max(due, now + 1.0), cap)
         self._deferred_list_restart = True
         self._deferred_list_due_at = due
         if probe_targets:
@@ -355,6 +346,65 @@ class CutoverManager:
         if required_hosts:
             self._deferred_required_hosts = list(required_hosts)
         return max(0.0, due - now)
+
+    def _session_lock(self):
+        from zapret_hub.services.orchestrator.presence import detect_session_lock
+
+        samples = None
+        process_names: list[str] = []
+        try:
+            samples = self.signals.snapshot_connections(limit=120)
+        except Exception:
+            samples = None
+        # Fallback: running process image names (idle Discord/game with few sockets).
+        try:
+            processes = getattr(self.context, "processes", None)
+            if processes is not None and hasattr(processes, "_run_quiet"):
+                proc = processes._run_quiet(["tasklist", "/FO", "CSV", "/NH"])
+                raw = str(getattr(proc, "stdout", "") or "")
+                for line in raw.splitlines():
+                    parts = [part.strip().strip('"') for part in line.split(",")]
+                    if parts:
+                        process_names.append(parts[0])
+        except Exception:
+            pass
+        return detect_session_lock(samples, process_names=process_names)
+
+    def _defer_classic_for_session(
+        self,
+        *,
+        applied: list[dict[str, Any]],
+        probe_targets: list[dict[str, str]] | None,
+        required_hosts: list[str] | None,
+        hot_reload: bool = False,
+    ) -> dict[str, Any] | None:
+        """During Discord/Zoom/game — keep live winws, postpone classic process cutover."""
+        lock = self._session_lock()
+        if not lock.active:
+            return None
+        due_in = self._arm_deferred_list_restart(
+            probe_targets=probe_targets,
+            required_hosts=required_hosts,
+            force_due_in=_SESSION_LOCK_DEFER_S,
+        )
+        self._log(
+            "info",
+            "Orchestrator deferred classic cutover during live session",
+            reason=lock.reason,
+            kind=lock.kind,
+            due_in_s=round(due_in, 1),
+        )
+        return {
+            "ok": True,
+            "applied": applied,
+            "skipped": [],
+            "results": [{"ok": True, "restarted": False, "deferred_restart": True, "session_lock": lock.reason}],
+            "restarted": False,
+            "deferred_restart": True,
+            "session_lock": lock.reason,
+            "hot_reload": hot_reload,
+            "backend": "zapret",
+        }
 
     def _clear_deferred_list_restart(self) -> None:
         self._deferred_list_restart = False
@@ -366,7 +416,7 @@ class CutoverManager:
         return bool(self._deferred_list_restart)
 
     def flush_deferred_list_restart(self) -> dict[str, Any] | None:
-        """One delayed classic restart after coalesced list learning."""
+        """Legacy deferred classic restart: now only hot-reloads lists (no process kill)."""
         if not self._deferred_list_restart:
             return None
         if time.monotonic() < self._deferred_list_due_at:
@@ -378,36 +428,13 @@ class CutoverManager:
         if aborted is not None:
             self._clear_deferred_list_restart()
             return aborted
-        if not self._zapret_running():
+        if self._zapret_running():
+            self._hot_reload_classic_lists()
+        else:
             self._rebuild_snapshot_only()
-            self._clear_deferred_list_restart()
-            return {"ok": True, "restarted": False, "deferred_restart": False, "backend": "zapret"}
-
-        baseline = self.snapshot()
-        overlay_checkpoint = self._overlay_checkpoint()
-        live_a = getattr(self.context.processes, "_current_zapret_runtime", None)
-        if live_a is not None:
-            self._slot_a = Path(live_a)
-            try:
-                self.context.processes.pin_orchestrator_runtime(self._slot_a)
-            except Exception:
-                pass
-        applied = [{"kind": "lists", "value": "deferred", "reason": "deferred_list_restart"}]
-        self._hot_reload_classic_lists()
-        probe_targets = list(self._deferred_probe_targets)
-        required_hosts = list(self._deferred_required_hosts)
         self._clear_deferred_list_restart()
-        self._log("info", "Orchestrator flushing deferred classic list restart")
-        result = self._classic_cutover_and_probe(
-            applied=applied,
-            baseline=baseline,
-            overlay_checkpoint=overlay_checkpoint,
-            probe_targets=probe_targets,
-            required_hosts=required_hosts,
-        )
-        if result.get("ok") and result.get("restarted"):
-            self._note_list_restart()
-        return result
+        self._log("info", "Orchestrator flushed deferred classic lists via hot-reload")
+        return {"ok": True, "restarted": False, "hot_reload": True, "deferred_restart": False, "backend": "zapret"}
 
     def _classic_cutover_and_probe(
         self,
@@ -520,7 +547,7 @@ class CutoverManager:
         required_hosts: list[str] | None = None,
         restart: bool | None = None,
     ) -> dict[str, Any]:
-        """Zapret2: hostlist/ipset edits reload without restart; strategy change restarts once."""
+        """Zapret2: never kill winws2 — lists/strategy Lua reload via mtime/hot-load."""
         from zapret_hub.services.orchestrator import zapret2_hub
 
         normalized = self._normalize_steps(steps)
@@ -532,74 +559,42 @@ class CutoverManager:
         baseline = self.snapshot()
         overlay_checkpoint = self._overlay_checkpoint()
         applied: list[dict[str, Any]] = []
-        needs_restart = False
         try:
             for step in normalized:
                 changed = self._apply_one_mutation(step, backend="zapret2")
-                applied.append({"kind": step.kind, "value": step.value, "reason": step.reason})
-                # Hostlist/ipset edits reload without restart (bol-van docs).
-                # Only Lua strategy rewrite needs winws2 restart.
-                if changed == "restart":
-                    needs_restart = True
+                applied.append({"kind": step.kind, "value": step.value, "reason": step.reason, "changed": changed})
 
-            # List-only changes: rematerialize watched files so winws2 mtime-reload picks them up.
+            # Always rematerialize watched files so winws2 picks up hostlist/ipset/strategy Lua.
             aborted = self._abort_if_backend_changed("zapret2")
             if aborted is not None:
                 return aborted
-            if was_running and not needs_restart:
+            if was_running:
                 try:
                     configs = Path(self.context.paths.configs_dir)
                     auto_root = Path(self.context.paths.runtime_dir) / "zapret2" / "lists_auto"
                     zapret2_hub.materialize_auto_lists(configs, auto_root)
-                    self._log("info", "Orchestrator rematerialized Zapret2 auto lists (no restart)")
+                    # Touch strategy lua mtime so winws2 reloads even if content was rewritten in place.
+                    strategy_id = str(getattr(self.context.settings.get(), "zapret2_strategy_id", "balanced") or "balanced")
+                    zapret2_hub.write_hub_strategy_lua(configs, strategy_id)
+                    self._log("info", "Orchestrator hot-reloaded Zapret2 lists/strategy (no process restart)")
                 except Exception as error:
-                    self._log("warning", "Zapret2 list rematerialize failed", error=str(error))
-            if was_running and needs_restart:
-                # Soft-kill then restart — avoid deleting runtime between stop and start.
-                try:
-                    if hasattr(self.context.processes, "_soft_stop_zapret2_image"):
-                        self.context.processes._soft_stop_zapret2_image()
-                    else:
-                        self.context.processes.stop_component("zapret2")
-                except Exception as error:
-                    self._log("warning", "Zapret2 stop before strategy restart failed", error=str(error))
-                aborted = self._abort_if_backend_changed("zapret2")
-                if aborted is not None:
-                    return aborted
-                state = self.context.processes.start_component("zapret2")
-                if str(getattr(state, "status", "")) != "running":
-                    self._full_rollback_zapret2(baseline, overlay_checkpoint=overlay_checkpoint)
-                    return {
-                        "ok": False,
-                        "applied": [],
-                        "skipped": applied,
-                        "results": [],
-                        "restarted": False,
-                        "rolled_back": True,
-                        "error": str(getattr(state, "last_error", "") or "zapret2_restart_failed"),
-                        "backend": "zapret2",
-                    }
-                time.sleep(self._settle_s)
-            elif not was_running and needs_restart:
-                # Offline strategy change is just settings; start not required here.
-                pass
+                    self._log("warning", "Zapret2 hot-reload rematerialize failed", error=str(error))
 
             targets = list(probe_targets or [])
             ok = True
-            if targets and (was_running or needs_restart):
-                # Brief pause so hostlist mtime reload can pick up new domains.
+            if targets and was_running:
                 time.sleep(0.35)
                 results = self._probe(targets)
                 ok = probe_required_ok(results, required_hosts=required_hosts or [])
             if not ok:
-                self._log("info", "Zapret2 plan failed probe — rollback")
+                self._log("info", "Zapret2 plan failed probe — rollback lists/settings (process kept running)")
                 self._full_rollback_zapret2(baseline, overlay_checkpoint=overlay_checkpoint)
                 return {
                     "ok": False,
                     "applied": [],
                     "skipped": applied,
                     "results": [],
-                    "restarted": bool(needs_restart and was_running),
+                    "restarted": False,
                     "rolled_back": True,
                     "error": "probe_failed",
                     "backend": "zapret2",
@@ -610,8 +605,8 @@ class CutoverManager:
                 "ok": True,
                 "applied": applied,
                 "skipped": [],
-                "results": [{"ok": True, "restarted": bool(needs_restart and was_running)}],
-                "restarted": bool(needs_restart and was_running),
+                "results": [{"ok": True, "restarted": False, "hot_reload": True}],
+                "restarted": False,
                 "backend": "zapret2",
                 "listsDir": str(zapret2_hub.zapret2_lists_dir(Path(self.context.paths.configs_dir))),
             }
@@ -1187,7 +1182,8 @@ class CutoverManager:
                     strategy_id = "balanced"
                 self.context.settings.update(zapret2_strategy_id=strategy_id)
                 zapret2_hub.write_hub_strategy_lua(configs, strategy_id)
-                return "restart"
+                # winws2 hot-loads strategy Lua — do not request a process restart.
+                return "strategy"
             self.context.settings.update(selected_zapret_general=step.value)
             return "settings"
 

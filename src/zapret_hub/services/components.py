@@ -45,7 +45,8 @@ PINNED_ZAPRET_ZIP_URL = (
 PINNED_ZAPRET_ZIPBALL_URL = (
     f"https://codeload.github.com/Flowseal/zapret-discord-youtube/zip/refs/tags/{PINNED_ZAPRET_TAG}"
 )
-DISCORD_VOICE_UDP_PORTS = "3478-3497,19294-19344,42377-62133"
+DISCORD_VOICE_UDP_PORTS = "19294-19344,50000-50100"
+DISCORD_MEDIA_TCP_PORTS = "2053,2083,2087,2096,8443"
 
 _BUNDLED_BYPASS_YOUTUBE_DISCORD_LUA = r'''--[[
   Zapret Hub — YouTube / Discord bypass seed for winws2 (Zapret 2).
@@ -61,7 +62,8 @@ HUB_BYPASS_DOMAINS = {
   "ggpht.com","gvt1.com","youtube.googleapis.com","youtubei.googleapis.com",
   "yt3.googleusercontent.com","manifest.googlevideo.com","redirector.googlevideo.com",
 }
-HUB_BYPASS_NETWORKS = {"149.154.167.0/24","173.194.0.0/16","162.159.128.0/20"}
+-- Hostlist-only for Discord: do not seed Cloudflare Discord CIDR into ipset.
+HUB_BYPASS_NETWORKS = {"149.154.167.0/24","173.194.0.0/16"}
 if type(print) == "function" then
   print(string.format("[Zapret Hub] YouTube/Discord bypass Lua ready (domains=%d)", #HUB_BYPASS_DOMAINS))
 end
@@ -1666,8 +1668,10 @@ foreach ($adapter in @($payload.adapters)) {
         control_mode = str(getattr(settings, "zapret2_control_mode", "manual") or "manual")
         bypass_yt_discord = bool(getattr(settings, "zapret2_youtube_discord_bypass", True))
         selected_services = {str(item) for item in (settings.selected_service_ids or [])}
-        # Discord voice / STUN / media need UDP beyond 443.
-        if bypass_yt_discord or (control_mode == "auto" and "discord" in selected_services):
+        # Match Flowseal general.bat: Discord media TCP + voice UDP must be in WinDivert capture.
+        discord_capture = bypass_yt_discord or ("discord" in selected_services)
+        if discord_capture:
+            tcp_ports = self._merge_zapret2_ports(tcp_ports, DISCORD_MEDIA_TCP_PORTS)
             udp_ports = self._merge_zapret2_ports(udp_ports, DISCORD_VOICE_UDP_PORTS)
         bundle_root = zapret2_hub.bundle_winws_root(winws2_path)
         asset_roots = zapret2_hub.zapret2_asset_roots(winws2_path, runtime_root)
@@ -1732,14 +1736,11 @@ foreach ($adapter in @($payload.adapters)) {
                 command.append(f"--lua-init=@{mod_lua}")
 
         strategy = str(settings.zapret2_lua_strategy or "").strip()
-        # Manual custom strategy still wins, but enabled Lua modifications load first.
-        if strategy and control_mode != "auto":
-            command.extend(shlex.split(strategy, posix=False))
-            return command
-
         command.append(f"--lua-init=@{lists['lua_targets']}")
         command.append(f"--lua-init=@{lists['lua_orch']}")
         command.append(f"--lua-init=@{lists['lua_strategy']}")
+        # Always keep Hub default profiles (Discord media/voice, TLS, QUIC). Custom
+        # args are appended after so they cannot drop Discord capture.
         command.extend(
             zapret2_hub.build_default_profile_args(
                 lists=lists,
@@ -1749,6 +1750,8 @@ foreach ($adapter in @($payload.adapters)) {
                 include_hostlist_auto=include_hostlist_auto,
             )
         )
+        if strategy and control_mode != "auto":
+            command.extend(shlex.split(strategy, posix=False))
         return command
 
     def _ensure_youtube_discord_bypass_lua(self, configs_dir: Path) -> Path | None:
@@ -3099,10 +3102,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._invalidate_state_cache()
 
     def hot_replace_zapret_runtime(self, active_root: Path) -> ComponentState:
-        """Orchestrator cutover: start staged B, then close old winws PIDs.
+        """Orchestrator cutover: start staged B first, then close old winws PIDs.
 
-        Prefer new-over-old so the no-bypass window stays as short as possible.
-        WinDivert often rejects a second capture — then fall back to soft-kill → start.
+        Never stop A until B is confirmed running. If B cannot start, keep A.
         """
         try:
             self.settings.update(goshkow_vpn_pending_start=False)
@@ -3122,30 +3124,67 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def _cutover_to_zapret_runtime(self, active_root: Path) -> ComponentState:
         active_root = Path(active_root)
         old_pids = self._list_image_pids("winws.exe")
-        owned = self._processes.pop("zapret", None)
-        if owned is not None and getattr(owned, "pid", None):
-            old_pids.add(int(owned.pid))
+        owned = self._processes.get("zapret")
+        owned_pid = int(getattr(owned, "pid", 0) or 0) if owned is not None else 0
+        if owned_pid:
+            old_pids.add(owned_pid)
 
-        # Attempt: start B while A still holds WinDivert (user-requested seamless path).
+        # Start B while A still holds WinDivert — never create a no-bypass window first.
         state = self.start_zapret_from_runtime(active_root, assume_clean=True)
         new_proc = self._processes.get("zapret")
         new_pid = int(getattr(new_proc, "pid", 0) or 0) if new_proc is not None else 0
         if str(getattr(state, "status", "") or "") == "running" and new_pid:
-            self._kill_image_pids("winws.exe", keep_pids={new_pid})
-            # Drop owned handle for killed A if any lingered.
-            return state
+            # Give B a moment to bind before dropping A.
+            alive = True
+            try:
+                alive = bool(self._wait_for_process_image("winws.exe", new_proc, attempts=8, delay=0.1))
+            except Exception:
+                alive = new_proc.poll() is None
+            if alive and new_proc.poll() is None:
+                self._kill_image_pids("winws.exe", keep_pids={new_pid})
+                self.logging.log(
+                    "info",
+                    "Zapret warm cutover: started B then stopped A",
+                    new_pid=new_pid,
+                    old_pids=sorted(old_pids - {new_pid}),
+                )
+                return state
+            # B died immediately — restore tracking of A if it is still up.
+            self._processes.pop("zapret", None)
+            if owned is not None and owned_pid and self._pid_running(owned_pid):
+                self._processes["zapret"] = owned
+                keep = ComponentState(component_id="zapret", status="running", pid=owned_pid)
+                self._states["zapret"] = keep
+                self.logging.log("warning", "Zapret warm cutover: B died; kept A running", old_pid=owned_pid)
+                return keep
 
-        # Fallback: soft-stop everything, light purge if needed, start B alone.
-        self._soft_stop_zapret_image()
+        # B failed to start. Keep A running — do NOT soft-stop the live copy.
+        if owned is not None and owned_pid:
+            self._processes["zapret"] = owned
+            if self._pid_running(owned_pid) or self._is_image_running("winws.exe"):
+                keep = ComponentState(component_id="zapret", status="running", pid=owned_pid or None)
+                self._states["zapret"] = keep
+                self.logging.log(
+                    "warning",
+                    "Zapret warm cutover: B failed; kept A running",
+                    error=str(getattr(state, "last_error", "") or "start_b_failed"),
+                    old_pid=owned_pid,
+                )
+                return keep
+
+        # No live A either — only then start B alone (cold path).
+        self.logging.log("warning", "Zapret warm cutover: no live A; cold-starting B")
+        if self._is_image_running("winws.exe"):
+            self._soft_stop_zapret_image()
         if self._managed_zapret_driver_services():
             if not self._purge_stale_zapret_runtime():
-                state = ComponentState(
+                err = ComponentState(
                     component_id="zapret",
                     status="error",
                     last_error="Не удалось выгрузить прежний драйвер WinDivert Zapret Hub.",
                 )
-                self._states["zapret"] = state
-                return state
+                self._states["zapret"] = err
+                return err
         return self.start_zapret_from_runtime(active_root, assume_clean=True)
 
     def start_zapret_from_runtime(self, active_root: Path, *, assume_clean: bool = False) -> ComponentState:
@@ -5234,6 +5273,27 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._image_running_cache.pop(image_name, None)
         self._run_quiet(["taskkill", "/IM", image_name, "/F", "/T"])
         self._image_running_cache[image_name] = (time.time(), False)
+
+    def _pid_running(self, pid: int) -> bool:
+        try:
+            value = int(pid)
+        except Exception:
+            return False
+        if value <= 0:
+            return False
+        try:
+            # Windows: OpenProcess succeeds while the PID is still alive.
+            handle = self.kernel32.OpenProcess(0x1000, False, value)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if handle:
+                self.kernel32.CloseHandle(handle)
+                return True
+        except Exception:
+            pass
+        try:
+            os.kill(value, 0)
+            return True
+        except Exception:
+            return False
 
     def _list_image_pids(self, image_name: str) -> set[int]:
         pids: set[int] = set()

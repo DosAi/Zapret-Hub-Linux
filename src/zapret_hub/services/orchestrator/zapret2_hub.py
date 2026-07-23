@@ -64,7 +64,8 @@ BYPASS_SEED_DOMAINS: tuple[str, ...] = (
 BYPASS_SEED_NETWORKS: tuple[str, ...] = (
     "149.154.167.0/24",  # Telegram
     "173.194.0.0/16",  # Google/YouTube
-    "162.159.128.0/20",  # Discord (Cloudflare)
+    # Do NOT seed Discord Cloudflare CIDR (162.159.128.0/20): ipset desync on that
+    # range breaks Discord updates — same rule as classic Zapret / cutover Auto.
 )
 
 _HUB_ORCHESTRATOR_LUA = r'''--[[
@@ -543,7 +544,7 @@ def harvest_service_ips(service_ids: list[str], *, include_bypass_seeds: bool = 
 
     Classic Zapret must not seed Discord/YouTube CDN CIDRs into ipset-all*: that
     enables a second 443 desync on top of hostlists and breaks Discord updates.
-    Zapret2 hub lists can still take BYPASS_SEED_NETWORKS via include_bypass_seeds.
+    Zapret2 hub lists can still take non-Discord BYPASS_SEED_NETWORKS via include_bypass_seeds.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -773,6 +774,13 @@ def build_default_profile_args(
             "--lua-desync=hub_tls",
             "--lua-desync=hub_tls_b",
             "--new",
+            # Flowseal: Discord media TLS on non-443 ports (discord.media).
+            "--filter-tcp=2053,2083,2087,2096,8443",
+            "--hostlist-domains=discord.media",
+            "--out-range=-d10",
+            "--payload=tls_client_hello",
+            "--lua-desync=hub_tls",
+            "--new",
             "--filter-udp=443",
             "--filter-l7=quic",
             *hostlist_args,
@@ -780,8 +788,14 @@ def build_default_profile_args(
             "--payload=quic_initial",
             "--lua-desync=hub_quic",
             "--new",
-            "--filter-l7=wireguard,stun,discord",
-            "--payload=wireguard_initiation,wireguard_cookie,stun,discord_ip_discovery",
+            # Flowseal / bol-van: Discord voice + STUN on media UDP ranges.
+            "--filter-udp=19294-19344,50000-50100",
+            "--filter-l7=discord,stun",
+            "--payload=stun,discord_ip_discovery",
+            "--lua-desync=hub_discord",
+            "--new",
+            "--filter-l7=wireguard",
+            "--payload=wireguard_initiation,wireguard_cookie",
             "--lua-desync=hub_discord",
         ]
     )
@@ -903,9 +917,14 @@ def merge_mod_overlays(configs_dir: Path, mod_roots: list[Path]) -> dict[str, ob
                 continue
             seen_i.add(key)
             all_ips.append(item)
-        for lua in sorted(root.glob("*.lua")):
-            target = mod_lua_root / f"{root.name}__{lua.name}"
+        for lua in sorted(root.rglob("*.lua")):
+            if not lua.is_file():
+                continue
+            # Keep nested paths unique and stable for --lua-init.
+            rel = lua.relative_to(root).as_posix().replace("/", "__")
+            target = mod_lua_root / f"{root.name}__{rel}"
             try:
+                target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(lua.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
                 lua_copied.append(str(target.name))
             except Exception:

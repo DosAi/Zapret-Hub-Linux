@@ -43,7 +43,6 @@ HUB_BYPASS_DOMAINS = {
 HUB_BYPASS_NETWORKS = {
   "149.154.167.0/24",
   "173.194.0.0/16",
-  "162.159.128.0/20",
 }
 
 if type(print) == "function" then
