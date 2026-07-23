@@ -21,11 +21,11 @@ const DNS_PROFILE_IDS: Array<Settings["dns"]["profile"]> = ["dhcp", "xbox", "clo
 
 const DNS_ADDRESSES: Record<Settings["dns"]["profile"], string> = {
   dhcp: "",
-  xbox: "111.88.96.50 · 111.88.96.51",
-  cloudflare: "1.1.1.1 · 1.0.0.1",
-  adguard: "94.140.14.14 · 94.140.15.15",
-  google: "8.8.8.8 · 8.8.4.4",
-  yandex: "77.88.8.8 · 77.88.8.1",
+  xbox: "111.88.96.50 В· 111.88.96.51",
+  cloudflare: "1.1.1.1 В· 1.0.0.1",
+  adguard: "94.140.14.14 В· 94.140.15.15",
+  google: "8.8.8.8 В· 8.8.4.4",
+  yandex: "77.88.8.8 В· 77.88.8.1",
 };
 
 function statusLabel(status: ComponentStatus, t: (key: LocaleKey) => string): string {
@@ -143,7 +143,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
   const toggleComponent = (id: ComponentId, on: boolean) => {
     setOptimisticToggle((current) => ({ ...current, [id]: on }));
     // Only show starting/stopping when power is on (backend will actually start/stop).
-    // With power off, toggle only updates "enabled" — process stays off.
+    // With power off, toggle only updates "enabled" вЂ” process stays off.
     if (powered) {
       patchOptimistic({
         components: {
@@ -250,7 +250,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
                 {(id === "zapret" || id === "zapret2") && (
                   <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-line-1 pt-2.5">
                     <span className="text-[10px] text-fg-mute">
-                      {id === "zapret2" ? (locale === "ru" ? "Режим управления Zapret 2" : "Zapret 2 control mode") : t("component.mode.hint")}
+                      {id === "zapret2" ? (locale === "ru" ? "Р РµР¶РёРј СѓРїСЂР°РІР»РµРЅРёСЏ Zapret 2" : "Zapret 2 control mode") : t("component.mode.hint")}
                     </span>
                     <Segmented
                       size="sm"
@@ -268,6 +268,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
           })}
         </div>
       </div>
+      </div>
       <AnimatePresence>
           {dnsOpen && (
             <motion.div className="fixed inset-0 z-[80] grid place-items-center bg-black/45 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDnsOpen(false)}>
@@ -277,7 +278,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
                     <h3 className="text-[15px] font-semibold text-fg">{t("dns.chooseTitle")}</h3>
                     <p className="mt-0.5 text-[10px] text-fg-dim">{t("dns.chooseDesc")}</p>
                   </div>
-                  <button aria-label={t("common.cancel")} onClick={() => setDnsOpen(false)} className="grid h-8 w-8 place-items-center rounded-[9px] text-fg-dim transition-colors hover:bg-bg-3 hover:text-fg">×</button>
+                  <button aria-label={t("common.cancel")} onClick={() => setDnsOpen(false)} className="grid h-8 w-8 place-items-center rounded-[9px] text-fg-dim transition-colors hover:bg-bg-3 hover:text-fg">Г—</button>
                 </div>
                 <div className="grid grid-cols-2 gap-2.5">
                 {DNS_PROFILE_IDS.map((profileId) => {
