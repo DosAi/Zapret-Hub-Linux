@@ -76,6 +76,8 @@ if (Test-Path $vpnSubscriptionHint) {
 
 $nuitkaArgs = @(
   "-m", "nuitka",
+  # Prefer --standalone over --onefile for the main app: onefile self-extractors
+  # are a common Defender ML false-positive (Bearfoos/Wacatac) trigger.
   "--standalone",
   "--assume-yes-for-downloads",
   "--no-deployment-flag=self-execution",

@@ -73,10 +73,34 @@ def test_tg_proxy_release_falls_back_to_atom_after_rate_limit() -> None:
     assert release["exe_url"].endswith("/v1.8.1/TgWsProxy_windows.exe")
 
 
-def test_zapret2_release_is_pinned_to_latest_bundle_commit() -> None:
-    release = manager().fetch_latest_zapret2_release()
-    assert release["latest_version"] == "f4cf5dde162a"
-    assert release["source_url"].endswith("/zip/f4cf5dde162ae35e6f3a2fd72dde3e86b57dc278")
+def test_zapret2_release_uses_bol_van_zapret2_tags() -> None:
+    process = manager()
+
+    class Zapret2GitHub(FeedGitHub):
+        def github_json(self, url: str, **_kwargs):
+            if "bol-van/zapret2/releases" in url:
+                return [
+                    {
+                        "tag_name": "v1.0.3",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-07-20T12:00:00Z",
+                        "zipball_url": "https://codeload.github.com/bol-van/zapret2/zip/refs/tags/v1.0.3",
+                        "assets": [
+                            {
+                                "name": "zapret2-v1.0.3.zip",
+                                "browser_download_url": "https://github.com/bol-van/zapret2/releases/download/v1.0.3/zapret2-v1.0.3.zip",
+                            }
+                        ],
+                    }
+                ]
+            raise RuntimeError("HTTP Error 403: rate limit exceeded")
+
+    process.github = Zapret2GitHub()
+    release = process.fetch_latest_zapret2_release()
+    assert release["latest_version"] == "1.0.3"
+    assert "bol-van/zapret2" in release["source_url"]
+    assert release["source_url"].endswith("zapret2-v1.0.3.zip")
 
 
 def test_zapret2_auto_discord_capture_includes_voice_udp_ranges() -> None:

@@ -1781,7 +1781,8 @@ class WebBridge(QObject):
             return None
         if command == "component.install-update":
             component_id = str((payload or {}).get("id", ""))
-            self._run_component_update(component_id)
+            version = str((payload or {}).get("version", "") or "").strip()
+            self._run_component_update(component_id, version=version)
             return None
         if command == "window.edit":
             action_name = str((payload or {}).get("action") or "").strip().lower()
@@ -2738,25 +2739,66 @@ class WebBridge(QObject):
             current = ""
             latest = ""
             error = ""
+            versions: list[dict[str, Any]] = []
+            recommended = ""
             try:
                 definitions = {item.id: item for item in self.context.processes.list_components()}
                 current = str(getattr(definitions.get(component_id), "version", "") or "")
+
+                def fill_versions(releases: list[dict[str, str]], *, current_version: str) -> None:
+                    nonlocal latest, recommended, versions
+                    if not releases:
+                        return
+                    latest = str(releases[0].get("version") or "")
+                    recommended = next(
+                        (str(item.get("version") or "") for item in releases if str(item.get("recommended") or "") == "1"),
+                        "",
+                    ) or latest
+                    for item in releases:
+                        version = str(item.get("version") or "")
+                        versions.append(
+                            {
+                                "version": version,
+                                "tag": str(item.get("tag") or version),
+                                "publishedAt": str(item.get("published_at") or ""),
+                                "prerelease": str(item.get("prerelease") or "") == "1",
+                                "recommended": str(item.get("recommended") or "") == "1",
+                                "current": bool(
+                                    version
+                                    and current_version
+                                    and (
+                                        version == current_version
+                                        or current_version.startswith(version)
+                                        or version.startswith(current_version)
+                                    )
+                                ),
+                            }
+                        )
+
                 if component_id == "zapret":
                     current = self.context.storage._detect_zapret_version() or current
-                    latest = str(self.context.processes.fetch_latest_zapret_release().get("latest_version", "") or "")
+                    fill_versions(self.context.processes.list_zapret_releases(limit=30), current_version=current)
+                    if not versions:
+                        latest = str(self.context.processes.fetch_latest_zapret_release().get("latest_version", "") or "")
                 elif component_id == "tg-ws-proxy":
                     current = self.context.storage._detect_tgws_version() or current
-                    latest = str(self.context.processes.fetch_latest_tg_ws_proxy_release().get("latest_version", "") or "")
+                    fill_versions(self.context.processes.list_tg_ws_proxy_releases(limit=30), current_version=current)
+                    if not versions:
+                        latest = str(self.context.processes.fetch_latest_tg_ws_proxy_release().get("latest_version", "") or "")
                 elif component_id == "zapret2":
                     current = self.context.storage._detect_zapret2_version() or current
-                    latest = str(self.context.processes.fetch_latest_zapret2_release().get("latest_version", "") or "")
+                    fill_versions(self.context.processes.list_zapret2_releases(limit=30), current_version=current)
+                    if not versions:
+                        latest = str(self.context.processes.fetch_latest_zapret2_release().get("latest_version", "") or "")
                 elif component_id == "goshkow-vpn":
                     latest = "актуальная подписка"
                 else:
                     latest = current
             except Exception as exception:
                 error = str(exception)
-            available = not error and bool(latest) and (latest != current or component_id in {"zapret2", "goshkow-vpn"})
+            available = not error and bool(latest) and latest.lstrip("vV") != current.lstrip("vV")
+            if component_id == "goshkow-vpn" and not error:
+                available = True
             self.event.emit(
                 "component.update-check",
                 json.dumps(
@@ -2766,6 +2808,8 @@ class WebBridge(QObject):
                         "available": available,
                         "currentVersion": current or "не определена",
                         "latestVersion": latest or "не определена",
+                        "recommendedVersion": recommended or latest or "",
+                        "versions": versions,
                         "error": error,
                     },
                     ensure_ascii=False,
@@ -2774,11 +2818,28 @@ class WebBridge(QObject):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _run_component_update(self, component_id: str) -> None:
+    def _run_component_update(self, component_id: str, *, version: str = "") -> None:
+        wanted = str(version or "").strip()
+
+        def zapret_action() -> dict[str, str]:
+            if wanted:
+                return self.context.processes.install_zapret_version(wanted)
+            return self.context.processes.update_zapret_runtime()
+
+        def zapret2_action() -> dict[str, str]:
+            if wanted:
+                return self.context.processes.install_zapret2_version(wanted)
+            return self.context.processes.update_zapret2_runtime()
+
+        def tg_action() -> dict[str, str]:
+            if wanted:
+                return self.context.processes.install_tg_ws_proxy_version(wanted)
+            return self.context.processes.update_tg_ws_proxy_runtime()
+
         actions = {
-            "zapret": self.context.processes.update_zapret_runtime,
-            "zapret2": self.context.processes.update_zapret2_runtime,
-            "tg-ws-proxy": self.context.processes.update_tg_ws_proxy_runtime,
+            "zapret": zapret_action,
+            "zapret2": zapret2_action,
+            "tg-ws-proxy": tg_action,
         }
         action = actions.get(component_id)
         if action is None:
@@ -2794,17 +2855,22 @@ class WebBridge(QObject):
             try:
                 result = action()
                 result_status = str((result or {}).get("status") or "updated")
-                version = str((result or {}).get("version") or "")
+                installed_version = str((result or {}).get("version") or "")
                 error = str((result or {}).get("error") or "")
                 if result_status == "error":
                     raise RuntimeError(error or "Component update failed")
                 final_status = "up-to-date" if result_status == "up-to-date" else "success"
-                self._schedule_on_gui(lambda: emit(final_status, version=version))
-                message = (
-                    ("Компонент уже обновлён." if self._ru() else "The component is already up to date.")
-                    if final_status == "up-to-date"
-                    else ("Компонент успешно обновлён." if self._ru() else "The component was updated successfully.")
-                )
+                self._schedule_on_gui(lambda: emit(final_status, version=installed_version))
+                if final_status == "up-to-date":
+                    message = "Компонент уже на этой версии." if self._ru() else "The component is already on this version."
+                elif wanted:
+                    message = (
+                        f"Установлена версия {installed_version or wanted}."
+                        if self._ru()
+                        else f"Installed version {installed_version or wanted}."
+                    )
+                else:
+                    message = "Компонент успешно обновлён." if self._ru() else "The component was updated successfully."
                 self._schedule_on_gui(
                     lambda text=message: self._emit_toast(
                         text,

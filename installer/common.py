@@ -301,6 +301,7 @@ def _run_hidden(command: list[str]) -> None:
 
 
 def _run_hidden_script(script: str) -> None:
+    """Run a short PowerShell snippet with default process policy (no policy override flags)."""
     startup = None
     flags = 0
     if sys.platform.startswith("win"):
@@ -308,8 +309,9 @@ def _run_hidden_script(script: str) -> None:
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = 0
+    # Avoid policy-override CLI flags that Defender ML often scores as suspicious.
     subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script],
+        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
         check=False,
         capture_output=True,
         creationflags=flags,
@@ -321,19 +323,28 @@ def _remove_autostart_entries() -> None:
     if not sys.platform.startswith("win"):
         return
     _run_hidden(["schtasks", "/Delete", "/F", "/TN", "ZapretHub"])
-    ps = r"""
-$paths = @(
-  'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
-  'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
-)
-$names = @('ZapretHub', 'Zapret Hub', 'zapret_hub')
-foreach ($path in $paths) {
-  foreach ($name in $names) {
-    try { Remove-ItemProperty -Path $path -Name $name -ErrorAction SilentlyContinue } catch {}
-  }
-}
-"""
-    _run_hidden_script(ps)
+    # Prefer winreg over PowerShell Remove-ItemProperty (fewer AV heuristics).
+    names = ("ZapretHub", "Zapret Hub", "zapret_hub")
+    for hive, access in (
+        (winreg.HKEY_CURRENT_USER, winreg.KEY_SET_VALUE),
+        (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY),
+    ):
+        try:
+            with winreg.OpenKey(
+                hive,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                access,
+            ) as key:
+                for name in names:
+                    try:
+                        winreg.DeleteValue(key, name)
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        continue
+        except OSError:
+            continue
 
 
 def _process_path_under_root(executable_path: str, root: Path) -> bool:
@@ -553,22 +564,25 @@ def remove_uninstall_registry() -> None:
 
 
 def launch_folder_removal(install_dir: Path) -> None:
-    script_path = Path(tempfile.gettempdir()) / f"zapret_hub_uninstall_{int(time.time() * 1000)}.ps1"
-    target = str(install_dir).replace("'", "''")
-    # Use an f-string (with doubled braces) — never str.format on PowerShell,
-    # or literal `{` / `}` in try/catch blocks raise: unexpected '{' in field name.
-    script = f"""$target = '{target}'
-for ($i = 0; $i -lt 40; $i++) {{
-  try {{
-    if (-not (Test-Path -LiteralPath $target)) {{ break }}
-    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
-    if (-not (Test-Path -LiteralPath $target)) {{ break }}
-  }} catch {{}}
-  Start-Sleep -Milliseconds 800
-}}
-Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-"""
-    script_path.write_text(script, encoding="utf-8")
+    """Schedule deferred folder delete via cmd.exe (avoid PowerShell policy-override heuristics)."""
+    script_path = Path(tempfile.gettempdir()) / f"zapret_hub_uninstall_{int(time.time() * 1000)}.cmd"
+    target = str(install_dir)
+    script = "\r\n".join(
+        [
+            "@echo off",
+            "setlocal",
+            f'set "TARGET={target}"',
+            "for /L %%i in (1,1,40) do (",
+            '  if not exist "%TARGET%" goto done',
+            '  rmdir /s /q "%TARGET%" >nul 2>&1',
+            '  if not exist "%TARGET%" goto done',
+            "  ping -n 2 127.0.0.1 >nul",
+            ")",
+            ":done",
+            f'del /f /q "{script_path}" >nul 2>&1',
+        ]
+    )
+    script_path.write_text(script, encoding="utf-8", errors="replace")
     startup = None
     flags = 0
     if sys.platform.startswith("win"):
@@ -577,7 +591,7 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = 0
     subprocess.Popen(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        ["cmd.exe", "/c", str(script_path)],
         creationflags=flags,
         startupinfo=startup,
     )

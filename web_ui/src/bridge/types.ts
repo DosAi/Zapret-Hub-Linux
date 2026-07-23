@@ -160,12 +160,23 @@ export interface Settings {
   theme: string;
 }
 
+export interface ComponentReleaseVersion {
+  version: string;
+  tag?: string;
+  publishedAt?: string;
+  prerelease?: boolean;
+  recommended?: boolean;
+  current?: boolean;
+}
+
 export interface ComponentUpdateCheck {
   requestId: string;
   id: ComponentId;
   available: boolean;
   currentVersion: string;
   latestVersion: string;
+  recommendedVersion?: string;
+  versions?: ComponentReleaseVersion[];
   error?: string;
 }
 
@@ -226,7 +237,7 @@ export type Commands = {
   "runtime.power": { in: { on: boolean }; out: void };
   "component.toggle": { in: { id: ComponentId; on: boolean }; out: void };
   "component.check-update": { in: { id: ComponentId; requestId: string }; out: void };
-  "component.install-update": { in: { id: ComponentId }; out: void };
+  "component.install-update": { in: { id: ComponentId; version?: string }; out: void };
   "component.configure": { in: { id: ComponentId; patch: Record<string, unknown> }; out: void };
   "component.open-external": { in: { id: ComponentId }; out: void };
   "tg.connect": { in: void; out: void };

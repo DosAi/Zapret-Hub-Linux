@@ -713,8 +713,9 @@ def _run_hidden_script(script: str) -> None:
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = 0
+    # Prefer default PowerShell policy; policy-override flags trip Defender ML heuristics.
     subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script],
+        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
         check=False,
         capture_output=True,
         creationflags=flags,
@@ -726,19 +727,29 @@ def _remove_autostart_entries() -> None:
     if not sys.platform.startswith("win"):
         return
     _run_hidden(["schtasks", "/Delete", "/F", "/TN", "ZapretHub"])
-    ps = r"""
-$paths = @(
-  'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
-  'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
-)
-$names = @('ZapretHub', 'Zapret Hub', 'zapret_hub')
-foreach ($path in $paths) {
-  foreach ($name in $names) {
-    try { Remove-ItemProperty -Path $path -Name $name -ErrorAction SilentlyContinue } catch {}
-  }
-}
-"""
-    _run_hidden_script(ps)
+    import winreg
+
+    names = ("ZapretHub", "Zapret Hub", "zapret_hub")
+    for hive, access in (
+        (winreg.HKEY_CURRENT_USER, winreg.KEY_SET_VALUE),
+        (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY),
+    ):
+        try:
+            with winreg.OpenKey(
+                hive,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                access,
+            ) as key:
+                for name in names:
+                    try:
+                        winreg.DeleteValue(key, name)
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        continue
+        except OSError:
+            continue
 
 
 def _terminate_running_instances(install_dir: Path | None = None) -> None:

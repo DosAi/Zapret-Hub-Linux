@@ -71,6 +71,30 @@ jobs:
         run: |
           .\scripts\build_nuitka_installer.ps1 -Python python -OutputDir dist_installer -UninstallerOnly -Compiler msvc
 
+      - name: Optional Authenticode sign portable binaries
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_PFX_BASE64)) {
+            Write-Warning "WINDOWS_SIGNING_PFX_BASE64 is not configured; portable binaries remain unsigned."
+            exit 0
+          }
+          if (-not (Test-Path .\scripts\sign_windows_artifacts.ps1)) {
+            Write-Warning "sign_windows_artifacts.ps1 missing; skipping signing."
+            exit 0
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP "zapret-hub-signing.pfx"
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX_BASE64))
+          $env:WINDOWS_SIGNING_PFX_PATH = $certificatePath
+          $targets = @(
+            ".\dist_nuitka\main.dist\Zapret_Hub.exe",
+            ".\dist_installer\uninstall_zaprethub.exe"
+          ) | Where-Object { Test-Path -LiteralPath $_ }
+          if ($targets.Count -eq 0) { throw "No portable binaries found to sign." }
+          .\scripts\sign_windows_artifacts.ps1 -Files $targets -RequireSignature
+
       - name: Zip portable x64
         shell: pwsh
         run: |
@@ -129,6 +153,30 @@ jobs:
         shell: pwsh
         run: |
           .\scripts\build_nuitka_installer.ps1 -Python python -OutputDir dist_installer -UninstallerOnly -Compiler msvc
+
+      - name: Optional Authenticode sign portable binaries
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_PFX_BASE64)) {
+            Write-Warning "WINDOWS_SIGNING_PFX_BASE64 is not configured; portable binaries remain unsigned."
+            exit 0
+          }
+          if (-not (Test-Path .\scripts\sign_windows_artifacts.ps1)) {
+            Write-Warning "sign_windows_artifacts.ps1 missing; skipping signing."
+            exit 0
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP "zapret-hub-signing.pfx"
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX_BASE64))
+          $env:WINDOWS_SIGNING_PFX_PATH = $certificatePath
+          $targets = @(
+            ".\dist_nuitka\main.dist\Zapret_Hub.exe",
+            ".\dist_installer\uninstall_zaprethub.exe"
+          ) | Where-Object { Test-Path -LiteralPath $_ }
+          if ($targets.Count -eq 0) { throw "No portable binaries found to sign." }
+          .\scripts\sign_windows_artifacts.ps1 -Files $targets -RequireSignature
 
       - name: Zip portable arm64
         shell: pwsh
@@ -195,7 +243,6 @@ jobs:
             -OutputDir dist_installer `
             -Version $version `
             -Compiler msvc `
-            -SkipUninstaller `
             -SkipPrepareRelease
 
       - name: Sanity-check installer size
@@ -204,11 +251,11 @@ jobs:
           $version = "${{ steps.meta.outputs.version }}"
           $installer = Get-Item ".\dist_installer\install_zaprethub_${version}_universal.exe"
           $mb = [math]::Round($installer.Length / 1MB, 1)
-          Write-Host "Slim installer size: $mb MB (QtWebEngine UI + optional bundled uninstaller; no portable app zips)"
-          # Compressed WebEngine installer is expected ~150-350MB.
-          # >450MB usually means an embedded portable payload mistake.
-          if ($installer.Length -gt (450MB)) {
-            throw "Installer too large ($mb MB > 450 MB). Likely embedded app payload; slim build expected."
+          Write-Host "Slim installer size: $mb MB (QtWebEngine UI; onefile archive without compression; no portable app zips)"
+          # Uncompressed onefile+WebEngine is larger (~400-600MB) but safer for Defender ML.
+          # >700MB usually means an embedded portable payload mistake.
+          if ($installer.Length -gt (700MB)) {
+            throw "Installer too large ($mb MB > 700 MB). Likely embedded app payload; slim build expected."
           }
 
       - uses: actions/upload-artifact@v6

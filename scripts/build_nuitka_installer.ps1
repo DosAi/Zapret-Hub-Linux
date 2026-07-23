@@ -10,14 +10,17 @@ param(
     [string]$UninstallerArm64Source = "",
     [switch]$SkipPrepareRelease,
     [switch]$Standalone,
+    # Default: do NOT embed another EXE inside the installer (PE-in-PE → Defender Bearfoos/Wacatac ML).
+    # Opt in only when you explicitly need a self-contained uninstaller payload.
+    [switch]$EmbedUninstaller,
+    # Kept for CI/scripts that already pass -SkipUninstaller (now the default behavior).
     [switch]$SkipUninstaller,
     [switch]$UninstallerOnly,
     [ValidateSet("zig", "msvc", "mingw")]
     [string]$Compiler = "msvc"
 )
 
-# Slim installer: embeds uninstallers (+ UI assets) only; compressed onefile.
-# It does NOT include installer_payload/*.zip - runtime download is from goshkow.com.
+# Slim installer: downloads runtime from goshkow.com; does NOT embed installer_payload/*.zip.
 # Prefer exit-code checks over treating Nuitka stderr progress as terminating errors.
 $ErrorActionPreference = "Continue"
 if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
@@ -63,13 +66,20 @@ $compilerArg = switch ($Compiler) {
     default { "--msvc=latest" }
 }
 
+# Onefile AV hardening:
+# - compressed custom streams look like packers to Defender ML (Trojan:Win32/Bearfoos.A!ml)
+# - --onefile-as-archive + --onefile-no-compression are less "dropper-like"
+# - stable CACHE_DIR unpack path avoids random TEMP extractors
 $modeArgs = @()
 if ($Standalone) {
   $modeArgs += "--standalone"
 } else {
-  # Compressed onefile (same spirit as pre-3.0.0 local builds).
-  # --onefile-no-compression + QtWebEngine produced ~530MB with no app payload.
-  $modeArgs += "--onefile"
+  $modeArgs += @(
+    "--onefile",
+    "--onefile-as-archive",
+    "--onefile-no-compression",
+    "--onefile-tempdir-spec={CACHE_DIR}/goshkow/zapret-hub-installer/{VERSION}-{PID}"
+  )
 }
 
 $bundledUninstallerDir = Join-Path $root "bundled_uninstaller"
@@ -78,10 +88,21 @@ $uninstallerPath = Join-Path $OutputDir "uninstall_zaprethub.exe"
 
 function Build-Uninstaller {
   param([string]$OutDir)
+  $uninstallModeArgs = @()
+  if ($Standalone) {
+    $uninstallModeArgs += "--standalone"
+  } else {
+    $uninstallModeArgs += @(
+      "--onefile",
+      "--onefile-as-archive",
+      "--onefile-no-compression",
+      "--onefile-tempdir-spec={CACHE_DIR}/goshkow/zapret-hub-uninstaller/{VERSION}-{PID}"
+    )
+  }
   $uninstallNuitkaArgs = @(
     "-m",
     "nuitka"
-  ) + $modeArgs + @(
+  ) + $uninstallModeArgs + @(
     "--assume-yes-for-downloads",
     "--no-deployment-flag=self-execution",
     $compilerArg,
@@ -132,8 +153,7 @@ if ($UninstallerOnly) {
 }
 
 $embedBundledUninstaller = $false
-
-if (-not $SkipUninstaller) {
+if ($EmbedUninstaller -and -not $SkipUninstaller) {
   $uninstallerPath = Build-Uninstaller -OutDir $OutputDir
   $bundledTarget = Join-Path $bundledUninstallerDir "uninstall_zaprethub.exe"
   Copy-Item -LiteralPath $uninstallerPath -Destination $bundledTarget -Force
@@ -151,7 +171,7 @@ if (-not $SkipUninstaller) {
   if ($UninstallerArm64Source -and (Test-Path -LiteralPath $UninstallerArm64Source)) {
     Copy-Item -LiteralPath $UninstallerArm64Source -Destination (Join-Path $bundledUninstallerDir "uninstall_zaprethub_arm64.exe") -Force
   }
-  Write-Host "Slim installer: bundled uninstallers are not embedded. The downloaded portable payload provides the architecture-matching uninstaller."
+  Write-Host "Slim installer: uninstaller EXE is not embedded (reduces PE-in-PE AV false positives). Portable payload provides uninstall_zaprethub.exe."
 }
 
 $installerDataFiles = @()
@@ -198,7 +218,7 @@ $nuitkaArgs = @(
 if ($embedBundledUninstaller) {
   Write-Host "Building installer with bundled standalone uninstaller..."
 } else {
-  Write-Host "Building slim downloader installer without application or uninstaller payloads..."
+  Write-Host "Building AV-safer slim onefile installer (archive, no compression, no embedded uninstaller EXE)..."
 }
 & $Python @nuitkaArgs
 if ($LASTEXITCODE -ne 0) { throw "Nuitka installer build failed with exit code $LASTEXITCODE" }

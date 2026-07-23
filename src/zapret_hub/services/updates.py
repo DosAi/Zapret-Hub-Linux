@@ -926,7 +926,7 @@ class UpdatesManager:
         launcher = textwrap.dedent(
             f"""
             @echo off
-            start "" /min powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{script_path}"
+            start "" /min powershell -NoProfile -WindowStyle Hidden -File "{script_path}"
             exit /b 0
             """
         ).strip() + "\n"
