@@ -58,11 +58,12 @@ def manager() -> ProcessManager:
     return process
 
 
-def test_zapret_release_falls_back_to_atom_after_rate_limit() -> None:
+def test_zapret_release_is_pinned_to_1_9_9c() -> None:
     release = manager().fetch_latest_zapret_release()
-    assert release["latest_version"] == "1.10.0"
-    assert release["asset_url"].endswith("/1.10.0/zapret-discord-youtube-1.10.0.zip")
-    assert release["zipball_url"].endswith("/refs/tags/1.10.0")
+    assert release["latest_version"] == "1.9.9c"
+    assert release["asset_url"].endswith("/1.9.9c/zapret-discord-youtube-1.9.9c.zip")
+    assert release["zipball_url"].endswith("/refs/tags/1.9.9c")
+    assert release.get("pinned") == "1"
 
 
 def test_tg_proxy_release_falls_back_to_atom_after_rate_limit() -> None:
@@ -199,6 +200,13 @@ def test_service_change_restarts_running_zapret() -> None:
         def start_component(cls, component_id: str):
             events.append(f"start:{component_id}")
             cls.running.add(component_id)
+            return SimpleNamespace(status="running", component_id=component_id)
+
+        @classmethod
+        def seamless_restart_zapret(cls):
+            events.append("seamless:zapret")
+            cls.running.add("zapret")
+            return SimpleNamespace(status="running", component_id="zapret")
 
     bridge = WebBridge.__new__(WebBridge)
     bridge.context = SimpleNamespace(
@@ -212,13 +220,21 @@ def test_service_change_restarts_running_zapret() -> None:
         logging=FakeLogging(),
     )
     bridge._runtime_reconfigure_lock = threading.Lock()
+    bridge._runtime_transition_status = "on"
+    bridge._service_power_hold = 0
     bridge.emit_state = lambda *args, **kwargs: None
+    bridge._hold_service_power = lambda: 1
+    bridge._release_service_power = lambda *_a, **_k: None
+    bridge._emit_runtime_status = lambda *_a, **_k: None
+    bridge._set_auxiliary_components_power_async = lambda *_a, **_k: None
+    bridge._sync_orchestrator_lifecycle = lambda: None
+    bridge._component_running = lambda cid: cid in Processes.running
 
     bridge._apply_selected_services(["youtube", "discord"], emit=False)
 
     assert values.selected_service_ids == ["discord", "youtube"]
     assert "zapret" in values.enabled_component_ids
-    assert events == ["stop:zapret", "rebuild", "collections", "start:zapret"]
+    assert events == ["rebuild", "collections", "seamless:zapret"]
 
 
 def test_clearing_bypass_services_stops_zapret_without_restart() -> None:
@@ -269,7 +285,15 @@ def test_clearing_bypass_services_stops_zapret_without_restart() -> None:
         logging=FakeLogging(),
     )
     bridge._runtime_reconfigure_lock = threading.Lock()
+    bridge._runtime_transition_status = "on"
+    bridge._service_power_hold = 0
     bridge.emit_state = lambda *args, **kwargs: None
+    bridge._hold_service_power = lambda: 1
+    bridge._release_service_power = lambda *_a, **_k: None
+    bridge._emit_runtime_status = lambda *_a, **_k: None
+    bridge._set_auxiliary_components_power_async = lambda *_a, **_k: None
+    bridge._sync_orchestrator_lifecycle = lambda: None
+    bridge._component_running = lambda cid: cid in Processes.running
 
     bridge._apply_selected_services([], emit=False)
 

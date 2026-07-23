@@ -95,6 +95,10 @@ def bootstrap_application() -> ApplicationContext:
     logging = LoggingManager(storage)
     autostart = AutostartManager(logging)
     processes = ProcessManager(storage, logging, settings)
+    try:
+        processes.ensure_pinned_zapret_runtime()
+    except Exception as error:
+        logging.log("warning", "Pinned Zapret runtime ensure failed", error=str(error))
     notifications = NotificationManager(storage)
     merge = MergeEngine(storage, logging, settings)
     mods = ModsManager(storage, logging, merge, settings, processes=processes)

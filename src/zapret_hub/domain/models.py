@@ -66,6 +66,8 @@ class AppSettings:
     zapret2_raw_filter: str = ""
     zapret2_lua_strategy: str = ""
     zapret2_strategy_id: str = "balanced"
+    # Default ON: seed Discord/YouTube catalogs + load bypass-youtube-discord.lua.
+    zapret2_youtube_discord_bypass: bool = True
     goshkow_vpn_pending_start: bool = False
     zapret_was_running_before_goshkow_vpn: bool = False
     zapret_was_enabled_before_goshkow_vpn: bool = False

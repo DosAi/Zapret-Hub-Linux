@@ -493,6 +493,18 @@ export function SettingsModal({
             <Row label="WinDivert filter" hint={L("Дополнительный фильтр --wf-raw-part", "Additional --wf-raw-part filter")}><textarea disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.rawFilter} onChange={(event) => patch({ zapret2: { ...settings.zapret2, rawFilter: event.target.value } })} className="h-16 w-[250px] resize-none rounded-[10px] border border-line-1 bg-bg-1 p-2.5 text-[11px] text-fg outline-none focus:border-line-2 disabled:cursor-not-allowed disabled:opacity-50" /></Row>
           </Section>
           <Section title="Lua desync">
+            <Row
+              label="YouTube Discord Bypass"
+              hint={L(
+                "Подключает bypass-youtube-discord.lua и каталоги Discord/YouTube по умолчанию (Manual и Auto).",
+                "Loads bypass-youtube-discord.lua and Discord/YouTube catalogs by default (Manual and Auto).",
+              )}
+            >
+              <IosToggle
+                on={settings.zapret2.youtubeDiscordBypass !== false}
+                onChange={(value) => patch({ zapret2: { ...settings.zapret2, youtubeDiscordBypass: value } })}
+              />
+            </Row>
             <Row label={L("Профиль Lua", "Lua profile")} hint={L("Hub-стратегия (Auto). Custom ниже — только Manual.", "Hub strategy (Auto). Custom below is Manual-only.")}>
               <SelectField
                 disabled={(settings.zapret2.controlMode ?? "manual") === "auto"}

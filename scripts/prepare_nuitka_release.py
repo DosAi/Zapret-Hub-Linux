@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 
 def _should_skip_path(path: Path, source_dir: Path) -> bool:
@@ -276,7 +276,7 @@ def main() -> None:
         "Mirror update JSON (https://goshkow.com/zapret-hub/update)\n"
         "----------------------------------------------------------\n"
         "Required fields for same-version hotfix detection:\n"
-        "  - version / tag  (product version, e.g. 3.0.0 — may stay unchanged for hotfixes)\n"
+        "  - version / tag  (product version, e.g. 3.0.1 — may stay unchanged for hotfixes)\n"
         "  - assets.x64.digest     = sha256:<portable x64 zip bytes on the mirror>\n"
         "  - assets.arm64.digest   = sha256:<portable arm64 zip bytes on the mirror>\n"
         "  - assets.x64.download_url / assets.arm64.download_url\n"

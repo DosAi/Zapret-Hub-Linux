@@ -35,6 +35,38 @@ from zapret_hub.services.service_rules import SERVICE_RULES
 from zapret_hub.services.settings import SettingsManager
 from zapret_hub.services.storage import StorageManager
 
+# Hub ships / prefers Flowseal 1.9.9c (not newer 1.10.x) as the default Zapret binary.
+PINNED_ZAPRET_VERSION = "1.9.9c"
+PINNED_ZAPRET_TAG = "1.9.9c"
+PINNED_ZAPRET_ZIP_URL = (
+    "https://github.com/Flowseal/zapret-discord-youtube/releases/download/"
+    f"{PINNED_ZAPRET_TAG}/zapret-discord-youtube-{PINNED_ZAPRET_VERSION}.zip"
+)
+PINNED_ZAPRET_ZIPBALL_URL = (
+    f"https://codeload.github.com/Flowseal/zapret-discord-youtube/zip/refs/tags/{PINNED_ZAPRET_TAG}"
+)
+DISCORD_VOICE_UDP_PORTS = "3478-3497,19294-19344,42377-62133"
+
+_BUNDLED_BYPASS_YOUTUBE_DISCORD_LUA = r'''--[[
+  Zapret Hub — YouTube / Discord bypass seed for winws2 (Zapret 2).
+]]
+HUB_BYPASS_YOUTUBE_DISCORD = true
+HUB_BYPASS_YOUTUBE_DISCORD_VERSION = "1"
+HUB_BYPASS_DOMAINS = {
+  "discord.com","discordapp.com","discord.gg","discord.media","discordcdn.com",
+  "discordstatus.com","cdn.discordapp.com","media.discordapp.net","gateway.discord.gg",
+  "images-ext-1.discordapp.net","images-ext-2.discordapp.net","dl.discordapp.net",
+  "status.discord.com","latency.discord.media","updates.discord.com",
+  "youtube.com","youtu.be","ytimg.com","googlevideo.com","youtube-nocookie.com",
+  "ggpht.com","gvt1.com","youtube.googleapis.com","youtubei.googleapis.com",
+  "yt3.googleusercontent.com","manifest.googlevideo.com","redirector.googlevideo.com",
+}
+HUB_BYPASS_NETWORKS = {"149.154.167.0/24","173.194.0.0/16","162.159.128.0/20"}
+if type(print) == "function" then
+  print(string.format("[Zapret Hub] YouTube/Discord bypass Lua ready (domains=%d)", #HUB_BYPASS_DOMAINS))
+end
+'''
+
 _VPN_PROCESS_PATTERNS = (
     "nekobox",
     "nekoray",
@@ -1275,6 +1307,12 @@ foreach ($adapter in @($payload.adapters)) {
         except Exception:
             pass
         # Always clear existing winws copies, then start a Hub-owned instance.
+        # When already running, prefer seamless cutover (stage B → start new → kill old).
+        if self._is_image_running("winws.exe") and not self._diagnostic_runtime_override:
+            try:
+                return self.seamless_restart_zapret()
+            except Exception as error:
+                self.logging.log("warning", "Seamless zapret restart failed, falling back", error=str(error))
         if self._is_image_running("winws.exe"):
             self.logging.log("info", "Stopping existing winws copies before zapret start")
         self.stop_component(component_id)
@@ -1578,14 +1616,11 @@ foreach ($adapter in @($payload.adapters)) {
         tcp_ports = self._normalize_zapret2_ports(settings.zapret2_tcp_ports, "80,443")
         udp_ports = self._normalize_zapret2_ports(settings.zapret2_udp_ports, "443")
         control_mode = str(getattr(settings, "zapret2_control_mode", "manual") or "manual")
+        bypass_yt_discord = bool(getattr(settings, "zapret2_youtube_discord_bypass", True))
         selected_services = {str(item) for item in (settings.selected_service_ids or [])}
-        # Discord voice / STUN / media need UDP beyond 443. Auto must widen capture
-        # even when the settings field still says the default "443".
-        if control_mode == "auto" and "discord" in selected_services:
-            udp_ports = self._merge_zapret2_ports(
-                udp_ports,
-                "3478-3497,19294-19344,42377-62133",
-            )
+        # Discord voice / STUN / media need UDP beyond 443.
+        if bypass_yt_discord or (control_mode == "auto" and "discord" in selected_services):
+            udp_ports = self._merge_zapret2_ports(udp_ports, DISCORD_VOICE_UDP_PORTS)
         bundle_root = zapret2_hub.bundle_winws_root(winws2_path)
         lua_lib = self._zapret2_lua_arg(runtime_root, "zapret-lib.lua")
         lua_antidpi = self._zapret2_lua_arg(runtime_root, "zapret-antidpi.lua")
@@ -1615,6 +1650,10 @@ foreach ($adapter in @($payload.adapters)) {
             # Append-only: never wipe; seed only what is still missing.
             if selected:
                 zapret2_hub.seed_service_lists(configs_dir, selected, only_missing=True)
+            if bypass_yt_discord:
+                # Manual + Auto: default YouTube/Discord catalogs like Zapret1 services.
+                zapret2_hub.seed_bypass_catalog(configs_dir, only_missing=True)
+                zapret2_hub.seed_service_lists(configs_dir, ["youtube", "discord"], only_missing=True)
             elif control_mode == "auto" and not zapret2_hub.hub_lists_initialized(configs_dir):
                 zapret2_hub.seed_bypass_catalog(configs_dir, only_missing=True)
         except Exception:
@@ -1634,6 +1673,11 @@ foreach ($adapter in @($payload.adapters)) {
                 **lists,
                 **zapret2_hub.materialize_manual_lists(configs_dir, manual_root),
             }
+
+        if bypass_yt_discord:
+            bypass_lua = self._ensure_youtube_discord_bypass_lua(configs_dir)
+            if bypass_lua is not None:
+                command.append(f"--lua-init=@{bypass_lua}")
 
         mod_lua_root = zapret2_hub.zapret2_lists_dir(configs_dir) / "mod_lua"
         if mod_lua_root.is_dir():
@@ -1659,6 +1703,26 @@ foreach ($adapter in @($payload.adapters)) {
             )
         )
         return command
+
+    def _ensure_youtube_discord_bypass_lua(self, configs_dir: Path) -> Path | None:
+        """Materialize bundled bypass-youtube-discord.lua into configs/zapret2/."""
+        from zapret_hub.services.orchestrator import zapret2_hub
+
+        target = zapret2_hub.zapret2_lists_dir(configs_dir) / "bypass-youtube-discord.lua"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            resource = Path(__file__).resolve().parent.parent / "resources" / "bypass-youtube-discord.lua"
+            payload = ""
+            if resource.is_file():
+                payload = resource.read_text(encoding="utf-8")
+            if not payload.strip():
+                payload = _BUNDLED_BYPASS_YOUTUBE_DISCORD_LUA
+            if not target.exists() or target.read_text(encoding="utf-8", errors="ignore") != payload:
+                target.write_text(payload, encoding="utf-8")
+            return target
+        except Exception as error:
+            self.logging.log("warning", "Failed to materialize YouTube/Discord bypass Lua", error=str(error))
+            return None
 
     def _normalize_zapret2_ports(self, value: str, fallback: str) -> str:
         normalized: list[str] = []
@@ -2945,7 +3009,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             except Exception:
                 pass
             try:
-                owned.wait(timeout=0.8)
+                owned.wait(timeout=0.35)
             except Exception:
                 try:
                     owned.kill()
@@ -2955,7 +3019,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 self._run_quiet(["taskkill", "/PID", str(owned.pid), "/F", "/T"])
         if self._is_image_running("winws.exe"):
             self._kill_image("winws.exe")
-            self._wait_for_image_exit("winws.exe", attempts=6, delay=0.08)
+            self._wait_for_image_exit("winws.exe", attempts=4, delay=0.05)
         try:
             self._close_source_log_stream("zapret")
         except Exception:
@@ -2989,18 +3053,44 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._invalidate_state_cache()
 
     def hot_replace_zapret_runtime(self, active_root: Path) -> ComponentState:
-        """Orchestrator cutover: keep A on disk, kill live winws, start staged B ASAP.
+        """Orchestrator cutover: start staged B, then close old winws PIDs.
 
-        WinDivert cannot host two captures — true overlap is impossible — but we avoid
-        stop_component (which deletes A) and the long purge/rematerialize path so the
-        gap without bypass stays minimal.
+        Prefer new-over-old so the no-bypass window stays as short as possible.
+        WinDivert often rejects a second capture — then fall back to soft-kill → start.
         """
         try:
             self.settings.update(goshkow_vpn_pending_start=False)
         except Exception:
             pass
+        return self._cutover_to_zapret_runtime(Path(active_root))
+
+    def seamless_restart_zapret(self) -> ComponentState:
+        """Rebuild candidate runtime while live, then cut over with minimal downtime."""
+        try:
+            self.settings.update(goshkow_vpn_pending_start=False)
+        except Exception:
+            pass
+        slot_b = self.stage_zapret_candidate_runtime()
+        return self._cutover_to_zapret_runtime(slot_b)
+
+    def _cutover_to_zapret_runtime(self, active_root: Path) -> ComponentState:
+        active_root = Path(active_root)
+        old_pids = self._list_image_pids("winws.exe")
+        owned = self._processes.pop("zapret", None)
+        if owned is not None and getattr(owned, "pid", None):
+            old_pids.add(int(owned.pid))
+
+        # Attempt: start B while A still holds WinDivert (user-requested seamless path).
+        state = self.start_zapret_from_runtime(active_root, assume_clean=True)
+        new_proc = self._processes.get("zapret")
+        new_pid = int(getattr(new_proc, "pid", 0) or 0) if new_proc is not None else 0
+        if str(getattr(state, "status", "") or "") == "running" and new_pid:
+            self._kill_image_pids("winws.exe", keep_pids={new_pid})
+            # Drop owned handle for killed A if any lingered.
+            return state
+
+        # Fallback: soft-stop everything, light purge if needed, start B alone.
         self._soft_stop_zapret_image()
-        # Light driver cleanup only when services still block a new capture.
         if self._managed_zapret_driver_services():
             if not self._purge_stale_zapret_runtime():
                 state = ComponentState(
@@ -4046,47 +4136,33 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return []
 
     def fetch_latest_zapret_release(self) -> dict[str, str]:
-        api_url = "https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest"
-        try:
-            payload = self.github.github_json(api_url, timeout=20, purpose="zapret-release-metadata")
-            if not isinstance(payload, dict):
-                raise ValueError("Invalid zapret release metadata")
-        except Exception as error:
-            self.logging.log("warning", "Zapret release metadata fallback", error=str(error))
-            fallback = self._fetch_latest_release_atom("Flowseal/zapret-discord-youtube")
-            tag = str(fallback.get("tag") or "")
-            version = str(fallback.get("latest_version") or "")
-            return {
-                "latest_version": version,
-                "asset_url": (
-                    f"https://github.com/Flowseal/zapret-discord-youtube/releases/download/"
-                    f"{urllib.parse.quote(tag)}/zapret-discord-youtube-{urllib.parse.quote(version)}.zip"
-                    if tag and version
-                    else ""
-                ),
-                "asset_name": f"zapret-discord-youtube-{version}.zip" if version else "",
-                "zipball_url": (
-                    f"https://codeload.github.com/Flowseal/zapret-discord-youtube/zip/refs/tags/"
-                    f"{urllib.parse.quote(tag)}"
-                    if tag
-                    else "https://codeload.github.com/Flowseal/zapret-discord-youtube/zip/refs/heads/main"
-                ),
-            }
-        latest_version = str(payload.get("tag_name") or payload.get("name") or "").strip().lstrip("v")
-        asset = next(
-            (
-                item
-                for item in list(payload.get("assets") or [])
-                if isinstance(item, dict) and str(item.get("name", "")).lower().endswith(".zip")
-            ),
-            None,
-        )
+        # Hub defaults to Flowseal 1.9.9c — do not follow GitHub /latest (1.10.x).
         return {
-            "latest_version": latest_version,
-            "asset_url": str((asset or {}).get("browser_download_url", "")),
-            "asset_name": str((asset or {}).get("name", "")),
-            "zipball_url": str(payload.get("zipball_url") or ""),
+            "latest_version": PINNED_ZAPRET_VERSION,
+            "asset_url": PINNED_ZAPRET_ZIP_URL,
+            "asset_name": f"zapret-discord-youtube-{PINNED_ZAPRET_VERSION}.zip",
+            "zipball_url": PINNED_ZAPRET_ZIPBALL_URL,
+            "pinned": "1",
         }
+
+    def ensure_pinned_zapret_runtime(self, *, force: bool = False) -> dict[str, str]:
+        """Install/downgrade bundled Zapret binary tree to PINNED_ZAPRET_VERSION when needed."""
+        current = str(self.storage._detect_zapret_version() or "").strip()
+        if not force and current == PINNED_ZAPRET_VERSION:
+            return {"status": "up-to-date", "version": current}
+        self.logging.log(
+            "info",
+            "Ensuring pinned Zapret runtime",
+            current=current,
+            pinned=PINNED_ZAPRET_VERSION,
+        )
+        return self._install_zapret_archive(
+            version=PINNED_ZAPRET_VERSION,
+            candidates=[
+                (PINNED_ZAPRET_ZIP_URL, f"zapret-discord-youtube-{PINNED_ZAPRET_VERSION}.zip"),
+                (PINNED_ZAPRET_ZIPBALL_URL, "zapret-source.zip"),
+            ],
+        )
 
     def fetch_latest_tg_ws_proxy_release(self) -> dict[str, str]:
         api_url = "https://api.github.com/repos/Flowseal/tg-ws-proxy/releases/latest"
@@ -4746,6 +4822,35 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._image_running_cache.pop(image_name, None)
         self._run_quiet(["taskkill", "/IM", image_name, "/F", "/T"])
         self._image_running_cache[image_name] = (time.time(), False)
+
+    def _list_image_pids(self, image_name: str) -> set[int]:
+        pids: set[int] = set()
+        try:
+            proc = self._run_quiet(
+                ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"]
+            )
+            raw = str(getattr(proc, "stdout", "") or "")
+            for line in raw.splitlines():
+                # "winws.exe","1234","Session Name","Session#","Mem Usage"
+                parts = [part.strip().strip('"') for part in line.split(",")]
+                if len(parts) >= 2 and parts[0].lower() == image_name.lower():
+                    try:
+                        pids.add(int(parts[1]))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return pids
+
+    def _kill_image_pids(self, image_name: str, *, keep_pids: set[int] | None = None) -> None:
+        keep = {int(pid) for pid in (keep_pids or set()) if int(pid) > 0}
+        for pid in self._list_image_pids(image_name):
+            if pid in keep:
+                continue
+            self._run_quiet(["taskkill", "/PID", str(pid), "/F", "/T"])
+        # Refresh cache after selective kill.
+        alive = bool(self._list_image_pids(image_name))
+        self._image_running_cache[image_name] = (time.time(), alive)
 
     def _wait_for_process_image(
         self,

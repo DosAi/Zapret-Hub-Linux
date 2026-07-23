@@ -85,8 +85,8 @@ $nuitkaArgs = @(
   "--windows-icon-from-ico=ui_assets\icons\app_shell.ico",
   '--company-name=goshkow',
   '--product-name=Zapret Hub',
-  '--file-version=3.0.0.0',
-  '--product-version=3.0.0.0',
+  '--file-version=3.0.1.0',
+  '--product-version=3.0.1.0',
   '--file-description=Zapret Hub',
   '--copyright=goshkow',
   "--output-dir=$OutputDir",
@@ -144,7 +144,7 @@ if ($UninstallerSource) {
 }
 $uninstallerCandidates += @(
     (Join-Path $root "bundled_uninstaller\uninstall_zaprethub.exe"),
-    (Join-Path $root "dist_installer_3.0.0\uninstall_zaprethub.exe"),
+    (Join-Path $root "dist_installer_3.0.1\uninstall_zaprethub.exe"),
     (Join-Path $root "dist_installer\uninstall_zaprethub.exe")
 )
 $uninstallerCopied = $false
