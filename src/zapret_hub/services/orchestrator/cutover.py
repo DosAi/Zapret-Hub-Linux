@@ -25,6 +25,14 @@ _SETTINGS_KEYS = (
 )
 
 
+# Classic list applies still restart winws (hostlists must land), but not on every
+# domain tick — adaptive spacing + deferred flush (FluxRoute-style calm).
+_LIST_RESTART_BASE_S = 35.0
+_LIST_RESTART_MAX_S = 180.0
+_LIST_RESTART_WINDOW_S = 300.0
+_LIST_DEBOUNCE_QUIET_S = 12.0
+
+
 class CutoverManager:
     """Warm A/B cutover with settings↔runtime always restored together on failure.
 
@@ -44,6 +52,12 @@ class CutoverManager:
         self.last_good: dict[str, Any] | None = None
         self._slot_a: Path | None = None
         self._settle_s = 2.2
+        self._last_list_restart_at = 0.0
+        self._list_restart_times: list[float] = []
+        self._deferred_list_restart = False
+        self._deferred_list_due_at = 0.0
+        self._deferred_probe_targets: list[dict[str, str]] = []
+        self._deferred_required_hosts: list[str] = []
 
     def _log(self, level: str, message: str, **fields: Any) -> None:
         logging = getattr(self.context, "logging", None)
@@ -160,6 +174,11 @@ class CutoverManager:
         required_hosts: list[str] | None = None,
         restart: bool | None = None,
     ) -> dict[str, Any]:
+        """Classic Zapret: list changes still restart, but adaptively (not every domain).
+
+        Strategy/mods/knobs → immediate process cutover.
+        Hostlist-only → write overlay now; restart now if spacing allows, else defer one flush.
+        """
         normalized = self._normalize_steps(steps)
         normalized = self._coalesce_list_steps(normalized)
         if not normalized:
@@ -177,10 +196,16 @@ class CutoverManager:
                 pass
 
         applied: list[dict[str, Any]] = []
+        list_changed = False
+        hard_restart = False
         try:
             for step in normalized:
-                self._apply_one_mutation(step, backend="zapret")
+                changed = self._apply_one_mutation(step, backend="zapret")
                 applied.append({"kind": step.kind, "value": step.value, "reason": step.reason})
+                if changed == "lists":
+                    list_changed = True
+                elif changed in {"settings", "mods", "restart"}:
+                    hard_restart = True
 
             aborted = self._abort_if_backend_changed("zapret")
             if aborted is not None:
@@ -189,6 +214,7 @@ class CutoverManager:
             if not was_running:
                 self._rebuild_snapshot_only()
                 self.snapshot()
+                self._clear_deferred_list_restart()
                 return {
                     "ok": True,
                     "applied": applied,
@@ -198,60 +224,57 @@ class CutoverManager:
                     "backend": "zapret",
                 }
 
-            self._rebuild_snapshot_only()
-            aborted = self._abort_if_backend_changed("zapret")
-            if aborted is not None:
-                return aborted
-            slot_b = self._stage_candidate_b()
-            self._log("info", "Orchestrator staged candidate B", runtime=str(slot_b), steps=len(applied))
+            if hard_restart:
+                self._clear_deferred_list_restart()
+                if list_changed:
+                    self._hot_reload_classic_lists()
+                return self._classic_cutover_and_probe(
+                    applied=applied,
+                    baseline=baseline,
+                    overlay_checkpoint=overlay_checkpoint,
+                    probe_targets=probe_targets,
+                    required_hosts=required_hosts,
+                )
 
-            # Stage B while A still runs, then soft-kill A and start B immediately.
-            # (WinDivert cannot run two captures — gap is minimized, not overlap.)
-            aborted = self._abort_if_backend_changed("zapret")
-            if aborted is not None:
-                return aborted
-            if hasattr(self.context.processes, "hot_replace_zapret_runtime"):
-                started = self.context.processes.hot_replace_zapret_runtime(slot_b)
-            else:
+            if list_changed:
+                self._hot_reload_classic_lists()
+                batch_size = sum(1 for item in applied if item.get("kind") in {"add_domain", "add_ip", "exclude_domain"})
+                if self._list_restart_allowed(batch_size=max(1, batch_size or len(applied))):
+                    self._clear_deferred_list_restart()
+                    result = self._classic_cutover_and_probe(
+                        applied=applied,
+                        baseline=baseline,
+                        overlay_checkpoint=overlay_checkpoint,
+                        probe_targets=probe_targets,
+                        required_hosts=required_hosts,
+                    )
+                    if result.get("ok") and result.get("restarted"):
+                        self._note_list_restart()
+                    return result
+                due_in = self._arm_deferred_list_restart(
+                    probe_targets=probe_targets,
+                    required_hosts=required_hosts,
+                )
                 try:
-                    self.context.processes.stop_component("zapret")
-                except Exception as error:
-                    self._log("warning", "Orchestrator stop A failed", error=str(error))
-                aborted = self._abort_if_backend_changed("zapret")
-                if aborted is not None:
-                    return aborted
-                started = self.context.processes.start_zapret_from_runtime(slot_b)
-            restarted = str(getattr(started, "status", "")) == "running"
-            if not restarted:
-                self._full_rollback(baseline, overlay_checkpoint=overlay_checkpoint)
+                    self.context.processes.pin_orchestrator_runtime(None)
+                except Exception:
+                    pass
+                self.snapshot()
+                self._log(
+                    "info",
+                    "Orchestrator deferred classic list restart",
+                    due_in_s=round(due_in, 1),
+                    interval_s=round(self._adaptive_list_restart_interval_s(batch_size=max(1, batch_size)), 1),
+                    steps=len(applied),
+                )
                 return {
-                    "ok": False,
-                    "applied": [],
-                    "skipped": applied,
-                    "results": [],
+                    "ok": True,
+                    "applied": applied,
+                    "skipped": [],
+                    "results": [{"ok": True, "restarted": False, "deferred_restart": True, "hot_reload": True}],
                     "restarted": False,
-                    "rolled_back": True,
-                    "error": str(getattr(started, "last_error", "") or "start_b_failed"),
-                    "backend": "zapret",
-                }
-
-            time.sleep(self._settle_s)
-            targets = list(probe_targets or [])
-            ok = True
-            if targets:
-                results = self._probe(targets)
-                ok = probe_required_ok(results, required_hosts=required_hosts or [])
-            if not ok:
-                self._log("info", "Orchestrator candidate B failed probe — full rollback")
-                self._full_rollback(baseline, overlay_checkpoint=overlay_checkpoint)
-                return {
-                    "ok": False,
-                    "applied": [],
-                    "skipped": applied,
-                    "results": [],
-                    "restarted": True,
-                    "rolled_back": True,
-                    "error": "probe_failed",
+                    "deferred_restart": True,
+                    "due_in_s": due_in,
                     "backend": "zapret",
                 }
 
@@ -259,19 +282,12 @@ class CutoverManager:
                 self.context.processes.pin_orchestrator_runtime(None)
             except Exception:
                 pass
-            self.snapshot(force_runtime=slot_b)
-            try:
-                self.context.processes.remember_auto_runtime(slot_b)
-                self.context.processes._cleanup_inactive_zapret_runtimes()
-            except Exception:
-                pass
             return {
                 "ok": True,
                 "applied": applied,
                 "skipped": [],
-                "results": [{"ok": True, "restarted": True, "runtime": str(slot_b)}],
-                "restarted": True,
-                "runtime": str(slot_b),
+                "results": [{"ok": True, "restarted": False}],
+                "restarted": False,
                 "backend": "zapret",
             }
         except Exception as error:
@@ -290,6 +306,211 @@ class CutoverManager:
                 "rolled_back": True,
                 "backend": "zapret",
             }
+
+    def _adaptive_list_restart_interval_s(self, *, batch_size: int = 1) -> float:
+        now = time.monotonic()
+        self._list_restart_times = [t for t in self._list_restart_times if (now - t) <= _LIST_RESTART_WINDOW_S]
+        count = len(self._list_restart_times)
+        interval = _LIST_RESTART_BASE_S * (1.55 ** max(0, count))
+        # Large batched domain dumps are worth applying sooner.
+        if batch_size >= 8:
+            interval *= 0.65
+        elif batch_size >= 4:
+            interval *= 0.8
+        return max(_LIST_DEBOUNCE_QUIET_S, min(_LIST_RESTART_MAX_S, interval))
+
+    def _list_restart_allowed(self, *, batch_size: int = 1) -> bool:
+        if self._last_list_restart_at <= 0:
+            return True
+        interval = self._adaptive_list_restart_interval_s(batch_size=batch_size)
+        return (time.monotonic() - self._last_list_restart_at) >= interval
+
+    def _note_list_restart(self) -> None:
+        now = time.monotonic()
+        self._last_list_restart_at = now
+        self._list_restart_times.append(now)
+        self._list_restart_times = [t for t in self._list_restart_times if (now - t) <= _LIST_RESTART_WINDOW_S]
+
+    def _arm_deferred_list_restart(
+        self,
+        *,
+        probe_targets: list[dict[str, str]] | None,
+        required_hosts: list[str] | None,
+    ) -> float:
+        now = time.monotonic()
+        interval = self._adaptive_list_restart_interval_s()
+        if self._last_list_restart_at > 0:
+            due = self._last_list_restart_at + interval
+        else:
+            due = now + _LIST_DEBOUNCE_QUIET_S
+        # While domains keep arriving, wait a short quiet period — but never past MAX.
+        if self._deferred_list_restart:
+            due = max(due, now + _LIST_DEBOUNCE_QUIET_S)
+        cap = (self._last_list_restart_at or now) + _LIST_RESTART_MAX_S
+        due = min(max(due, now + 1.0), cap)
+        self._deferred_list_restart = True
+        self._deferred_list_due_at = due
+        if probe_targets:
+            self._deferred_probe_targets = list(probe_targets)
+        if required_hosts:
+            self._deferred_required_hosts = list(required_hosts)
+        return max(0.0, due - now)
+
+    def _clear_deferred_list_restart(self) -> None:
+        self._deferred_list_restart = False
+        self._deferred_list_due_at = 0.0
+        self._deferred_probe_targets = []
+        self._deferred_required_hosts = []
+
+    def has_deferred_list_restart(self) -> bool:
+        return bool(self._deferred_list_restart)
+
+    def flush_deferred_list_restart(self) -> dict[str, Any] | None:
+        """One delayed classic restart after coalesced list learning."""
+        if not self._deferred_list_restart:
+            return None
+        if time.monotonic() < self._deferred_list_due_at:
+            return None
+        if self._runtime_backend() != "zapret":
+            self._clear_deferred_list_restart()
+            return None
+        aborted = self._abort_if_backend_changed("zapret")
+        if aborted is not None:
+            self._clear_deferred_list_restart()
+            return aborted
+        if not self._zapret_running():
+            self._rebuild_snapshot_only()
+            self._clear_deferred_list_restart()
+            return {"ok": True, "restarted": False, "deferred_restart": False, "backend": "zapret"}
+
+        baseline = self.snapshot()
+        overlay_checkpoint = self._overlay_checkpoint()
+        live_a = getattr(self.context.processes, "_current_zapret_runtime", None)
+        if live_a is not None:
+            self._slot_a = Path(live_a)
+            try:
+                self.context.processes.pin_orchestrator_runtime(self._slot_a)
+            except Exception:
+                pass
+        applied = [{"kind": "lists", "value": "deferred", "reason": "deferred_list_restart"}]
+        self._hot_reload_classic_lists()
+        probe_targets = list(self._deferred_probe_targets)
+        required_hosts = list(self._deferred_required_hosts)
+        self._clear_deferred_list_restart()
+        self._log("info", "Orchestrator flushing deferred classic list restart")
+        result = self._classic_cutover_and_probe(
+            applied=applied,
+            baseline=baseline,
+            overlay_checkpoint=overlay_checkpoint,
+            probe_targets=probe_targets,
+            required_hosts=required_hosts,
+        )
+        if result.get("ok") and result.get("restarted"):
+            self._note_list_restart()
+        return result
+
+    def _classic_cutover_and_probe(
+        self,
+        *,
+        applied: list[dict[str, Any]],
+        baseline: dict[str, Any],
+        overlay_checkpoint: dict[str, Any] | None,
+        probe_targets: list[dict[str, str]] | None,
+        required_hosts: list[str] | None,
+    ) -> dict[str, Any]:
+        self._rebuild_snapshot_only()
+        aborted = self._abort_if_backend_changed("zapret")
+        if aborted is not None:
+            return aborted
+        slot_b = self._stage_candidate_b()
+        self._log("info", "Orchestrator staged candidate B", runtime=str(slot_b), steps=len(applied))
+
+        aborted = self._abort_if_backend_changed("zapret")
+        if aborted is not None:
+            return aborted
+        if hasattr(self.context.processes, "hot_replace_zapret_runtime"):
+            started = self.context.processes.hot_replace_zapret_runtime(slot_b)
+        else:
+            try:
+                self.context.processes.stop_component("zapret")
+            except Exception as error:
+                self._log("warning", "Orchestrator stop A failed", error=str(error))
+            aborted = self._abort_if_backend_changed("zapret")
+            if aborted is not None:
+                return aborted
+            started = self.context.processes.start_zapret_from_runtime(slot_b)
+        restarted = str(getattr(started, "status", "")) == "running"
+        if not restarted:
+            self._full_rollback(baseline, overlay_checkpoint=overlay_checkpoint)
+            return {
+                "ok": False,
+                "applied": [],
+                "skipped": applied,
+                "results": [],
+                "restarted": False,
+                "rolled_back": True,
+                "error": str(getattr(started, "last_error", "") or "start_b_failed"),
+                "backend": "zapret",
+            }
+
+        time.sleep(self._settle_s)
+        targets = list(probe_targets or [])
+        ok = True
+        if targets:
+            results = self._probe(targets)
+            ok = probe_required_ok(results, required_hosts=required_hosts or [])
+        if not ok:
+            self._log("info", "Orchestrator candidate B failed probe — full rollback")
+            self._full_rollback(baseline, overlay_checkpoint=overlay_checkpoint)
+            return {
+                "ok": False,
+                "applied": [],
+                "skipped": applied,
+                "results": [],
+                "restarted": True,
+                "rolled_back": True,
+                "error": "probe_failed",
+                "backend": "zapret",
+            }
+
+        try:
+            self.context.processes.pin_orchestrator_runtime(None)
+        except Exception:
+            pass
+        self.snapshot(force_runtime=slot_b)
+        try:
+            self.context.processes.remember_auto_runtime(slot_b)
+            self.context.processes._cleanup_inactive_zapret_runtimes()
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "applied": applied,
+            "skipped": [],
+            "results": [{"ok": True, "restarted": True, "runtime": str(slot_b)}],
+            "restarted": True,
+            "runtime": str(slot_b),
+            "backend": "zapret",
+        }
+
+    def _hot_reload_classic_lists(self) -> None:
+        """Rewrite hostlists/ipsets under the live winws runtime (mtime path + deferred restart)."""
+        processes = self.context.processes
+        live = getattr(processes, "_current_zapret_runtime", None)
+        if live is None:
+            self._rebuild_snapshot_only()
+            return
+        lists_dir = Path(live) / "lists"
+        try:
+            lists_dir.mkdir(parents=True, exist_ok=True)
+            if hasattr(processes, "_ensure_zapret_user_lists"):
+                processes._ensure_zapret_user_lists(lists_dir)
+            if hasattr(processes, "_materialize_visible_merged_runtime"):
+                processes._materialize_visible_merged_runtime(Path(live))
+            self._log("info", "Orchestrator hot-reloaded classic lists", runtime=str(live))
+        except Exception as error:
+            self._log("warning", "Classic list hot-reload failed", error=str(error))
+            self._rebuild_snapshot_only()
 
     def _apply_plan_zapret2(
         self,
@@ -321,10 +542,18 @@ class CutoverManager:
                 if changed == "restart":
                     needs_restart = True
 
-            # List-only changes: bol-van docs — files reload automatically, no restart.
+            # List-only changes: rematerialize watched files so winws2 mtime-reload picks them up.
             aborted = self._abort_if_backend_changed("zapret2")
             if aborted is not None:
                 return aborted
+            if was_running and not needs_restart:
+                try:
+                    configs = Path(self.context.paths.configs_dir)
+                    auto_root = Path(self.context.paths.runtime_dir) / "zapret2" / "lists_auto"
+                    zapret2_hub.materialize_auto_lists(configs, auto_root)
+                    self._log("info", "Orchestrator rematerialized Zapret2 auto lists (no restart)")
+                except Exception as error:
+                    self._log("warning", "Zapret2 list rematerialize failed", error=str(error))
             if was_running and needs_restart:
                 # Soft-kill then restart — avoid deleting runtime between stop and start.
                 try:
@@ -914,6 +1143,9 @@ class CutoverManager:
                     store.add_domains(harvested_domains, reason=f"enable_service:{step.value}")
                 if harvested_ips:
                     store.add_ips(harvested_ips, reason=f"enable_service:{step.value}")
+            # Gaming/Fortnite also flip WinDivert knobs → need process restart on classic.
+            if live_backend == "zapret" and step.value in {"gaming", "fortnite"}:
+                return "settings"
             return "lists"
 
         if step.kind == "ipset":

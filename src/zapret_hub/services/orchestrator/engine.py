@@ -35,7 +35,7 @@ _STATUS_TEXT = {
 _LONG_TUNE_S = 30.0
 _FAIL_THRESHOLD = 2
 _PROCESS_FAIL_THRESHOLD = 1  # SYN_SENT from a known app is enough
-_SCAN_INTERVAL_S = 2.0
+_SCAN_INTERVAL_S = 4.0
 _MAX_STEPS = 12
 _EXHAUSTED_COOLDOWN_S = 900.0
 _SYN_SENT_MIN_AGE_HINT = 2  # require repeated fails; SYN_SENT alone is normal
@@ -135,7 +135,7 @@ class OrchestratorEngine:
         self._status: OrchestratorStatus = "idle"
         self._detail = ""
         self._zapret_active = False
-        self._min_incident_interval_s = 6.0
+        self._min_incident_interval_s = 20.0
         self._last_incident_at = 0.0
         self._loop_interval_s = 1.0
         self._last_scan_at = 0.0
@@ -866,6 +866,21 @@ class OrchestratorEngine:
                 self._handle_incident(incident)
                 continue
             now = time.monotonic()
+            if self._mode == "auto" and self._zapret_active and not self._busy:
+                try:
+                    cutover = self._ensure_cutover()
+                    if cutover.has_deferred_list_restart():
+                        flushed = cutover.flush_deferred_list_restart()
+                        if flushed is not None:
+                            self._log(
+                                "info",
+                                "Orchestrator deferred list restart flushed",
+                                ok=bool(flushed.get("ok")),
+                                restarted=bool(flushed.get("restarted")),
+                                error=str(flushed.get("error") or ""),
+                            )
+                except Exception as error:
+                    self._log("warning", "Orchestrator deferred list flush failed", error=str(error))
             if (now - self._last_scan_at) >= _SCAN_INTERVAL_S:
                 self._last_scan_at = now
                 if self._mode == "auto" and self._zapret_active and not self._busy:
