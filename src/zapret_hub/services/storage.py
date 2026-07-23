@@ -67,7 +67,7 @@ class StorageManager:
                 "source": "https://github.com/Flowseal/tg-ws-proxy",
                 "command": ["TgWsProxy_windows.exe"],
                 "enabled": True,
-                "autostart": False,
+                "autostart": True,
             },
             {
                 "id": "xbox-dns",

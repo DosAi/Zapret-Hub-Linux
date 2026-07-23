@@ -31,6 +31,18 @@ class ConnSample:
     domain: str = ""
 
 
+_DISCORD_VOICE_UDP_PORTS = frozenset(range(19294, 19345)) | frozenset(range(50000, 50101))
+_INTERESTING_UDP_PORTS = frozenset({3478, 3479, 3480, 5222, 5060, 5062, 443}) | _DISCORD_VOICE_UDP_PORTS
+
+
+def is_interesting_udp_port(port: int) -> bool:
+    try:
+        value = int(port)
+    except Exception:
+        return False
+    return value in _INTERESTING_UDP_PORTS
+
+
 def _host_from_target(value: str) -> str:
     raw = (value or "").strip()
     if raw.upper().startswith("PING:"):
@@ -254,14 +266,25 @@ class SignalCollector:
             samples = self._snapshot_psutil(psutil, limit=limit)
             if not samples:
                 samples = self._snapshot_windows_netstat(limit=limit)
-        # Prefer failing / interesting states first.
-        samples.sort(key=lambda s: (0 if (s.state or "").upper() in {"SYN_SENT", "SYN_RECEIVED"} else 1, s.proto != "udp"))
+        # Prefer failing / interesting states first; known apps before IDE noise.
+        samples.sort(
+            key=lambda s: (
+                0 if (s.state or "").upper() in {"SYN_SENT", "SYN_RECEIVED"} else 1,
+                0 if any(
+                    marker in (s.process or "").lower().replace("\\", "/")
+                    for marker in ("/discord", "/spotify", "/steam", "/epic", "/telegram", "discord", "spotify", "fortnite")
+                )
+                else 1,
+                s.proto != "udp",
+            )
+        )
         if resolve_dns:
-            self._enrich_domains(samples, max_lookups=8)
+            self._enrich_domains(samples, max_lookups=max(8, min(48, limit // 4 or 8)))
         return samples[:limit]
 
     def _snapshot_psutil(self, psutil_mod: Any, *, limit: int) -> list[ConnSample]:
-        samples: list[ConnSample] = []
+        priority: list[ConnSample] = []
+        regular: list[ConnSample] = []
         try:
             for conn in psutil_mod.net_connections(kind="inet"):
                 if not conn.raddr:
@@ -281,21 +304,39 @@ class SignalCollector:
                     "",
                 }:
                     continue
-                samples.append(
-                    ConnSample(
-                        remote_ip=remote_ip,
-                        remote_port=int(conn.raddr.port),
-                        proto=proto,
-                        state=state,
-                        pid=pid,
-                        process=process,
+                sample = ConnSample(
+                    remote_ip=remote_ip,
+                    remote_port=int(conn.raddr.port),
+                    proto=proto,
+                    state=state,
+                    pid=pid,
+                    process=process,
+                )
+                blob = process.lower().replace("\\", "/")
+                important = state.upper() in {"SYN_SENT", "SYN_RECEIVED"} or any(
+                    marker in blob
+                    for marker in (
+                        "/discord",
+                        "discord",
+                        "/spotify",
+                        "spotify",
+                        "/steam",
+                        "/epic",
+                        "fortnite",
+                        "/telegram",
+                        "/battle.net",
+                        "/riot",
                     )
                 )
-                if len(samples) >= limit * 2:
+                if important:
+                    priority.append(sample)
+                else:
+                    regular.append(sample)
+                if len(priority) + len(regular) >= max(limit * 4, 240):
                     break
         except Exception:
             return []
-        return samples
+        return [*priority, *regular]
 
     def _process_name(self, pid: int, psutil_mod: Any | None = None) -> str:
         if pid <= 0:
@@ -306,7 +347,16 @@ class SignalCollector:
         name = ""
         if psutil_mod is not None:
             try:
-                name = str(psutil_mod.Process(pid).name() or "")
+                proc = psutil_mod.Process(pid)
+                # Prefer full path so Discord\\Update.exe maps to discord.
+                try:
+                    exe = str(proc.exe() or "").strip()
+                except Exception:
+                    exe = ""
+                if exe:
+                    name = exe
+                else:
+                    name = str(proc.name() or "")
             except Exception:
                 name = ""
         if not name:
@@ -371,19 +421,37 @@ class SignalCollector:
 
     def _enrich_domains(self, samples: list[ConnSample], *, max_lookups: int = 8) -> None:
         lookups = 0
-        for sample in samples:
-            if sample.domain or lookups >= max_lookups:
-                continue
-            state = (sample.state or "").upper()
-            if state not in {"SYN_SENT", "SYN_RECEIVED"} and sample.remote_port not in {443, 80, 5222, 3478}:
-                continue
-            try:
-                socket.setdefaulttimeout(0.35)
-                name, _aliases, _ips = socket.gethostbyaddr(sample.remote_ip)
-                sample.domain = str(name or "").lower().rstrip(".")
-                lookups += 1
-            except Exception:
-                continue
+        previous_timeout = socket.getdefaulttimeout()
+        ordered = sorted(
+            samples,
+            key=lambda s: 0 if (s.state or "").upper() in {"SYN_SENT", "SYN_RECEIVED"} else 1,
+        )
+        try:
+            socket.setdefaulttimeout(0.35)
+            for sample in ordered:
+                if sample.domain or lookups >= max_lookups:
+                    continue
+                state = (sample.state or "").upper()
+                if state not in {"SYN_SENT", "SYN_RECEIVED"} and sample.remote_port not in {
+                    443,
+                    80,
+                    5222,
+                    3478,
+                    2053,
+                    2083,
+                    2087,
+                    2096,
+                    8443,
+                }:
+                    continue
+                try:
+                    name, _aliases, _ips = socket.gethostbyaddr(sample.remote_ip)
+                    sample.domain = str(name or "").lower().rstrip(".")
+                    lookups += 1
+                except Exception:
+                    continue
+        finally:
+            socket.setdefaulttimeout(previous_timeout)
 
     def _snapshot_windows_netstat(self, *, limit: int = 80) -> list[ConnSample]:
         import subprocess

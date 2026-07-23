@@ -49,6 +49,27 @@ PROCESS_SERVICE_MAP: dict[str, str] = {
     "netflix": "netflix",
 }
 
+# Install-folder markers for generic updaters (Update.exe / Squirrel / etc.).
+_PATH_SERVICE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("/discord/", "discord"),
+    ("/discordptb/", "discord"),
+    ("/discordcanary/", "discord"),
+    ("/spotify/", "spotify"),
+    ("/telegram desktop/", "telegram-desktop"),
+    ("/telegramdesktop/", "telegram-desktop"),
+    ("/steam/", "gaming"),
+    ("/epic games/", "epic-games"),
+    ("/epicgames/", "epic-games"),
+    ("/battle.net/", "battle-net"),
+    ("/riot games/", "riot-games"),
+    ("/ubisoft/", "ubisoft"),
+    ("/ubisoft game launcher/", "ubisoft"),
+    ("/figma/", "figma"),
+)
+_UPDATER_PROCESS_NAMES = frozenset({"update", "updater", "updated", "squirrel", "install", "installer"})
+# Broad CDN buckets that lose to a process-mapped app service.
+_BROAD_CDN_SERVICES = frozenset({"cloudflare", "clouds"})
+
 
 def _normalize_host(value: str) -> str:
     host = (value or "").strip().lower().rstrip(".")
@@ -89,6 +110,7 @@ def _iter_rule_domains(rule: ServiceRule) -> Iterable[str]:
 
 def _iter_rule_ips(rule: ServiceRule) -> Iterable[str]:
     yield from rule.ipset_all
+    yield from getattr(rule, "identity_networks", ()) or ()
     for name, entries in rule.extra_lists:
         if "ipset" in name.lower():
             yield from entries
@@ -166,15 +188,42 @@ class ServiceMapper:
                 continue
             if _ip_in_network(address, network):
                 seen.add(service_id)
-                hits.append(MapHit(service_id=service_id, kind="ip", matched=network, score=1.0))
+                # Prefer tighter CIDRs so Discord /20 beats Cloudflare /15.
+                score = 1.0
+                try:
+                    if "/" in network:
+                        score = float(ipaddress.ip_network(network, strict=False).prefixlen)
+                except ValueError:
+                    score = 1.0
+                hits.append(MapHit(service_id=service_id, kind="ip", matched=network, score=score))
         return hits
 
     def map_process(self, process: str) -> list[MapHit]:
-        name = _normalize_process(process)
+        raw = (process or "").strip()
+        name = _normalize_process(raw)
         if not name:
             return []
         hits: list[MapHit] = []
         seen: set[str] = set()
+        path_blob = raw.replace("\\", "/").lower()
+        # Generic updaters (Update.exe) only count when the install path is known.
+        if name in _UPDATER_PROCESS_NAMES or name.endswith("update") or name.endswith("updater"):
+            for marker, service_id in _PATH_SERVICE_MARKERS:
+                if marker in path_blob and service_id not in seen:
+                    seen.add(service_id)
+                    hits.append(
+                        MapHit(service_id=service_id, kind="process", matched=f"{marker}{name}", score=3.0)
+                    )
+                    break
+        else:
+            for marker, service_id in _PATH_SERVICE_MARKERS:
+                if marker in path_blob and service_id not in seen and (
+                    name.startswith(service_id.split("-")[0]) or service_id.replace("-", "") in name.replace("-", "")
+                ):
+                    # Path confirms a known app binary even when the exe name is odd.
+                    seen.add(service_id)
+                    hits.append(MapHit(service_id=service_id, kind="process", matched=marker, score=2.5))
+                    break
         for key, service_id in PROCESS_SERVICE_MAP.items():
             key_norm = _normalize_process(key)
             if key_norm == name or key_norm in name or name in key_norm:
@@ -273,6 +322,13 @@ class ServiceMapper:
                 matched=strongest.matched,
                 score=score,
             )
+        # Prefer app-specific services over broad CDN buckets when process evidence exists.
+        process_services = {hit.service_id for hit in self.map_process(process)}
+        specific = process_services - _BROAD_CDN_SERVICES
+        if specific:
+            for broad in list(_BROAD_CDN_SERVICES):
+                if broad in best and specific:
+                    best.pop(broad, None)
         return sorted(best.values(), key=lambda item: item.score, reverse=True)
 
     def primary_service(

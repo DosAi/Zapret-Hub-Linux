@@ -247,8 +247,9 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
     scheduleModeCommit(id);
   };
   const togglePower = () => {
-    if (status === "starting" || status === "stopping") return;
-    const nextOn = status !== "on";
+    // Allow cancel during "starting" (incl. Auto tuning restarts). Only block while already stopping.
+    if (status === "stopping") return;
+    const nextOn = status === "off" || status === "error";
     if (nextOn && active === "goshkow-vpn" && !state.ui.hasValidVpnKey) {
       onConnectVpn?.();
       return;
@@ -294,7 +295,7 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
                 style={{ zIndex: selected ? 3 : visible ? 2 : 0, pointerEvents: visible ? "auto" : "none" }}
               >
                 {selected ? (
-                  <PowerButton data-sound={on ? "off" : "none"} accent={modeColor[id]} on={on} status={status} disabled={status === "starting" || status === "stopping"} onClick={togglePower} />
+                  <PowerButton data-sound={on || status === "starting" ? "off" : "none"} accent={modeColor[id]} on={on || status === "starting"} status={status} disabled={status === "stopping"} onClick={togglePower} />
                 ) : (
                   <PowerButton
                     variant="side"

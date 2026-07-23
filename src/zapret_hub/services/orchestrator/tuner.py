@@ -16,9 +16,23 @@ class TunerStep:
 
 _OVERBLOCK_SYMPTOMS = frozenset({"suspect_overblock", "tls_fail", "http_block", "tcp_timeout"})
 _MISS_SYMPTOMS = frozenset({"external_miss"})
+# Real gaming stacks that need GameFilter / Gaming Set. Stock Discord/YouTube are
+# hostlist services — Auto must not treat them as reasons to widen WinDivert.
 _GAMING_SERVICES = frozenset(
-    {"discord", "gaming", "fortnite", "epic-games", "ubisoft", "riot-games", "battle-net"}
+    {"gaming", "fortnite", "epic-games", "ubisoft", "riot-games", "battle-net"}
 )
+
+
+def _is_protected_catalog_host(host: str) -> bool:
+    from zapret_hub.services.service_rules import is_stock_catalog_host
+
+    return is_stock_catalog_host(host)
+
+
+def _is_stock_service(service_id: str) -> bool:
+    from zapret_hub.services.service_rules import is_stock_service
+
+    return is_stock_service(service_id)
 
 
 def _mod_looks_relevant(mod: Any, *, services: list[str], process: str = "") -> bool:
@@ -210,7 +224,9 @@ class SmartTuner:
                         label_en=f"Adding {preview_ip}",
                     )
                 )
-        # 2) Service enable + one-shot catalog seed (bypass-youtube-discord.lua lists).
+        # 2) Service enable + one-shot catalog seed.
+        # Stock services are already applied by Hub materialization — Auto only
+        # layers NEW domains/IPs on top. Never re-seed Cloudflare CIDRs etc.
         from zapret_hub.services.orchestrator import zapret2_hub
 
         for service_id in services:
@@ -225,14 +241,40 @@ class SmartTuner:
                         label_en=f"Enabling access for {service_id}",
                     )
                 )
-            should_seed = just_enabled or (
-                symptom in _MISS_SYMPTOMS and service_id in {"youtube", "discord"}
-            )
+            # Stock catalogs are frozen under Auto — skip bulk seed/re-seed.
+            if _is_stock_service(service_id) and not just_enabled:
+                continue
+            if _is_stock_service(service_id):
+                # First enable of a stock service: domains only (classic merge
+                # handles lists). Skip IP harvest — Cloudflare CIDRs break Discord.
+                harvested = zapret2_hub.harvest_service_domains([service_id])
+                configs_hint = str(current.get("configs_dir") or "")
+                if configs_hint:
+                    harvested = zapret2_hub.missing_domains(Path(configs_hint), harvested)
+                if harvested:
+                    preview = harvested[0] if len(harvested) == 1 else f"{len(harvested)} доменов"
+                    add(
+                        TunerStep(
+                            kind="add_domain",
+                            value="\n".join(harvested),
+                            reason="service_seed",
+                            label_ru=f"Добавляю каталог {service_id}: {preview}",
+                            label_en=f"Seeding {service_id} catalog: {preview}",
+                        )
+                    )
+                continue
+            should_seed = just_enabled or symptom in {
+                "service_detected",
+                "external_miss",
+                "tcp_timeout",
+                "tls_fail",
+                "suspect_overblock",
+                "http_block",
+            }
             if not should_seed:
                 continue
             harvested = zapret2_hub.harvest_service_domains([service_id])
             harvested_ips = zapret2_hub.harvest_service_ips([service_id])
-            # Prefer only-missing when a configs dir is provided via current hint.
             configs_hint = str(current.get("configs_dir") or "")
             if configs_hint:
                 harvested = zapret2_hub.missing_domains(Path(configs_hint), harvested)
@@ -275,20 +317,22 @@ class SmartTuner:
                 )
 
         if symptom in _OVERBLOCK_SYMPTOMS and domain and domain_in_merged:
-            add(
-                TunerStep(
-                    kind="exclude_domain",
-                    value=domain,
-                    reason="over_block",
-                    label_ru=f"Исключаю {domain} из агрессивной обработки",
-                    label_en=f"Excluding {domain} from aggressive handling",
+            # Never Auto-exclude stock catalog hosts (Discord/YouTube/CF/…).
+            if not _is_protected_catalog_host(domain):
+                add(
+                    TunerStep(
+                        kind="exclude_domain",
+                        value=domain,
+                        reason="over_block",
+                        label_ru=f"Исключаю {domain} из агрессивной обработки",
+                        label_en=f"Excluding {domain} from aggressive handling",
+                    )
                 )
-            )
 
-        # 4) Game filter.
-        if proto == "udp" or service_set & _GAMING_SERVICES:
+        # 4) Game filter — only for real UDP/gaming failures, never for stock HTTPS.
+        if proto == "udp" and (service_set & _GAMING_SERVICES or "fortnite" in service_set):
             game_mode = str(current.get("game_filter", "disabled") or "disabled")
-            if proto == "udp" and game_mode in {"disabled", "tcp"}:
+            if game_mode in {"disabled", "tcp"}:
                 add(
                     TunerStep(
                         kind="game_filter",
@@ -298,19 +342,9 @@ class SmartTuner:
                         label_en="Enabling gaming mode for UDP",
                     )
                 )
-            elif game_mode == "disabled" and services:
-                add(
-                    TunerStep(
-                        kind="game_filter",
-                        value="tcpudp",
-                        reason="gaming_service",
-                        label_ru="Включаю игровой режим TCP+UDP",
-                        label_en="Enabling TCP+UDP gaming mode",
-                    )
-                )
 
-        # 5) IPSet any on miss / fortnite.
-        if (symptom in _MISS_SYMPTOMS or "fortnite" in service_set) and str(current.get("ipset", "loaded")) != "any":
+        # 5) IPSet any — Fortnite only. Never widen to "any" for Discord/YouTube/CF.
+        if "fortnite" in service_set and str(current.get("ipset", "loaded")) != "any":
             add(
                 TunerStep(
                     kind="ipset",
@@ -321,8 +355,8 @@ class SmartTuner:
                 )
             )
 
-        # 6) Gaming set priors.
-        if service_set & _GAMING_SERVICES or known_conflict:
+        # 6) Gaming set priors — gaming/fortnite only, not stock Discord HTTPS.
+        if (service_set & _GAMING_SERVICES) or known_conflict:
             current_set = str(current.get("gaming_set", "stun-wide-base") or "stun-wide-base")
             if proto == "udp" and current_set != "udp-first":
                 add(

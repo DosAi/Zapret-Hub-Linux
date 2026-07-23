@@ -1,13 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   DndContext,
+  DragOverlay,
   PointerSensor,
   closestCenter,
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragStartEvent,
 } from "@dnd-kit/core";
-import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import {
+  SortableContext,
+  arrayMove,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { getBridge } from "@/bridge";
 import { applyMarketplaceMods, useAppState, useBridge, patchOptimistic } from "@/hooks/useBridgeState";
@@ -61,7 +69,7 @@ function CompatPill({ value }: { value: MarketplaceCompatibility }) {
   );
 }
 
-function SortableLocalCard({
+function ModCardBody({
   mod,
   locale,
   compatibility,
@@ -70,42 +78,24 @@ function SortableLocalCard({
   onUpdate,
   onOpenSite,
   onDelete,
+  dragHandle,
 }: {
   mod: Mod;
   locale: string;
   compatibility: MarketplaceCompatibility;
   downloading: boolean;
-  onToggle: (on: boolean) => void;
-  onUpdate: () => void;
-  onOpenSite: () => void;
-  onDelete: () => void;
+  onToggle?: (on: boolean) => void;
+  onUpdate?: () => void;
+  onOpenSite?: () => void;
+  onDelete?: () => void;
+  dragHandle?: ReactNode;
 }) {
   const ru = locale === "ru";
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: mod.id });
   const canOpenSite = Boolean(mod.sourceUrl);
   const canUpdate = Boolean(mod.marketplaceSlug && mod.updateAvailable);
   return (
-    <article
-      ref={setNodeRef}
-      style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.72 : 1 }}
-      className="flex items-stretch gap-3 rounded-[14px] border border-line-1 bg-[color-mix(in_srgb,var(--bg-2)_88%,transparent)] px-3.5 py-3"
-    >
-      <button
-        type="button"
-        className="mt-1 grid h-8 w-6 shrink-0 cursor-grab place-items-center text-fg-mute active:cursor-grabbing"
-        aria-label={ru ? "Перетащить" : "Drag"}
-        {...attributes}
-        {...listeners}
-      >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-          <circle cx="8" cy="6" r="1.5" />
-          <circle cx="8" cy="12" r="1.5" />
-          <circle cx="8" cy="18" r="1.5" />
-          <circle cx="16" cy="6" r="1.5" />
-          <circle cx="16" cy="12" r="1.5" />
-          <circle cx="16" cy="18" r="1.5" />
-        </svg>
-      </button>
+    <>
+      {dragHandle}
       <ProjectCover url={mod.iconUrl} title={mod.name} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
@@ -130,13 +120,13 @@ function SortableLocalCard({
       <div className="flex shrink-0 flex-col items-end justify-between gap-2 pl-1">
         <div className="flex items-center gap-2">
           {mod.diskSize ? <span className="text-[10px] text-fg-mute">{formatFileSize(mod.diskSize)}</span> : null}
-          <IosToggle on={mod.enabled} onChange={onToggle} />
+          <IosToggle on={mod.enabled} onChange={onToggle ?? (() => undefined)} />
         </div>
         <div className="flex flex-wrap items-center justify-end gap-1">
           {canUpdate ? (
             <button
               type="button"
-              disabled={downloading}
+              disabled={downloading || !onUpdate}
               onClick={onUpdate}
               className="rounded-md bg-[rgb(var(--page-accent-rgb))] px-2 py-0.5 text-[10px] font-medium text-white disabled:opacity-50"
             >
@@ -144,15 +134,130 @@ function SortableLocalCard({
             </button>
           ) : null}
           {canOpenSite ? (
-            <button type="button" onClick={onOpenSite} className="rounded-lg border border-line-1 bg-bg-3/70 px-2.5 py-1 text-[10px] text-fg-dim transition-colors hover:border-line-2 hover:bg-bg-3 hover:text-fg">
+            <button
+              type="button"
+              onClick={onOpenSite}
+              className="rounded-lg border border-line-1 bg-bg-3/70 px-2.5 py-1 text-[10px] text-fg-dim transition-colors hover:border-line-2 hover:bg-bg-3 hover:text-fg"
+            >
               {ru ? "На сайте" : "Website"}
             </button>
           ) : null}
-          <button type="button" onClick={onDelete} className="rounded-lg border border-line-1 bg-bg-3/70 px-2.5 py-1 text-[10px] text-fg-dim transition-colors hover:border-red-400/50 hover:bg-red-500/10 hover:text-red-300">
-            {ru ? "Удалить" : "Delete"}
+          <button
+            type="button"
+            onClick={onDelete}
+            className="rounded-lg border border-line-1 bg-bg-3/70 px-2.5 py-1 text-[10px] text-fg-dim transition-colors hover:border-red-400/50 hover:bg-red-500/10 hover:text-red-300"
+          >
+            {ru ? "Удалить" : "Remove"}
           </button>
         </div>
       </div>
+    </>
+  );
+}
+
+function SortableLocalCard({
+  mod,
+  locale,
+  compatibility,
+  downloading,
+  onToggle,
+  onUpdate,
+  onOpenSite,
+  onDelete,
+}: {
+  mod: Mod;
+  locale: string;
+  compatibility: MarketplaceCompatibility;
+  downloading: boolean;
+  onToggle: (on: boolean) => void;
+  onUpdate: () => void;
+  onOpenSite: () => void;
+  onDelete: () => void;
+}) {
+  const ru = locale === "ru";
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: mod.id,
+    // Avoid a second layout animation after drop — siblings already shifted live.
+    animateLayoutChanges: () => false,
+  });
+
+  const style: CSSProperties = {
+    // Translate only — CSS.Transform also applies scale and makes cards shrink/grow.
+    transform: CSS.Translate.toString(transform),
+    transition: isDragging ? undefined : transition,
+    opacity: isDragging ? 0 : 1,
+    pointerEvents: isDragging ? "none" : undefined,
+  };
+
+  return (
+    <article
+      ref={setNodeRef}
+      style={style}
+      className="flex items-stretch gap-3 rounded-[14px] border border-line-1 bg-[color-mix(in_srgb,var(--bg-2)_88%,transparent)] px-3.5 py-3"
+    >
+      <ModCardBody
+        mod={mod}
+        locale={locale}
+        compatibility={compatibility}
+        downloading={downloading}
+        onToggle={onToggle}
+        onUpdate={onUpdate}
+        onOpenSite={onOpenSite}
+        onDelete={onDelete}
+        dragHandle={(
+          <button
+            type="button"
+            className="mt-1 grid h-8 w-6 shrink-0 cursor-grab touch-none place-items-center text-fg-mute active:cursor-grabbing"
+            aria-label={ru ? "Перетащить" : "Drag"}
+            {...attributes}
+            {...listeners}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+              <circle cx="8" cy="6" r="1.5" />
+              <circle cx="8" cy="12" r="1.5" />
+              <circle cx="8" cy="18" r="1.5" />
+              <circle cx="16" cy="6" r="1.5" />
+              <circle cx="16" cy="12" r="1.5" />
+              <circle cx="16" cy="18" r="1.5" />
+            </svg>
+          </button>
+        )}
+      />
+    </article>
+  );
+}
+
+function OverlayLocalCard({
+  mod,
+  locale,
+  compatibility,
+  downloading,
+}: {
+  mod: Mod;
+  locale: string;
+  compatibility: MarketplaceCompatibility;
+  downloading: boolean;
+}) {
+  return (
+    <article className="flex cursor-grabbing items-stretch gap-3 rounded-[14px] border border-line-2 bg-[color-mix(in_srgb,var(--bg-2)_96%,transparent)] px-3.5 py-3 shadow-[0_12px_28px_rgba(0,0,0,0.28)]">
+      <ModCardBody
+        mod={mod}
+        locale={locale}
+        compatibility={compatibility}
+        downloading={downloading}
+        dragHandle={(
+          <div className="mt-1 grid h-8 w-6 shrink-0 place-items-center text-fg-mute" aria-hidden>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="8" cy="6" r="1.5" />
+              <circle cx="8" cy="12" r="1.5" />
+              <circle cx="8" cy="18" r="1.5" />
+              <circle cx="16" cy="6" r="1.5" />
+              <circle cx="16" cy="12" r="1.5" />
+              <circle cx="16" cy="18" r="1.5" />
+            </svg>
+          </div>
+        )}
+      />
     </article>
   );
 }
@@ -167,11 +272,15 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
   const { locale } = useLocale();
   const toast = useToast();
   const ru = locale === "ru";
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+  );
   const [view, setView] = useState<InstalledView>("zapret");
   const [queued, setQueued] = useState<Set<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<{ id: string; slug: string; name: string; prefix: "mods" | "mods2" } | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const dragWidthRef = useRef<number | null>(null);
 
   useEffect(() => {
     const off = getBridge().subscribe("marketplace.download-progress", (payload) => {
@@ -210,15 +319,41 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
   const list = view === "zapret2" ? installedZapret2 : installedZapret;
   const prefix = view === "zapret2" ? "mods2" : "mods";
   const compatibility: MarketplaceCompatibility = view === "zapret2" ? "zapret2" : "zapret";
+  const itemIds = useMemo(() => list.map((m) => m.id), [list]);
+  const activeMod = activeId ? list.find((m) => m.id === activeId) ?? null : null;
+
+  const onDragStart = (event: DragStartEvent) => {
+    const id = String(event.active.id);
+    setActiveId(id);
+    const rect = event.active.rect.current.initial;
+    dragWidthRef.current = rect?.width ?? null;
+  };
+
+  const finishDrag = () => {
+    setActiveId(null);
+    dragWidthRef.current = null;
+  };
 
   const onDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
-    if (!over || active.id === over.id) return;
+    finishDrag();
+    if (!over || active.id === over.id || !state) return;
     const ids = list.map((m) => m.id);
     const oldIndex = ids.indexOf(String(active.id));
     const newIndex = ids.indexOf(String(over.id));
-    if (oldIndex < 0 || newIndex < 0) return;
-    void bridge.call(`${prefix}.reorder`, { orderedIds: arrayMove(ids, oldIndex, newIndex) });
+    if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return;
+
+    const orderedIds = arrayMove(ids, oldIndex, newIndex);
+    const byId = new Map(list.map((m) => [m.id, m]));
+    const nextList = orderedIds.map((id) => byId.get(id)!).filter(Boolean);
+
+    // Optimistic order first so drop lands in place (no second reshuffle).
+    if (prefix === "mods2") {
+      applyMarketplaceMods(state.mods || [], nextList);
+    } else {
+      applyMarketplaceMods(nextList, state.mods2 || []);
+    }
+    void bridge.call(`${prefix}.reorder`, { orderedIds });
   };
 
   const enqueue = async (mod: Mod) => {
@@ -245,7 +380,7 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
 
   return (
     <div className="relative h-full overflow-hidden">
-      <div ref={scrollerRef} className="scroll-area glass-page-scroll h-full overflow-auto" style={{ "--glass-header-height": "94px" } as React.CSSProperties}>
+      <div ref={scrollerRef} className="scroll-area glass-page-scroll h-full overflow-auto" style={{ "--glass-header-height": "94px" } as CSSProperties}>
       <div className="scroll-content px-6 pb-3 pt-[94px]">
         {list.length === 0 ? (
           <div className="grid h-40 place-content-center justify-items-center gap-3 text-center">
@@ -261,8 +396,15 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
             </button>
           </div>
         ) : (
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-            <SortableContext items={list.map((m) => m.id)} strategy={verticalListSortingStrategy}>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            modifiers={[restrictToVerticalAxis]}
+            onDragStart={onDragStart}
+            onDragCancel={finishDrag}
+            onDragEnd={onDragEnd}
+          >
+            <SortableContext items={itemIds} strategy={verticalListSortingStrategy}>
               <div className="flex flex-col gap-2.5">
                 {list.map((mod) => (
                   <SortableLocalCard
@@ -290,6 +432,18 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
                 ))}
               </div>
             </SortableContext>
+            <DragOverlay dropAnimation={null} adjustScale={false}>
+              {activeMod ? (
+                <div style={dragWidthRef.current ? { width: dragWidthRef.current } : undefined}>
+                  <OverlayLocalCard
+                    mod={activeMod}
+                    locale={locale}
+                    compatibility={compatibility}
+                    downloading={Boolean(activeMod.marketplaceSlug && queued.has(activeMod.marketplaceSlug))}
+                  />
+                </div>
+              ) : null}
+            </DragOverlay>
           </DndContext>
         )}
       </div>

@@ -332,6 +332,11 @@ export type Commands = {
   "onboarding.cancel": { in: void; out: void };
   "orchestrator.status": { in: void; out: OrchestratorStatus };
   "orchestrator.setMode": { in: { mode: "manual" | "auto"; backend?: "zapret" | "zapret2" }; out: OrchestratorStatus };
+  /** Clear Auto overlay + knowledge so Auto can learn from scratch. Battle lists stay intact. */
+  "orchestrator.resetAuto": {
+    in: { backend?: "zapret" | "zapret2" } | void;
+    out: { started: boolean } | { ok: boolean; overlay?: boolean; knowledge?: boolean; memory?: boolean; error?: string };
+  };
   /** Auto onboarding bootstrap (YT+Discord probes, trusted general). Backend runs async. */
   "orchestrator.bootstrap": {
     in: { youtube?: boolean; discord?: boolean } | void;

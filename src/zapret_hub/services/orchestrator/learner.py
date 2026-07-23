@@ -3,47 +3,100 @@ from __future__ import annotations
 import ipaddress
 from pathlib import Path
 
+from zapret_hub.services.orchestrator.auto_overlay import (
+    AutoOverlayStore,
+    is_service_protected_host,
+    migrate_legacy_markers_into_overlay,
+)
 from zapret_hub.services.orchestrator.conflicts import ConflictDetector
+
+_AUTO_START = "# --- zapret-hub-auto ---"
+_AUTO_END = "# --- end zapret-hub-auto ---"
+
+
+def strip_auto_overlay(text: str) -> str:
+    """Remove legacy Auto marker blocks from text (battle files must stay clean)."""
+    if not text:
+        return ""
+    lines = text.splitlines()
+    out: list[str] = []
+    skipping = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == _AUTO_START:
+            skipping = True
+            continue
+        if stripped == _AUTO_END:
+            skipping = False
+            continue
+        if skipping:
+            continue
+        out.append(line.rstrip())
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out) + ("\n" if out else "")
+
+
+def extract_auto_overlay_lines(text: str) -> list[str]:
+    if not text:
+        return []
+    lines = text.splitlines()
+    out: list[str] = []
+    capturing = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == _AUTO_START:
+            capturing = True
+            continue
+        if stripped == _AUTO_END:
+            capturing = False
+            continue
+        if capturing and stripped and not stripped.startswith("#"):
+            out.append(stripped)
+    return out
 
 
 class HostlistLearner:
-    """Auto-hostlist: append failing hosts/IPs to user lists after a fail threshold."""
+    """Auto-hostlist writer — only mutates configs/auto/overlay.json (diff), never battle lists.
+
+    Service catalog hosts (Discord/YouTube/…) cannot be excluded. Removals of
+    service-owned IPs/domains are rejected. Manual mode ignores the overlay.
+    """
 
     FAIL_THRESHOLD = 2
 
     def __init__(self, configs_dir: Path) -> None:
         self.configs_dir = Path(configs_dir)
+        self._overlay = AutoOverlayStore(self.configs_dir)
+        try:
+            migrate_legacy_markers_into_overlay(self.configs_dir)
+        except Exception:
+            pass
 
-    def _append_unique(self, filename: str, lines: list[str]) -> list[str]:
-        path = self.configs_dir / filename
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing: list[str] = []
-        if path.exists():
-            existing = [row.rstrip() for row in path.read_text(encoding="utf-8", errors="ignore").splitlines()]
-        seen = {row.strip().lower() for row in existing if row.strip() and not row.lstrip().startswith("#")}
-        added: list[str] = []
-        for line in lines:
-            key = line.strip().lower()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            existing.append(line.strip())
-            added.append(line.strip())
-        if added:
-            path.write_text("\n".join(existing) + ("\n" if existing else ""), encoding="utf-8")
-        return added
-
-    def add_domains(self, domains: list[str]) -> list[str]:
+    def add_domains(self, domains: list[str], *, reason: str = "learn") -> list[str]:
         cleaned = [d.strip().lower().rstrip(".") for d in domains if d and d.strip()]
-        return self._append_unique("list-general-user.txt", cleaned)
+        return self._overlay.add_domains(cleaned, reason=reason)
 
-    def exclude_domains(self, domains: list[str]) -> list[str]:
+    def exclude_domains(self, domains: list[str], *, reason: str = "over_block") -> list[str]:
         cleaned = [d.strip().lower().rstrip(".") for d in domains if d and d.strip()]
-        return self._append_unique("list-exclude-user.txt", cleaned)
+        cleaned = [d for d in cleaned if not is_service_protected_host(d)]
+        return self._overlay.exclude_domains(cleaned, reason=reason)
 
-    def add_ips(self, ips: list[str]) -> list[str]:
+    def add_ips(self, ips: list[str], *, reason: str = "learn") -> list[str]:
         cleaned = [item.strip() for item in ips if item and item.strip()]
-        return self._append_unique("ipset-all-user.txt", cleaned)
+        return self._overlay.add_ips(cleaned, reason=reason)
+
+    def remove_domains(self, domains: list[str], *, reason: str = "diff_remove") -> list[str]:
+        return self._overlay.remove_domains(domains, reason=reason)
+
+    def remove_ips(self, ips: list[str], *, reason: str = "diff_remove") -> list[str]:
+        return self._overlay.remove_ips(ips, reason=reason)
+
+    def checkpoint(self) -> dict:
+        return self._overlay.checkpoint()
+
+    def restore(self, snapshot: dict) -> None:
+        self._overlay.restore(snapshot)
 
     @staticmethod
     def _domain_match(host: str, entry: str) -> bool:
@@ -81,9 +134,16 @@ class HostlistLearner:
                 except Exception:
                     continue
                 for line in lines:
-                    entry = line.strip()
-                    if self._domain_match(host, entry):
+                    if self._domain_match(host, line):
                         return True
+        # Also treat pending Auto adds as present (avoid re-learning).
+        try:
+            snap = self._overlay.snapshot_public()
+            for item in snap.get("adds", {}).get("domains", []):
+                if self._domain_match(host, str(item)):
+                    return True
+        except Exception:
+            pass
         return False
 
     def ip_in_merged_lists(self, ip: str, lists_dirs: list[Path]) -> bool:
@@ -147,4 +207,6 @@ __all__ = [
     "HostlistLearner",
     "ConflictDetector",
     "learn_host",
+    "strip_auto_overlay",
+    "extract_auto_overlay_lines",
 ]

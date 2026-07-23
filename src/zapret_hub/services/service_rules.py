@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +17,86 @@ class ServiceRule:
     bin_overlay_dir: str = ""
     winws_args: tuple[str, ...] = field(default_factory=tuple)
     test_targets: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    # Critical hosts for Auto health checks. Prefer CDN/update/API paths that can
+    # fail while a marketing homepage still answers (false-green).
+    health_hosts: tuple[str, ...] = field(default_factory=tuple)
+    # Mapper-only CIDRs (do NOT merge into classic ipset-all.txt). Use when an IP
+    # identity must prefer this service over a broader CDN rule without enabling
+    # classic ipset DPI that double-handles hostlist HTTPS.
+    identity_networks: tuple[str, ...] = field(default_factory=tuple)
+
+
+# Stock services always present for new clients and when Auto is on.
+# Telegram stays opt-in (separate TG WS Proxy path).
+AUTO_DEFAULT_SERVICE_IDS: tuple[str, ...] = (
+    "cloudflare",
+    "discord",
+    "youtube",
+    "gaming",
+    "clouds",
+)
+
+
+def host_from_target(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if raw.upper().startswith("PING:"):
+        raw = raw.split(":", 1)[1].strip()
+    if "://" in raw:
+        host = urlparse(raw).hostname or ""
+    else:
+        host = raw.split("/", 1)[0].split(":", 1)[0]
+    return host.strip("[]").lower().rstrip(".")
+
+
+def health_hosts_for(service_id: str) -> tuple[str, ...]:
+    """Hosts that must succeed before Auto treats a service as healthy."""
+    rule = SERVICE_RULES.get(service_id)
+    if rule is None:
+        return ()
+    if rule.health_hosts:
+        return rule.health_hosts
+    hosts: list[str] = []
+    for _name, value in rule.test_targets:
+        host = host_from_target(value)
+        if host and host not in hosts:
+            hosts.append(host)
+        if len(hosts) >= 3:
+            break
+    return tuple(hosts)
+
+
+def merge_auto_default_services(selected: list[str] | set[str] | tuple[str, ...] | None) -> list[str]:
+    """Ensure stock defaults are present; keep other selected services (e.g. Telegram)."""
+    from zapret_hub.services.service_catalog import SERVICE_PRESETS
+
+    current = [str(item).strip() for item in (selected or []) if str(item).strip()]
+    merged = list(dict.fromkeys([*AUTO_DEFAULT_SERVICE_IDS, *current]))
+    allowed = {preset.id for preset in SERVICE_PRESETS}
+    return [item for item in merged if item in allowed]
+
+
+def is_stock_service(service_id: str) -> bool:
+    return str(service_id or "").strip() in AUTO_DEFAULT_SERVICE_IDS
+
+
+def is_stock_catalog_host(host: str) -> bool:
+    """True if host belongs to any stock service catalog (never Auto-exclude these)."""
+    cleaned = (host or "").strip().lower().rstrip(".")
+    if not cleaned:
+        return False
+    for sid in AUTO_DEFAULT_SERVICE_IDS:
+        rule = SERVICE_RULES.get(sid)
+        if rule is None:
+            continue
+        catalog = {str(x).strip().lower().rstrip(".") for x in rule.list_general if x}
+        catalog |= {str(x).strip().lower().rstrip(".") for x in rule.list_google if x}
+        catalog |= {str(x).strip().lower().rstrip(".") for x in rule.health_hosts if x}
+        catalog |= {host_from_target(v) for _n, v in rule.test_targets if host_from_target(v)}
+        if cleaned in catalog or any(cleaned == c or cleaned.endswith("." + c) for c in catalog if c):
+            return True
+    return False
 
 
 _GAMING_LIST_FILES: tuple[tuple[str, str], ...] = (
@@ -88,7 +169,17 @@ SERVICE_RULES: dict[str, ServiceRule] = {
             "latency.discord.media",
             "updates.discord.com",
         ),
-        test_targets=(("Discord", "https://discord.com"), ("Discord Gateway", "https://gateway.discord.gg")),
+        # Hostlist-only for classic Zapret (same as 2.1.2). Putting Discord CF
+        # ranges into ipset-all activates a second 443 desync on top of hostlist
+        # and stalls Update.exe / "Checking for updates".
+        identity_networks=("162.159.128.0/20",),
+        test_targets=(
+            ("Discord Updates", "https://updates.discord.com"),
+            ("Discord", "https://discord.com"),
+            ("Discord Gateway", "https://gateway.discord.gg"),
+            ("Discord CDN", "https://cdn.discordapp.com"),
+        ),
+        health_hosts=("updates.discord.com", "discord.com"),
     ),
     "youtube": ServiceRule(
         list_general=(
@@ -110,10 +201,11 @@ SERVICE_RULES: dict[str, ServiceRule] = {
         ),
         list_google=("googlevideo.com", "ggpht.com", "gvt1.com", "youtube.com", "youtu.be", "ytimg.com"),
         test_targets=(
-            ("YouTube", "https://www.youtube.com"),
-            ("YouTube 204", "https://www.youtube.com/generate_204"),
             ("YouTube Video Redirect", "https://redirector.googlevideo.com"),
+            ("YouTube 204", "https://www.youtube.com/generate_204"),
+            ("YouTube", "https://www.youtube.com"),
         ),
+        health_hosts=("redirector.googlevideo.com", "www.youtube.com"),
     ),
     "telegram-desktop": ServiceRule(),
     "clouds": ServiceRule(
@@ -289,11 +381,12 @@ SERVICE_RULES: dict[str, ServiceRule] = {
         test_targets=(
             ("Fortnite Account", "https://account-public-service-prod03.ol.epicgames.com"),
             ("Fortnite Launcher", "https://launcher-public-service-prod06.ol.epicgames.com"),
-            ("Epic Games Store", "https://store.epicgames.com"),
             ("Epic Downloads", "https://download.epicgames.com"),
+            ("Epic Games Store", "https://store.epicgames.com"),
             ("Epic Fastly CDN", "https://fastly-download.epicgames.com"),
             ("Unreal CDN", "https://cdn1.unrealengine.com"),
         ),
+        health_hosts=("download.epicgames.com", "launcher-public-service-prod06.ol.epicgames.com"),
     ),
     "spotify": ServiceRule(
         list_general=(
@@ -307,9 +400,14 @@ SERVICE_RULES: dict[str, ServiceRule] = {
             "login5.spotify.com",
             "spclient.wg.spotify.com",
             "api-partner.spotify.com",
+            "apresolve.spotify.com",
             "appresolve.spotify.com",
         ),
-        test_targets=(("Spotify", "https://open.spotify.com"),),
+        test_targets=(
+            ("Spotify Resolve", "https://apresolve.spotify.com"),
+            ("Spotify", "https://open.spotify.com"),
+        ),
+        health_hosts=("apresolve.spotify.com", "open.spotify.com"),
     ),
     "reddit": ServiceRule(
         list_general=("reddit.com", "redd.it", "redditmedia.com", "redditstatic.com", "redditinc.com"),
@@ -317,7 +415,12 @@ SERVICE_RULES: dict[str, ServiceRule] = {
     ),
     "x-twitter": ServiceRule(
         list_general=("x.com", "api.x.com", "twitter.com", "api.tweetdeck.com", "twimg.com", "pbs.twimg.com", "video.twimg.com", "t.co"),
-        test_targets=(("X", "https://x.com"),),
+        test_targets=(
+            ("X API", "https://api.x.com"),
+            ("X", "https://x.com"),
+            ("Twitter CDN", "https://pbs.twimg.com"),
+        ),
+        health_hosts=("api.x.com", "x.com"),
     ),
     "github": ServiceRule(
         list_general=(
@@ -329,7 +432,12 @@ SERVICE_RULES: dict[str, ServiceRule] = {
             "objects.githubusercontent.com",
             "codeload.github.com",
         ),
-        test_targets=(("GitHub", "https://github.com"), ("GitHub Raw", "https://raw.githubusercontent.com")),
+        test_targets=(
+            ("GitHub Codeload", "https://codeload.github.com"),
+            ("GitHub Raw", "https://raw.githubusercontent.com"),
+            ("GitHub", "https://github.com"),
+        ),
+        health_hosts=("codeload.github.com", "github.com"),
     ),
     "riot-games": ServiceRule(
         list_general=("riotgames.com", "riotcdn.net", "pvp.net", "auth.riotgames.com", "clientconfig.rpg.riotgames.com"),
@@ -349,7 +457,11 @@ SERVICE_RULES: dict[str, ServiceRule] = {
     ),
     "netflix": ServiceRule(
         list_general=("netflix.com", "nflxvideo.net", "nflximg.net", "nflxso.net", "nflxext.com", "fast.com"),
-        test_targets=(("Netflix", "https://www.netflix.com"),),
+        test_targets=(
+            ("Netflix CDN", "https://assets.nflxext.com"),
+            ("Netflix", "https://www.netflix.com"),
+        ),
+        health_hosts=("assets.nflxext.com", "www.netflix.com"),
     ),
     "facebook": ServiceRule(
         list_general=("facebook.com", "fbcdn.net", "fbsbx.com", "accountkit.com", "facebookauth.com", "facebook.net", "fb.com", "fb.me"),

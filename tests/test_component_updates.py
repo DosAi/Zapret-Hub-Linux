@@ -91,6 +91,10 @@ def test_zapret2_auto_discord_capture_includes_voice_udp_ranges() -> None:
     udp_ports = process._normalize_zapret2_ports("443", "443")
     udp_ports = process._merge_zapret2_ports(udp_ports, "3478-3497,19294-19344,42377-62133")
     assert udp_ports == "443,3478-3497,19294-19344,42377-62133"
+    tcp_ports = process._normalize_zapret2_ports("80,443", "80,443")
+    tcp_ports = process._merge_zapret2_ports(tcp_ports, "2053,2083,2087,2096,8443")
+    assert "2053" in tcp_ports
+    assert "8443" in tcp_ports
 
 
 def test_zapret_bundles_keep_installed_layer_order(tmp_path: Path) -> None:

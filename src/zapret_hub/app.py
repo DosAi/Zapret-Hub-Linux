@@ -372,28 +372,35 @@ def run(argv: list[str] | None = None) -> int:
             app.aboutToQuit.connect(_cleanup_before_quit)
             if known.autostart_launch and settings.auto_run_components:
                 def _start_after_backend() -> None:
-                    if context.backend is not None:
-                        def _safe_autostart() -> None:
-                            # Skip if user already powered off / selected another mode after launch.
-                            try:
-                                bridge = getattr(window, "bridge", None)
-                                if bridge is not None and getattr(bridge, "_runtime_transition_status", None) in {"stopping", "off"}:
-                                    return
-                                if bridge is not None and str(getattr(bridge, "_last_runtime_status", "") or "") == "off":
-                                    # User turned power off before autostart fired.
-                                    return
-                            except Exception:
-                                pass
+                    def _safe_autostart() -> None:
+                        # Skip only if the user already took power control.
+                        try:
+                            bridge = getattr(window, "bridge", None)
+                            if bridge is not None and getattr(bridge, "_power_user_touched", False):
+                                return
+                        except Exception:
+                            pass
+                        request = getattr(window, "request_autostart_power", None)
+                        if callable(request):
+                            request()
+                        else:
                             window.start_enabled_components_async(autostart_only=False)
-                        QTimer.singleShot(12000, _safe_autostart)
+
+                    # Backend + WinDivert need a short settle; 12s felt like a broken autostart.
+                    QTimer.singleShot(1800, _safe_autostart)
+
                 autostart_callback = _start_after_backend
             else:
                 autostart_callback = None
             if launch_hidden:
-                _startup_trace("finish_bootstrap: hide window")
-                window.hide()
+                _startup_trace("finish_bootstrap: tray boot (hidden)")
+                prepare = getattr(window, "prepare_hidden_tray_launch", None)
+                prepare() if callable(prepare) else window.hide()
             elif not getattr(window, "isVisible", lambda: False)():
                 _startup_trace("finish_bootstrap: show window with preloader")
+                # Clear any temporary tray-boot flags from the early shell.
+                window._launch_hidden = False
+                window._first_show = False
                 show_when_ready = getattr(window, "show_when_ready", None)
                 show_when_ready() if callable(show_when_ready) else window.show()
             else:
@@ -438,14 +445,20 @@ def run(argv: list[str] | None = None) -> int:
     app._bootstrap_bridge = bootstrap_bridge  # type: ignore[attr-defined]
 
     # Open the real frameless window immediately with a CSS preloader; bootstrap fills it in.
-    if not known.autostart_launch:
-        from zapret_hub.ui.web_window import WebMainWindow
+    # Autostart also preloads the shell (hidden) so tray restore is not a blank window.
+    from zapret_hub.ui.web_window import WebMainWindow
 
-        early = WebMainWindow.create_early_shell(app_icon)
+    early = WebMainWindow.create_early_shell(app_icon)
+    if known.autostart_launch:
+        # Stay invisible until settings decide tray vs window — avoids empty flash.
+        early.hide()
+        early._first_show = False
+        early._launch_hidden = True
+    else:
         early.show_when_ready()
-        app._startup_window = early  # type: ignore[attr-defined]
-        app.processEvents()
-        _startup_trace("run: early web shell shown")
+    app._startup_window = early  # type: ignore[attr-defined]
+    app.processEvents()
+    _startup_trace("run: early web shell prepared")
 
     # Keep CSS preloader animating: bootstrap off the GUI thread.
     bootstrap_thread = _BootstrapThread()
