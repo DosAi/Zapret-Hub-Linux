@@ -15,7 +15,8 @@ LUA_STRATEGY = "hub-strategy.lua"
 LUA_TARGETS = "hub-targets.lua"
 
 # Curated strategy ids — rewritten into hub-strategy.lua; winws2 restart required.
-STRATEGY_IDS = ("balanced", "fake_heavy", "multisplit")
+# balanced/multisplit = Flowseal-safe Discord TLS; syndata = youtubediscord Default v5.
+STRATEGY_IDS = ("balanced", "fake_heavy", "multisplit", "syndata")
 
 # Seed lists adapted from Flowseal zapret-discord-youtube + Hub catalogs.
 # In real winws2 filtering uses hostlist/ipset files; Lua keeps the same catalog for docs/sync.
@@ -139,8 +140,9 @@ _HUB_ORCHESTRATOR_LUA = r'''--[[
     - bol-van official IP discovery (zero fake ×2)
 
   Strategy (HUB_STRATEGY) switches Discord TLS / YouTube helpers:
-    balanced   → syndata path (Default v5) for Discord HTTPS/media; Flowseal voice
-    multisplit → Flowseal multisplit Discord TLS
+    balanced   → Flowseal Discord TLS (multisplit) + Flowseal voice  [default/safe]
+    multisplit → same Flowseal Discord TLS helpers
+    syndata    → youtubediscord Default v5 send+syndata Discord TLS
     fake_heavy → general ALT style fake+fakedsplit (tcp_ts)
 ]]
 
@@ -967,12 +969,37 @@ def _fake_file(asset_roots: Path | list[Path], name: str) -> Path | None:
     return None
 
 
+def _winws2_blob_path(path: Path) -> str:
+    """Format a filesystem path for winws2 --blob name:@file.
+
+    Docs: ``--blob=<item_name>:[+ofs]@<filename>|0xHEX``.
+    The first ``:`` separates name from value, so Windows ``C:\\...`` after a wrong
+    ``name=@C:\\...`` (equals) was parsed as identifier ``name=@C``. Use colon
+    syntax and prefer ``/cygdrive/<drive>/...`` so the value itself has no ``:``.
+    """
+    resolved = Path(path).resolve()
+    try:
+        drive = resolved.drive  # e.g. "C:"
+        if len(drive) == 2 and drive[1] == ":":
+            rest = resolved.as_posix()
+            # "C:/Users/..." → "/cygdrive/c/Users/..."
+            if rest[1:3] == ":/":
+                return f"/cygdrive/{drive[0].lower()}{rest[2:]}"
+            # Fallback: strip drive and join
+            parts = resolved.parts
+            if parts:
+                return "/cygdrive/" + drive[0].lower() + "/" + "/".join(parts[1:])
+    except Exception:
+        pass
+    return resolved.as_posix()
+
+
 def _blob_args(
     asset_roots: Path | list[Path],
     *,
     flowseal_bin: Path | None = None,
 ) -> list[str]:
-    """Register named blobs (bol-van: blob=name, not filename).
+    """Register named blobs (bol-van: ``--blob=name:@file``).
 
     Includes Flowseal ACTIVE_DISCORD_UDP.bin as discord_udp and 4pda TLS pattern.
     """
@@ -998,26 +1025,26 @@ def _blob_args(
     for blob_name, filename in mapping:
         path = _fake_file(roots, filename)
         if path is not None:
-            out.append(f"--blob={blob_name}=@{path}")
+            out.append(f"--blob={blob_name}:@{_winws2_blob_path(path)}")
     # If Flowseal Discord UDP missing, voice still works via quic_google alias below
     # in profile lua (hub_discord falls back only if discord_udp registered — ensure
     # a second registration of discord_udp → quic bin when ACTIVE_* absent).
-    if not any(item.startswith("--blob=discord_udp=") for item in out):
+    if not any(item.startswith("--blob=discord_udp:") for item in out):
         quic = _fake_file(roots, "quic_initial_www_google_com.bin")
         if quic is not None:
-            out.append(f"--blob=discord_udp=@{quic}")
-    if not any(item.startswith("--blob=tls_4pda=") for item in out):
+            out.append(f"--blob=discord_udp:@{_winws2_blob_path(quic)}")
+    if not any(item.startswith("--blob=tls_4pda:") for item in out):
         google = _fake_file(roots, "tls_clienthello_www_google_com.bin")
         if google is not None:
-            out.append(f"--blob=tls_4pda=@{google}")
-    if not any(item.startswith("--blob=tls_max=") for item in out):
+            out.append(f"--blob=tls_4pda:@{_winws2_blob_path(google)}")
+    if not any(item.startswith("--blob=tls_max:") for item in out):
         google = _fake_file(roots, "tls_clienthello_www_google_com.bin")
         if google is not None:
-            out.append(f"--blob=tls_max=@{google}")
-    if not any(item.startswith("--blob=quic2=") for item in out):
+            out.append(f"--blob=tls_max:@{_winws2_blob_path(google)}")
+    if not any(item.startswith("--blob=quic2:") for item in out):
         quic = _fake_file(roots, "quic_initial_www_google_com.bin")
         if quic is not None:
-            out.append(f"--blob=quic2=@{quic}")
+            out.append(f"--blob=quic2:@{_winws2_blob_path(quic)}")
     return out
 
 
@@ -1072,8 +1099,9 @@ def build_default_profile_args(
     """
     strategy = (strategy_id or "balanced").strip() or "balanced"
     aggressive = strategy == "fake_heavy"
-    use_syndata = strategy == "balanced"  # youtubediscord Default v5
-    use_multisplit_discord = strategy == "multisplit"
+    # Default balanced stays Flowseal-safe (starts reliably). Opt into syndata explicitly.
+    use_syndata = strategy == "syndata"
+    use_multisplit_discord = strategy in {"balanced", "multisplit"}
     roots: list[Path]
     if asset_roots is not None:
         roots = asset_roots if isinstance(asset_roots, list) else [asset_roots]
@@ -1266,6 +1294,7 @@ def describe_strategy(strategy_id: str, *, language: str = "ru") -> str:
         "balanced": ("Сбалансированная Lua", "Balanced Lua"),
         "fake_heavy": ("Агрессивный fake", "Aggressive fake"),
         "multisplit": ("Multisplit Lua", "Multisplit Lua"),
+        "syndata": ("Syndata Discord (YT/DC)", "Syndata Discord (YT/DC)"),
     }
     ru, en = labels.get(strategy_id, (strategy_id, strategy_id))
     return ru if str(language).startswith("ru") else en

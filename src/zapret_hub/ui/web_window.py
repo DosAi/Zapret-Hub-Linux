@@ -376,14 +376,10 @@ class WebBridge(QObject):
                 return
             if str(status) != "error":
                 return
-            # Mid switch / silent reconfigure / power transition — do not yank the button.
-            # Retry / settle paths reconcile the final status.
-            if self._runtime_transition_status in {"on", "starting", "stopping"}:
-                return
-            if self._want_runtime_power():
-                # Power intended: surface starting so retry can run, not a hard off.
-                self._runtime_transition_status = "starting"
-                self._emit_runtime_status("starting")
+            # Mid power start/stop: the power worker reconciles the final status.
+            # Do NOT swallow post-start deaths while UI already shows "on" — that left
+            # Zapret2 looking enabled with no winws2.exe (bad --blob args, missing bins).
+            if self._runtime_transition_status in {"starting", "stopping"}:
                 return
             # Optimistic start reported "on"; process died — correct the power button.
             self._runtime_transition_status = None
@@ -2018,6 +2014,9 @@ class WebBridge(QObject):
             return True
         if self._runtime_transition_status in {"off", "stopping"}:
             return False
+        # "error" means start failed — do not treat as intended ON (that stuck Zapret2 "on").
+        if self._last_runtime_status == "error":
+            return False
         if self._last_runtime_status in {"on", "starting"}:
             return True
         try:
@@ -2044,8 +2043,8 @@ class WebBridge(QObject):
         except Exception:
             powered = False
         if want_power:
-            # Never drop to off while power is intended — keep lit or soft starting.
-            self._emit_runtime_status("on" if powered else "starting")
+            # If the bypass is dead, show error — never leave a fake "on"/"starting".
+            self._emit_runtime_status("on" if powered else "error")
         else:
             self._emit_runtime_status("on" if powered else "off")
 
@@ -2100,8 +2099,19 @@ class WebBridge(QObject):
                 return False
             if str(getattr(state, "status", "") or "") != "running":
                 return False
-            # Brief settle — optimistic "running" can die immediately.
-            time.sleep(0.35)
+            # Settle long enough for winws2 bad-arg exits (blob parse) and classic
+            # missing-bin exits. Bust image cache so we don't trust a stale True.
+            for image in ("winws.exe", "winws2.exe"):
+                try:
+                    cache = getattr(self.context.processes, "_image_running_cache", None)
+                    if isinstance(cache, dict):
+                        cache.pop(image, None)
+                except Exception:
+                    pass
+            for _ in range(8):
+                time.sleep(0.2)
+                if not self._component_running(component_id):
+                    return False
             return self._component_running(component_id)
 
         if _attempt():

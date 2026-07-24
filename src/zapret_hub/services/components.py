@@ -446,7 +446,15 @@ class ProcessManager:
                     state.status = "running"
                     state.pid = owned.pid
                 else:
-                    state.status = "running" if self._is_image_running("winws.exe") else "stopped"
+                    if owned is not None:
+                        self._processes.pop(component.id, None)
+                    alive = self._is_image_running("winws.exe")
+                    if alive:
+                        state.status = "running"
+                    elif str(getattr(state, "status", "") or "") == "error":
+                        state.status = "error"
+                    else:
+                        state.status = "stopped"
                     state.pid = None
             elif component.id == "zapret2":
                 owned = self._processes.get(component.id)
@@ -454,7 +462,16 @@ class ProcessManager:
                     state.status = "running"
                     state.pid = owned.pid
                 else:
-                    state.status = "running" if self._is_image_running("winws2.exe") else "stopped"
+                    if owned is not None:
+                        self._processes.pop(component.id, None)
+                    alive = self._is_image_running("winws2.exe")
+                    # Never keep a stale optimistic "running" when the image is gone.
+                    if alive:
+                        state.status = "running"
+                    elif str(getattr(state, "status", "") or "") == "error":
+                        state.status = "error"
+                    else:
+                        state.status = "stopped"
                     state.pid = None
             elif component.id == "tg-ws-proxy":
                 # Prefer owned Popen — never pay a socket timeout while Hub owns the process.
@@ -1406,7 +1423,9 @@ foreach ($adapter in @($payload.adapters)) {
                 )
                 self.logging.log("error", "Zapret failed to start", script=str(active_script), error=error_message)
             else:
-                self._image_running_cache["winws.exe"] = (time.time(), True)
+                # Do NOT seed a positive image-running cache here: a dying winws can
+                # leave UI/"on" lit via a 1.5s True cache after poll() flips.
+                self._image_running_cache.pop("winws.exe", None)
                 state = ComponentState(component_id=component_id, status="running", pid=process.pid)
                 self._states[component_id] = state
                 self._invalidate_state_cache()
@@ -1508,7 +1527,8 @@ foreach ($adapter in @($payload.adapters)) {
                 )
                 self.logging.log("error", "Zapret2 failed to start", error=state.last_error)
             else:
-                self._image_running_cache["winws2.exe"] = (time.time(), True)
+                # Never cache "running" before confirm — false "on" with no winws2.
+                self._image_running_cache.pop("winws2.exe", None)
                 state = ComponentState(component_id=component_id, status="running", pid=process.pid)
                 self._states[component_id] = state
                 self._invalidate_state_cache()
@@ -1681,15 +1701,26 @@ foreach ($adapter in @($payload.adapters)) {
         asset_roots = zapret2_hub.zapret2_asset_roots(winws2_path, runtime_root)
         lua_lib = self._zapret2_lua_arg(runtime_root, "zapret-lib.lua", winws2_path=winws2_path)
         lua_antidpi = self._zapret2_lua_arg(runtime_root, "zapret-antidpi.lua", winws2_path=winws2_path)
+        # bol-van preset2_example: randomize built-in TLS fake SNI once at start.
+        # Keep as a tiny file — inline lua-init with spaces is fragile on Windows argv.
+        fake_tls_init = zapret2_hub.zapret2_lists_dir(Path(self.storage.paths.configs_dir)) / "hub-fake-tls-init.lua"
+        try:
+            desired = "fake_default_tls = tls_mod(fake_default_tls,'rnd,rndsni')\n"
+            if not fake_tls_init.is_file() or fake_tls_init.read_text(encoding="utf-8", errors="ignore") != desired:
+                fake_tls_init.parent.mkdir(parents=True, exist_ok=True)
+                fake_tls_init.write_text(desired, encoding="utf-8")
+        except Exception:
+            fake_tls_init = None
         command = [
             str(winws2_path),
             f"--wf-tcp-out={tcp_ports}",
             f"--wf-udp-out={udp_ports}",
             f"--lua-init=@{lua_lib}",
             f"--lua-init=@{lua_antidpi}",
-            # bol-van preset2_example: randomize built-in TLS fake SNI once at start.
-            "--lua-init=fake_default_tls = tls_mod(fake_default_tls,'rnd,rndsni')",
         ]
+        if fake_tls_init is not None and fake_tls_init.is_file():
+            command.append(f"--lua-init=@{fake_tls_init}")
+
         auto_lua = zapret2_hub.find_bundle_lua(asset_roots, "zapret-auto.lua")
         if auto_lua is not None:
             command.append(f"--lua-init=@{auto_lua}")
@@ -3294,7 +3325,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 )
                 self._states[component_id] = state
                 return state
-            self._image_running_cache["winws.exe"] = (time.time(), True)
+            self._image_running_cache.pop("winws.exe", None)
             state = ComponentState(component_id=component_id, status="running", pid=process.pid)
             self._states[component_id] = state
             self._invalidate_state_cache()
@@ -3370,6 +3401,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
         self._apply_user_collection_overrides(lists_target)
         self._apply_gaming_set_list_overlays(lists_target)
+        # After every overlay: restore any critical Flowseal bins a mod may have skipped.
+        self._ensure_flowseal_critical_bins(active_root)
         self._materialize_visible_merged_runtime(active_root)
         return active_root
 
@@ -3394,17 +3427,42 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     shutil.copy2(source, target_dir / source.name)
 
     def _replace_runtime_bin_data(self, target_dir: Path, source_dir: Path) -> None:
+        """Overlay ``source_dir`` *.bin onto ``target_dir`` without wiping base bins.
+
+        Older Hub wiped every ``*.bin`` then copied the overlay. A partial mod/service
+        overlay (missing ACTIVE_DISCORD_UDP.bin) made winws exit immediately with
+        ``could not read ...ACTIVE_DISCORD_UDP.bin``. Merge keeps Flowseal base fakes.
+        """
         if not source_dir.exists() or not source_dir.is_dir():
             return
         target_dir.mkdir(parents=True, exist_ok=True)
-        for existing in target_dir.glob("*.bin"):
-            try:
-                existing.unlink()
-            except OSError:
-                pass
         for source in source_dir.glob("*.bin"):
             if source.is_file():
                 shutil.copy2(source, target_dir / source.name)
+
+    def _ensure_flowseal_critical_bins(self, active_root: Path) -> None:
+        """Guarantee Discord/voice fake bins exist in the active runtime bin/."""
+        base_bin = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "bin"
+        target = Path(active_root) / "bin"
+        if not base_bin.is_dir():
+            return
+        target.mkdir(parents=True, exist_ok=True)
+        for name in (
+            "ACTIVE_DISCORD_UDP.bin",
+            "ACTIVE_GAME_UDP.bin",
+            "quic_initial_www_google_com.bin",
+            "tls_clienthello_www_google_com.bin",
+            "tls_clienthello_4pda_to.bin",
+            "stun.bin",
+        ):
+            dest = target / name
+            src = base_bin / name
+            if dest.is_file() or not src.is_file():
+                continue
+            try:
+                shutil.copy2(src, dest)
+            except OSError:
+                pass
 
     def _bundle_has_bin_overlay(self, bundle_root: Path) -> bool:
         bin_dir = bundle_root / "bin"
@@ -5382,8 +5440,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                         (active_root / ".driver_path_in_use").write_text(datetime.utcnow().isoformat(), encoding="utf-8")
                     except Exception:
                         pass
-                # Short watch window — UI already shows on; only correct failures.
-                for _ in range(12):
+                # Watch long enough for winws/winws2 to parse args and die on bad
+                # --blob / missing bins. Success only if Popen stays alive the whole window.
+                for _ in range(24):  # ~3.6s
                     owned = self._processes.get(component_id)
                     if owned is not process:
                         return
@@ -5404,6 +5463,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                             self._close_source_log_stream(component_id)
                         except Exception:
                             pass
+                        self._processes.pop(component_id, None)
                         state = ComponentState(
                             component_id=component_id,
                             status="error",
@@ -5416,9 +5476,12 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                         self.logging.log("error", "Bypass exited after optimistic start", component_id=component_id, error=error_message)
                         self._emit_component_status(component_id, "error", error_message)
                         return
-                    if image_name and self._is_image_running(image_name):
-                        return
+                    if image_name:
+                        self._image_running_cache.pop(image_name, None)
                     time.sleep(0.15)
+                # Still alive after the watch window — cache a positive hit only now.
+                if image_name and process.poll() is None:
+                    self._image_running_cache[image_name] = (time.time(), True)
             except Exception as error:
                 try:
                     self.logging.log("warning", "Bypass start confirm failed", component_id=component_id, error=str(error))

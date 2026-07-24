@@ -58,12 +58,11 @@ def manager() -> ProcessManager:
     return process
 
 
-def test_zapret_release_is_pinned_to_1_9_9c() -> None:
+def test_zapret_release_resolves_1_10_0() -> None:
     release = manager().fetch_latest_zapret_release()
-    assert release["latest_version"] == "1.9.9c"
-    assert release["asset_url"].endswith("/1.9.9c/zapret-discord-youtube-1.9.9c.zip")
-    assert release["zipball_url"].endswith("/refs/tags/1.9.9c")
-    assert release.get("pinned") == "1"
+    assert release["latest_version"] == "1.10.0"
+    assert release["asset_url"].endswith("/1.10.0/zapret-discord-youtube-1.10.0.zip")
+    assert release["zipball_url"].endswith("/refs/tags/1.10.0")
 
 
 def test_tg_proxy_release_falls_back_to_atom_after_rate_limit() -> None:
@@ -146,9 +145,15 @@ def test_zapret2_default_profiles_include_discord_media_and_voice() -> None:
         flowseal_bin=flowseal_bin if flowseal_bin.is_dir() else None,
     )
     joined = " ".join(args)
-    assert "--blob=quic_google=@" in joined or not fake_root.is_dir()
-    assert "--blob=tls_google=@" in joined or not fake_root.is_dir()
-    assert "--blob=discord_udp=@" in joined or not (fake_root.is_dir() or flowseal_bin.is_dir())
+    assert "--blob=quic_google:@" in joined or not fake_root.is_dir()
+    assert "--blob=tls_google:@" in joined or not fake_root.is_dir()
+    assert "--blob=discord_udp:@" in joined or not (fake_root.is_dir() or flowseal_bin.is_dir())
+    # bol-van syntax is name:@file — never name=@C:\... (drive colon breaks the parser).
+    blob_args = [a for a in args if a.startswith("--blob=")]
+    assert blob_args
+    assert all(":@" in a for a in blob_args)
+    assert not any("=@" in a for a in blob_args)
+    assert all(":@C:" not in a for a in blob_args)
     assert "--hostlist-domains=discord.media" in joined
     assert "--hostlist-domains=updates.discord.com" in joined
     assert "--hostlist-domains=googlevideo.com" in joined
@@ -156,8 +161,10 @@ def test_zapret2_default_profiles_include_discord_media_and_voice() -> None:
     assert "--filter-l7=discord,stun" in joined
     assert "--lua-desync=hub_discord" in joined
     assert "--lua-desync=hub_discord_ipdisc" in joined
-    # balanced (default) = youtubediscord Default v5 syndata path
-    assert "--lua-desync=syndata:blob=tls_google" in joined
+    # balanced (default) = Flowseal-safe Discord TLS (not syndata — that is opt-in).
+    assert "--lua-desync=hub_discord_https" in joined
+    assert "--lua-desync=hub_discord_media" in joined
+    assert "--lua-desync=syndata:blob=tls_google" not in joined
     assert "--lua-desync=hub_youtube" in joined
     assert "--lua-desync=hub_googlevideo" in joined
     assert "--ipcache-hostname=1" in joined
@@ -165,17 +172,16 @@ def test_zapret2_default_profiles_include_discord_media_and_voice() -> None:
     # Discord profiles must appear before general TLS.
     assert joined.index("--lua-desync=hub_discord") < joined.index("--lua-desync=hub_tls")
 
-    multi = zapret2_hub.build_default_profile_args(
+    syndata = zapret2_hub.build_default_profile_args(
         lists=lists,
         asset_roots=[fake_root] if fake_root.is_dir() else [],
         tcp_ports="80,443,2053,2083,2087,2096,8443",
-        strategy_id="multisplit",
+        strategy_id="syndata",
         include_hostlist_auto=False,
         flowseal_bin=flowseal_bin if flowseal_bin.is_dir() else None,
     )
-    multi_joined = " ".join(multi)
-    assert "--lua-desync=hub_discord_https" in multi_joined
-    assert "--lua-desync=hub_discord_media" in multi_joined
+    syndata_joined = " ".join(syndata)
+    assert "--lua-desync=syndata:blob=tls_google" in syndata_joined
 
 
 def test_harvest_skips_discord_breaking_cloudflare_cidrs() -> None:
@@ -263,7 +269,8 @@ def test_marketplace_bundle_overlays_complete_zapret_runtime(tmp_path: Path) -> 
 
     assert (result / "market-general.bat").read_text(encoding="utf-8") == "market"
     assert (result / "bin" / "market.bin").read_bytes() == b"market"
-    assert not (result / "bin" / "base.bin").exists()
+    # Merge overlay: keep Flowseal/base bins that the mod did not replace.
+    assert (result / "bin" / "base.bin").read_bytes() == b"base"
 
 
 def test_service_change_restarts_running_zapret() -> None:
@@ -464,4 +471,5 @@ def test_auto_resume_restarts_zapret_with_rebuilt_services(tmp_path: Path) -> No
     assert result["ok"] is True
     assert result["resumed"] is True
     assert values.selected_service_ids == ["discord", "youtube"]
-    assert events[-3:] == ["stop:zapret", "start:zapret", "cutover"]
+    # Resume rebuilds snapshot then soft-starts (no hard stop when seamless API absent).
+    assert events[-3:] == ["snapshot", "start:zapret", "cutover"]
