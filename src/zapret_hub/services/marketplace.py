@@ -765,14 +765,19 @@ class MarketplaceService:
         active = next((j for j in self._jobs if j.status in {"downloading", "installing"}), None)
         items = [self._job_payload(j) for j in self._jobs if j.status in {"queued", "downloading", "paused", "installing"}]
         overall = 0.0
-        if active and active.bytes_total > 0 and active.bytes_done > 0:
-            overall = max(0.01, min(0.99, active.bytes_done / active.bytes_total))
-        elif active and active.status == "installing":
-            overall = max(0.85, float(active.progress or 0.85))
-        elif active and active.progress > 0:
-            overall = max(0.01, min(0.89, float(active.progress)))
-        elif active:
-            overall = 0.01
+        if active is not None:
+            byte_ratio = 0.0
+            if active.bytes_total > 0:
+                byte_ratio = max(0.0, min(1.0, float(active.bytes_done) / float(active.bytes_total)))
+            job_progress = max(0.0, min(1.0, float(active.progress or 0.0)))
+            overall = max(byte_ratio, job_progress)
+            if active.status == "installing":
+                # Install phase: never show an empty/low bar just because bytes froze.
+                overall = max(overall, 0.85, job_progress or 0.85)
+            elif overall <= 0:
+                overall = 0.01
+            else:
+                overall = max(0.01, min(0.99, overall))
         elif items:
             overall = 0.01
         return {

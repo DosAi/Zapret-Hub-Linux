@@ -76,6 +76,28 @@ function reconcileCompletedInstall(next: MarketplaceQueueStatus) {
 
 function applyQueue(next: MarketplaceQueueStatus) {
   reconcileCompletedInstall(next);
+  // Keep the higher progress if a poll races with a fresher download-progress event.
+  const prevBySlug = new Map(store.queue.items.map((item) => [item.slug, item]));
+  const mergedItems = next.items.map((item) => {
+    const prev = prevBySlug.get(item.slug);
+    if (!prev) return item;
+    return {
+      ...item,
+      progress: Math.max(Number(item.progress || 0), Number(prev.progress || 0)),
+      bytesDone: Math.max(Number(item.bytesDone || 0), Number(prev.bytesDone || 0)),
+      bytesTotal: Math.max(Number(item.bytesTotal || 0), Number(prev.bytesTotal || 0)),
+    };
+  });
+  next = { ...next, items: mergedItems };
+  const active = mergedItems.find((item) => item.status === "downloading" || item.status === "installing" || item.status === "starting");
+  if (active) {
+    const byteRatio = active.bytesTotal && active.bytesTotal > 0
+      ? Number(active.bytesDone || 0) / active.bytesTotal
+      : 0;
+    let overall = Math.max(Number(next.overallProgress || 0), Number(active.progress || 0), byteRatio);
+    if (active.status === "installing") overall = Math.max(overall, 0.85);
+    next = { ...next, overallProgress: Math.max(0, Math.min(1, overall)) };
+  }
   const hadActive = store.queue.busy || store.queue.items.some(isWorking);
   const idle = next.items.length === 0 && !next.busy;
   if (hadActive && idle) {
@@ -143,17 +165,30 @@ function ensureWired() {
     if (!slug) return;
     const items = [...store.queue.items];
     const idx = items.findIndex((item) => item.slug === slug || (payload.jobId && item.jobId === payload.jobId));
+    const prev = idx >= 0 ? items[idx] : undefined;
+    const nextProgress = Math.max(
+      Number(payload.progress ?? 0) || 0,
+      Number(prev?.progress || 0) || 0,
+    );
+    const nextBytesDone = Math.max(
+      Number(payload.bytesDone ?? prev?.bytesDone ?? 0) || 0,
+      Number(prev?.bytesDone || 0) || 0,
+    );
+    const nextBytesTotal = Math.max(
+      Number(payload.bytesTotal ?? prev?.bytesTotal ?? 0) || 0,
+      Number(prev?.bytesTotal || 0) || 0,
+    );
     const nextItem: MarketplaceQueueItem = {
-      jobId: String(payload.jobId || (idx >= 0 ? items[idx].jobId : slug)),
+      jobId: String(payload.jobId || prev?.jobId || slug),
       slug,
       status,
       message: payload.message,
-      title: payload.title || (idx >= 0 ? items[idx].title : slug),
-      iconUrl: payload.iconUrl || (idx >= 0 ? items[idx].iconUrl : ""),
-      compatibility: payload.compatibility || (idx >= 0 ? items[idx].compatibility : ""),
-      progress: Number(payload.progress ?? (idx >= 0 ? items[idx].progress : 0) ?? 0),
-      bytesDone: Number(payload.bytesDone ?? (idx >= 0 ? items[idx].bytesDone : 0) ?? 0),
-      bytesTotal: Number(payload.bytesTotal ?? (idx >= 0 ? items[idx].bytesTotal : 0) ?? 0),
+      title: payload.title || prev?.title || slug,
+      iconUrl: payload.iconUrl || prev?.iconUrl || "",
+      compatibility: payload.compatibility || prev?.compatibility || "",
+      progress: nextProgress,
+      bytesDone: nextBytesDone,
+      bytesTotal: nextBytesTotal,
       error: payload.error,
     };
     if (status === "done" || status === "cancelled") {
@@ -195,13 +230,19 @@ function ensureWired() {
     }
     const busy = items.some((item) => item.status === "downloading" || item.status === "installing" || item.status === "starting");
     const active = items.find((item) => item.status === "downloading" || item.status === "installing" || item.status === "starting");
-    const overall = active?.bytesTotal
-      ? Math.max(0, Math.min(1, (active.bytesDone || 0) / active.bytesTotal))
-      : active
-        ? Math.max(0, Number(active.progress || 0))
-        : items.some(isWorking)
-          ? 0.02
-          : 0;
+    const byteRatio =
+      active?.bytesTotal && active.bytesTotal > 0
+        ? Math.max(0, Math.min(1, Number(active.bytesDone || 0) / active.bytesTotal))
+        : 0;
+    const jobProgress = active ? Math.max(0, Math.min(1, Number(active.progress || 0))) : 0;
+    let overall = Math.max(byteRatio, jobProgress);
+    if (active?.status === "installing") {
+      overall = Math.max(overall, 0.85, jobProgress || 0.85);
+    } else if (active && overall <= 0) {
+      overall = 0.02;
+    } else if (!active && items.some(isWorking)) {
+      overall = 0.02;
+    }
     applyQueue({
       busy,
       activeSlug: active?.slug || "",

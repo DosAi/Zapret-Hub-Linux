@@ -118,15 +118,36 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
   }, [focusId, onFocusHandled]);
   useEffect(() => bridge.subscribe("component.update-check", (result) => {
     setCheckingId(null);
-    setUpdateCheck(result);
-    if (GITHUB_VERSION_IDS.includes(result.id) && (result.versions?.length ?? 0) > 0) {
-      const preferred = result.available
-        ? (result.latestVersion || result.versions?.find((item) => item.recommended)?.version || result.currentVersion)
-        : (result.versions?.find((item) => item.current)?.version || result.currentVersion);
-      setSelectedVersion(preferred || null);
-    } else {
-      setSelectedVersion(null);
-    }
+    setUpdateCheck((prev) => {
+      let next = result;
+      // After GitHub rate-limit the API used to collapse to 0–1 versions. Prefer the
+      // richer list we already showed for the same component in this session.
+      if (
+        prev
+        && prev.id === result.id
+        && GITHUB_VERSION_IDS.includes(result.id)
+        && (prev.versions?.length ?? 0) > 1
+        && (result.versions?.length ?? 0) <= 1
+        && !result.error
+      ) {
+        next = {
+          ...result,
+          versions: prev.versions,
+          latestVersion: prev.latestVersion || result.latestVersion,
+          recommendedVersion: prev.recommendedVersion || result.recommendedVersion,
+          available: prev.available || result.available,
+        };
+      }
+      if (GITHUB_VERSION_IDS.includes(next.id) && (next.versions?.length ?? 0) > 0) {
+        const preferred = next.available
+          ? (next.latestVersion || next.versions?.find((item) => item.recommended)?.version || next.currentVersion)
+          : (next.versions?.find((item) => item.current)?.version || next.currentVersion);
+        setSelectedVersion(preferred || null);
+      } else {
+        setSelectedVersion(null);
+      }
+      return next;
+    });
   }), [bridge]);
   useEffect(() => bridge.subscribe("component.update-result", (result) => {
     setUpdatingId(result.status === "started" ? result.id : null);
