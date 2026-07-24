@@ -1480,6 +1480,10 @@ foreach ($adapter in @($payload.adapters)) {
                 from zapret_hub.services.orchestrator import zapret2_hub
 
                 zapret2_hub.sanitize_classic_discord_pollution(Path(self.storage.paths.configs_dir))
+                zapret2_hub.sanitize_zapret2_discord_ipset(
+                    Path(self.storage.paths.configs_dir),
+                    runtime_dir=Path(self.storage.paths.runtime_dir),
+                )
             except Exception:
                 pass
             process = subprocess.Popen(
@@ -1683,6 +1687,8 @@ foreach ($adapter in @($payload.adapters)) {
             f"--wf-udp-out={udp_ports}",
             f"--lua-init=@{lua_lib}",
             f"--lua-init=@{lua_antidpi}",
+            # bol-van preset2_example: randomize built-in TLS fake SNI once at start.
+            "--lua-init=fake_default_tls = tls_mod(fake_default_tls,'rnd,rndsni')",
         ]
         auto_lua = zapret2_hub.find_bundle_lua(asset_roots, "zapret-auto.lua")
         if auto_lua is not None:
@@ -1725,6 +1731,17 @@ foreach ($adapter in @($payload.adapters)) {
                 **zapret2_hub.materialize_manual_lists(configs_dir, manual_root),
             }
 
+        # Discord must stay hostlist-only: Cloudflare 162.158.0.0/15 covers Discord CDN
+        # and a second 443 ipset desync kills updates/login. Scrub after every seed/materialize.
+        try:
+            zapret2_hub.sanitize_zapret2_discord_ipset(
+                configs_dir,
+                runtime_dir=Path(self.storage.paths.runtime_dir),
+            )
+            zapret2_hub.strip_discord_breaking_ipsets(Path(lists["ipset"]))
+        except Exception:
+            pass
+
         if bypass_yt_discord:
             bypass_lua = self._ensure_youtube_discord_bypass_lua(configs_dir)
             if bypass_lua is not None:
@@ -1741,6 +1758,7 @@ foreach ($adapter in @($payload.adapters)) {
         command.append(f"--lua-init=@{lists['lua_strategy']}")
         # Always keep Hub default profiles (Discord media/voice, TLS, QUIC). Custom
         # args are appended after so they cannot drop Discord capture.
+        flowseal_bin = Path(self.storage.paths.runtime_dir) / "zapret-discord-youtube" / "bin"
         command.extend(
             zapret2_hub.build_default_profile_args(
                 lists=lists,
@@ -1748,6 +1766,7 @@ foreach ($adapter in @($payload.adapters)) {
                 tcp_ports=tcp_ports,
                 strategy_id=strategy_id,
                 include_hostlist_auto=include_hostlist_auto,
+                flowseal_bin=flowseal_bin if flowseal_bin.is_dir() else None,
             )
         )
         if strategy and control_mode != "auto":

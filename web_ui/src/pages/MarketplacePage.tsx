@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { applyMarketplaceMods, useAppState, useBridge } from "@/hooks/useBridgeState";
 import { useLocale } from "@/hooks/useLocale";
@@ -375,20 +376,66 @@ function FilterSelect({
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
   const selected = options.find((option) => option.value === value) ?? options[0];
+  const menuWidth = align === "right" ? 220 : 200;
+
+  const updateMenuPosition = useCallback(() => {
+    const button = buttonRef.current;
+    if (!button) return;
+    const rect = button.getBoundingClientRect();
+    const gap = 4;
+    const maxHeight = 192; // max-h-48
+    const left =
+      align === "right"
+        ? Math.min(Math.max(8, rect.right - menuWidth), window.innerWidth - menuWidth - 8)
+        : Math.min(Math.max(8, rect.left), window.innerWidth - menuWidth - 8);
+    setMenuStyle({
+      position: "fixed",
+      top: rect.bottom + gap,
+      left,
+      width: menuWidth,
+      maxHeight,
+      zIndex: 80,
+    });
+  }, [align, menuWidth]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    updateMenuPosition();
+    const onReposition = () => updateMenuPosition();
+    window.addEventListener("resize", onReposition);
+    window.addEventListener("scroll", onReposition, true);
+    return () => {
+      window.removeEventListener("resize", onReposition);
+      window.removeEventListener("scroll", onReposition, true);
+    };
+  }, [open, updateMenuPosition]);
 
   useEffect(() => {
     if (!open) return;
     const onPointer = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (rootRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
     };
     window.addEventListener("pointerdown", onPointer);
-    return () => window.removeEventListener("pointerdown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   return (
     <div ref={rootRef} className="relative shrink-0">
       <button
+        ref={buttonRef}
         type="button"
         aria-label={ariaLabel}
         aria-expanded={open}
@@ -409,36 +456,43 @@ function FilterSelect({
           <path d="m3 4.5 3 3 3-3" />
         </svg>
       </button>
-      <AnimatePresence>
-        {open ? (
-          <motion.div
-            initial={{ opacity: 0, y: -4, scale: 0.985 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -3, scale: 0.985 }}
-            transition={{ duration: 0.14 }}
-            className={`absolute top-[32px] z-[70] max-h-48 min-w-full overflow-y-auto rounded-[11px] border border-line-2 bg-bg-2 p-1 shadow-[0_12px_28px_-18px_rgba(0,0,0,.65)] ${
-              align === "right" ? "right-0 w-[220px]" : "left-0 w-[200px]"
-            }`}
-          >
-            {options.map((option) => (
-              <button
-                key={option.value || "all"}
-                type="button"
-                onClick={() => {
-                  onChange(option.value);
-                  setOpen(false);
-                }}
-                className={`flex w-full items-center justify-between rounded-[8px] px-2.5 py-1.5 text-left text-[11px] transition-colors ${
-                  option.value === value ? "bg-bg-3 text-fg" : "text-fg-dim hover:bg-bg-3 hover:text-fg"
-                }`}
-              >
-                <span className="truncate">{option.label}</span>
-                {option.value === value ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[rgb(var(--page-accent-rgb))]" /> : null}
-              </button>
-            ))}
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
+      {typeof document !== "undefined"
+        ? createPortal(
+            <AnimatePresence>
+              {open ? (
+                <motion.div
+                  ref={menuRef}
+                  initial={{ opacity: 0, y: -4, scale: 0.985 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -3, scale: 0.985 }}
+                  transition={{ duration: 0.14 }}
+                  style={menuStyle}
+                  className="overflow-y-auto rounded-[11px] border border-line-2 bg-bg-2 p-1 shadow-[0_12px_28px_-18px_rgba(0,0,0,.65)]"
+                >
+                  {options.map((option) => (
+                    <button
+                      key={option.value || "all"}
+                      type="button"
+                      onClick={() => {
+                        onChange(option.value);
+                        setOpen(false);
+                      }}
+                      className={`flex w-full items-center justify-between rounded-[8px] px-2.5 py-1.5 text-left text-[11px] transition-colors ${
+                        option.value === value ? "bg-bg-3 text-fg" : "text-fg-dim hover:bg-bg-3 hover:text-fg"
+                      }`}
+                    >
+                      <span className="truncate">{option.label}</span>
+                      {option.value === value ? (
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[rgb(var(--page-accent-rgb))]" />
+                      ) : null}
+                    </button>
+                  ))}
+                </motion.div>
+              ) : null}
+            </AnimatePresence>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

@@ -809,7 +809,11 @@ def test_zapret2_lua_files_created_once(tmp_path: Path):
     orch = paths["lua_orch"].read_text(encoding="utf-8")
     assert "function hub_tls" in orch
     assert "function hub_discord" in orch
-    assert "HUB_ORCHESTRATOR_VERSION = 2" in orch
+    assert "function hub_discord_media" in orch
+    assert "function hub_discord_https" in orch
+    assert "function hub_youtube" in orch
+    assert "function hub_googlevideo" in orch
+    assert "HUB_ORCHESTRATOR_VERSION = 5" in orch
     assert "tcp_md5 = true" not in orch
     strategy = paths["lua_strategy"].read_text(encoding="utf-8")
     assert 'HUB_STRATEGY = "balanced"' in strategy
