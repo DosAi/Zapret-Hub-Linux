@@ -18,11 +18,15 @@ function isWorkingStatus(status: string) {
   return ["queued", "downloading", "paused", "installing", "starting"].includes(String(status || ""));
 }
 
-function itemProgress(item: MarketplaceQueueItem) {
+function itemProgress(item: MarketplaceQueueItem, fallback = 0) {
   const byteProgress = item.bytesTotal && item.bytesTotal > 0
     ? Number(item.bytesDone || 0) / item.bytesTotal
     : 0;
-  return Math.max(0, Math.min(1, Math.max(Number(item.progress || 0), byteProgress)));
+  const raw = Math.max(Number(item.progress || 0), byteProgress, Number(fallback || 0));
+  if (item.status === "installing") {
+    return Math.max(0, Math.min(1, Math.max(raw, 0.85)));
+  }
+  return Math.max(0, Math.min(1, raw));
 }
 
 function MiniCover({ url, title }: { url?: string; title: string }) {
@@ -112,12 +116,14 @@ function SortableQueuedRow({
 function ActiveRow({
   item,
   locale,
+  fallbackProgress = 0,
   onCancel,
   onPause,
   onResume,
 }: {
   item: MarketplaceQueueItem;
   locale: string;
+  fallbackProgress?: number;
   onCancel: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -125,11 +131,10 @@ function ActiveRow({
   const ru = locale === "ru";
   const paused = item.status === "paused";
   const queued = item.status === "queued";
-  const progress = itemProgress(item);
-  const [visualProgress, setVisualProgress] = useState(0);
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => setVisualProgress(progress));
-    return () => cancelAnimationFrame(frame);
+  const progress = itemProgress(item, fallbackProgress);
+  const [visualProgress, setVisualProgress] = useState(progress);
+  useLayoutEffect(() => {
+    setVisualProgress(progress);
   }, [progress]);
   return (
     <div className="px-1 py-1">
@@ -178,8 +183,11 @@ function ActiveRow({
       </div>
       <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-bg-3">
         <div
-          className="h-full rounded-full bg-[rgb(var(--page-accent-rgb))] transition-[width] duration-700 ease-linear"
-          style={{ width: `${visualProgress * 100}%` }}
+          className="h-full rounded-full transition-[width] duration-700 ease-linear"
+          style={{
+            width: `${Math.max(progress > 0 ? 2 : 0, visualProgress * 100)}%`,
+            backgroundColor: "rgb(var(--page-accent-rgb))",
+          }}
         />
       </div>
     </div>
@@ -391,6 +399,7 @@ export function DownloadQueueButton({
                             key={activeKey}
                             item={active}
                             locale={locale}
+                            fallbackProgress={targetRing}
                             onCancel={() => onCancel(active.slug, active.jobId)}
                             onPause={() => onPause(active.slug, active.jobId)}
                             onResume={() => onResume(active.slug, active.jobId)}

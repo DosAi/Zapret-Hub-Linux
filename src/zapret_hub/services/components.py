@@ -261,6 +261,8 @@ class ProcessManager:
         self._image_running_cache: dict[str, tuple[float, bool]] = {}
         self._port_listening_cache: dict[tuple[str, int], tuple[float, bool]] = {}
         self._github_recovery_profile: dict[str, str] | None = None
+        self._component_releases_mem: dict[str, tuple[float, list[dict[str, str]]]] = {}
+        self._zapret_runtime_lock = threading.RLock()
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
         self.github = GitHubNetworkClient(logging, recovery_runner=self.with_github_connectivity_recovery)
         # Optional UI hook: (component_id, status, last_error) after optimistic starts fail.
@@ -3076,18 +3078,19 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
     def stage_zapret_candidate_runtime(self) -> Path:
         """Materialize candidate slot B without deleting live A (orchestrator cutover)."""
-        selected_option = self._resolve_selected_general_option()
-        if selected_option is None:
-            raise RuntimeError("No general script found.")
-        selected_script = Path(selected_option["path"])
-        selected_bundle_root = Path(selected_script).parent
-        # Preserve live + any explicitly pinned roots; only prune other orphans.
-        self._cleanup_inactive_zapret_runtimes(preserve_extra=getattr(self, "_orchestrator_preserve_runtimes", None))
-        return self._materialize_zapret_runtime(
-            selected_bundle_root=selected_bundle_root,
-            selected_bundle_id=str(selected_option["bundle_id"]),
-            selected_script_name=selected_script.name,
-        )
+        with self._zapret_runtime_lock:
+            selected_option = self._resolve_selected_general_option()
+            if selected_option is None:
+                raise RuntimeError("No general script found.")
+            selected_script = Path(selected_option["path"])
+            selected_bundle_root = Path(selected_script).parent
+            # Preserve live + any explicitly pinned roots; only prune other orphans.
+            self._cleanup_inactive_zapret_runtimes(preserve_extra=getattr(self, "_orchestrator_preserve_runtimes", None))
+            return self._materialize_zapret_runtime(
+                selected_bundle_root=selected_bundle_root,
+                selected_bundle_id=str(selected_option["bundle_id"]),
+                selected_script_name=selected_script.name,
+            )
 
     def pin_orchestrator_runtime(self, root: Path | None) -> None:
         """Keep an extra runtime directory alive during A/B cutover."""
@@ -3172,70 +3175,56 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return self._cutover_to_zapret_runtime(slot_b)
 
     def _cutover_to_zapret_runtime(self, active_root: Path) -> ComponentState:
+        """Replace live winws with a staged runtime.
+
+        winws refuses a second copy with the same WinDivert filter
+        (``A copy of winws is already running with the same filter``), so a true
+        warm A→B overlap is impossible. Stop A, wait for exit, then start B.
+        """
         active_root = Path(active_root)
-        old_pids = self._list_image_pids("winws.exe")
-        owned = self._processes.get("zapret")
-        owned_pid = int(getattr(owned, "pid", 0) or 0) if owned is not None else 0
-        if owned_pid:
-            old_pids.add(owned_pid)
+        with self._zapret_runtime_lock:
+            old_pids = self._list_image_pids("winws.exe")
+            owned = self._processes.get("zapret")
+            owned_pid = int(getattr(owned, "pid", 0) or 0) if owned is not None else 0
+            if owned_pid:
+                old_pids.add(owned_pid)
 
-        # Start B while A still holds WinDivert — never create a no-bypass window first.
-        state = self.start_zapret_from_runtime(active_root, assume_clean=True)
-        new_proc = self._processes.get("zapret")
-        new_pid = int(getattr(new_proc, "pid", 0) or 0) if new_proc is not None else 0
-        if str(getattr(state, "status", "") or "") == "running" and new_pid:
-            # Give B a moment to bind before dropping A.
-            alive = True
-            try:
-                alive = bool(self._wait_for_process_image("winws.exe", new_proc, attempts=8, delay=0.1))
-            except Exception:
-                alive = new_proc.poll() is None
-            if alive and new_proc.poll() is None:
-                self._kill_image_pids("winws.exe", keep_pids={new_pid})
-                self.logging.log(
-                    "info",
-                    "Zapret warm cutover: started B then stopped A",
-                    new_pid=new_pid,
-                    old_pids=sorted(old_pids - {new_pid}),
-                )
-                return state
-            # B died immediately — restore tracking of A if it is still up.
-            self._processes.pop("zapret", None)
-            if owned is not None and owned_pid and self._pid_running(owned_pid):
-                self._processes["zapret"] = owned
-                keep = ComponentState(component_id="zapret", status="running", pid=owned_pid)
-                self._states["zapret"] = keep
-                self.logging.log("warning", "Zapret warm cutover: B died; kept A running", old_pid=owned_pid)
-                return keep
+            if old_pids or self._is_image_running("winws.exe"):
+                self._soft_stop_zapret_image()
+                self._wait_for_image_exit("winws.exe", attempts=20, delay=0.08)
+                # Brief settle so WinDivert releases the filter before B binds.
+                time.sleep(0.25)
 
-        # B failed to start. Keep A running — do NOT soft-stop the live copy.
-        if owned is not None and owned_pid:
-            self._processes["zapret"] = owned
-            if self._pid_running(owned_pid) or self._is_image_running("winws.exe"):
-                keep = ComponentState(component_id="zapret", status="running", pid=owned_pid or None)
-                self._states["zapret"] = keep
-                self.logging.log(
-                    "warning",
-                    "Zapret warm cutover: B failed; kept A running",
-                    error=str(getattr(state, "last_error", "") or "start_b_failed"),
-                    old_pid=owned_pid,
-                )
-                return keep
+            if self._managed_zapret_driver_services():
+                if not self._purge_stale_zapret_runtime():
+                    err = ComponentState(
+                        component_id="zapret",
+                        status="error",
+                        last_error="Не удалось выгрузить прежний драйвер WinDivert Zapret Hub.",
+                    )
+                    self._states["zapret"] = err
+                    return err
 
-        # No live A either — only then start B alone (cold path).
-        self.logging.log("warning", "Zapret warm cutover: no live A; cold-starting B")
-        if self._is_image_running("winws.exe"):
-            self._soft_stop_zapret_image()
-        if self._managed_zapret_driver_services():
-            if not self._purge_stale_zapret_runtime():
-                err = ComponentState(
-                    component_id="zapret",
-                    status="error",
-                    last_error="Не удалось выгрузить прежний драйвер WinDivert Zapret Hub.",
-                )
-                self._states["zapret"] = err
-                return err
-        return self.start_zapret_from_runtime(active_root, assume_clean=True)
+            state = self.start_zapret_from_runtime(active_root, assume_clean=True)
+            new_proc = self._processes.get("zapret")
+            new_pid = int(getattr(new_proc, "pid", 0) or 0) if new_proc is not None else 0
+            if str(getattr(state, "status", "") or "") == "running" and new_pid and new_proc is not None:
+                alive = new_proc.poll() is None and self._pid_running(new_pid)
+                if alive:
+                    self.logging.log(
+                        "info",
+                        "Zapret cutover: stopped A then started B",
+                        new_pid=new_pid,
+                        old_pids=sorted(old_pids - {new_pid}),
+                    )
+                    return state
+
+            self.logging.log(
+                "warning",
+                "Zapret cutover: B failed after stopping A",
+                error=str(getattr(state, "last_error", "") or "start_b_failed"),
+            )
+            return state
 
     def start_zapret_from_runtime(self, active_root: Path, *, assume_clean: bool = False) -> ComponentState:
         """Start winws from an already-materialized runtime (no rebuild / no A wipe)."""
@@ -3303,19 +3292,17 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if self._job:
                 self._job.assign_pid(process.pid)
             self._processes[component_id] = process
-            # Brief wait: new winws must be alive before we treat cutover as done.
-            alive = self._wait_for_process_image("winws.exe", process, attempts=10, delay=0.08)
-            if process.poll() is not None and not alive:
-                log_hint = self._recent_source_log_error("zapret")
-                self._close_source_log_stream("zapret")
-                state = ComponentState(
-                    component_id=component_id,
-                    status="error",
-                    last_error=log_hint or "winws did not start from staged runtime",
-                )
-                self._states[component_id] = state
-                return state
-            if process.poll() is not None:
+            # Require THIS pid to stay alive — any other winws (old A) must not count.
+            alive = False
+            for _ in range(12):
+                if process.poll() is not None:
+                    alive = False
+                    break
+                if self._pid_running(int(process.pid)):
+                    alive = True
+                    break
+                time.sleep(0.08)
+            if process.poll() is not None or not alive:
                 log_hint = self._recent_source_log_error("zapret")
                 self._close_source_log_stream("zapret")
                 state = ComponentState(
@@ -3403,6 +3390,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._apply_gaming_set_list_overlays(lists_target)
         # After every overlay: restore any critical Flowseal bins a mod may have skipped.
         self._ensure_flowseal_critical_bins(active_root)
+        # Guarantee the selected general bat is present (overlays / races must not leave an empty slot).
+        if not (active_root / selected_script_name).is_file():
+            if selected_script.is_file():
+                shutil.copy2(selected_script, active_root / selected_script_name)
+            else:
+                bats = sorted(active_root.glob("general*.bat"))
+                if not bats and base_root.exists():
+                    for src in sorted((base_root).glob("general*.bat")):
+                        shutil.copy2(src, active_root / src.name)
         self._materialize_visible_merged_runtime(active_root)
         return active_root
 
@@ -4319,14 +4315,144 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             "pinned": "1",
         }
 
+    def _component_releases_cache_path(self, key: str) -> Path | None:
+        try:
+            return self.storage.paths.cache_dir / f"component_releases_{key}.json"
+        except Exception:
+            return None
+
+    def _releases_mem(self) -> dict[str, tuple[float, list[dict[str, str]]]]:
+        mem = getattr(self, "_component_releases_mem", None)
+        if not isinstance(mem, dict):
+            mem = {}
+            self._component_releases_mem = mem
+        return mem
+
+    def _load_component_releases_cache(self, key: str, *, max_age_s: float = 6 * 3600) -> list[dict[str, str]]:
+        now = time.time()
+        mem = self._releases_mem()
+        cached = mem.get(key)
+        if cached is not None and (now - float(cached[0])) <= max_age_s and cached[1]:
+            return [dict(item) for item in cached[1]]
+        path = self._component_releases_cache_path(key)
+        if path is None:
+            return []
+        try:
+            payload = self.storage.read_json(path, default=None)
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            return []
+        saved_at = float(payload.get("saved_at") or 0)
+        items = payload.get("items")
+        if saved_at <= 0 or (now - saved_at) > max_age_s or not isinstance(items, list) or not items:
+            return []
+        out = [dict(item) for item in items if isinstance(item, dict)]
+        if out:
+            mem[key] = (saved_at, out)
+        return [dict(item) for item in out]
+
+    def _save_component_releases_cache(self, key: str, items: list[dict[str, str]]) -> None:
+        clean = [dict(item) for item in items if isinstance(item, dict)]
+        if not clean:
+            return
+        now = time.time()
+        self._releases_mem()[key] = (now, clean)
+        path = self._component_releases_cache_path(key)
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.storage.write_json(path, {"saved_at": now, "items": clean})
+        except Exception as error:
+            try:
+                self.logging.log("warning", "Failed to cache component releases", key=key, error=str(error))
+            except Exception:
+                pass
+
+    def _fetch_release_atom_entries(self, repository: str, *, limit: int = 30) -> list[dict[str, str]]:
+        """Parse GitHub releases.atom (unauthenticated) into version tags newest-first."""
+        feed_url = f"https://github.com/{repository}/releases.atom"
+        payload = self.github.github_bytes(feed_url, timeout=20, purpose=f"{repository}-release-feed")
+        root = ET.fromstring(payload)
+        namespace = {"atom": "http://www.w3.org/2005/Atom"}
+        out: list[dict[str, str]] = []
+        marker = "/releases/tag/"
+        for entry in root.findall("atom:entry", namespace):
+            if len(out) >= max(1, int(limit)):
+                break
+            link = entry.find("atom:link[@rel='alternate']", namespace)
+            href = str(link.get("href") if link is not None else "")
+            tag = urllib.parse.unquote(href.split(marker, 1)[1]).strip() if marker in href else ""
+            if not tag:
+                title = entry.findtext("atom:title", default="", namespaces=namespace).strip()
+                tag = title.rsplit(" ", 1)[-1].strip()
+            version = tag.lstrip("vV")
+            if not version:
+                continue
+            published = entry.findtext("atom:updated", default="", namespaces=namespace) or entry.findtext(
+                "atom:published", default="", namespaces=namespace
+            )
+            out.append(
+                {
+                    "version": version,
+                    "tag": tag or version,
+                    "published_at": str(published or ""),
+                    "prerelease": "0",
+                    "recommended": "1" if not out else "0",
+                }
+            )
+        return out
+
     def list_zapret_releases(self, *, limit: int = 25) -> list[dict[str, str]]:
         """List Flowseal zapret-discord-youtube releases (newest first)."""
         repository = "Flowseal/zapret-discord-youtube"
-        api_url = f"https://api.github.com/repos/{repository}/releases?per_page={max(1, min(int(limit), 40))}"
+        capped = max(1, min(int(limit), 40))
+        cache_key = "zapret"
+        api_url = f"https://api.github.com/repos/{repository}/releases?per_page={capped}"
         try:
             payload = self.github.github_json(api_url, timeout=25, purpose="zapret-releases")
         except Exception as error:
             self.logging.log("warning", "Zapret releases API failed", error=str(error))
+            cached = self._load_component_releases_cache(cache_key)
+            if cached:
+                self.logging.log("info", "Using cached Zapret releases after API failure", count=len(cached))
+                return cached[:capped]
+            try:
+                atom_items = self._fetch_release_atom_entries(repository, limit=capped)
+            except Exception as atom_error:
+                self.logging.log("warning", "Zapret releases atom fallback failed", error=str(atom_error))
+                atom_items = []
+            if atom_items:
+                out: list[dict[str, str]] = []
+                for item in atom_items:
+                    version = str(item.get("version") or "")
+                    tag = str(item.get("tag") or version)
+                    out.append(
+                        {
+                            "version": version,
+                            "tag": tag,
+                            "asset_url": (
+                                f"https://github.com/{repository}/releases/download/"
+                                f"{urllib.parse.quote(tag)}/zapret-discord-youtube-{urllib.parse.quote(version)}.zip"
+                            ),
+                            "asset_name": f"zapret-discord-youtube-{version}.zip",
+                            "zipball_url": (
+                                f"https://codeload.github.com/{repository}/zip/refs/tags/{urllib.parse.quote(tag)}"
+                            ),
+                            "published_at": str(item.get("published_at") or ""),
+                            "prerelease": "0",
+                            "recommended": "1" if version == PINNED_ZAPRET_VERSION else "0",
+                        }
+                    )
+                if out:
+                    # Prefer Hub pin as recommended when present.
+                    for item in out:
+                        item["recommended"] = "1" if item.get("version") == PINNED_ZAPRET_VERSION else "0"
+                    if not any(item.get("recommended") == "1" for item in out):
+                        out[0]["recommended"] = "1"
+                    self._save_component_releases_cache(cache_key, out)
+                    return out[:capped]
             return [
                 {
                     "version": PINNED_ZAPRET_VERSION,
@@ -4340,8 +4466,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 }
             ]
         if not isinstance(payload, list):
-            return []
-        out: list[dict[str, str]] = []
+            cached = self._load_component_releases_cache(cache_key)
+            return cached[:capped] if cached else []
+        out = []
         for item in payload:
             if not isinstance(item, dict):
                 continue
@@ -4388,6 +4515,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     "recommended": "1" if version == PINNED_ZAPRET_VERSION else "0",
                 }
             )
+        if out:
+            self._save_component_releases_cache(cache_key, out)
         return out
 
     def ensure_pinned_zapret_runtime(self, *, force: bool = False) -> dict[str, str]:
@@ -4546,15 +4675,53 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         """List bol-van/zapret2 GitHub releases (newest first)."""
         repository = "bol-van/zapret2"
         capped = max(1, min(int(limit), 40))
+        cache_key = "zapret2"
         api_url = f"https://api.github.com/repos/{repository}/releases?per_page={capped}"
         try:
             payload = self.github.github_json(api_url, timeout=25, purpose="zapret2-releases")
         except Exception as error:
             self.logging.log("warning", "Zapret2 releases API failed", error=str(error))
-            return []
+            cached = self._load_component_releases_cache(cache_key)
+            if cached:
+                self.logging.log("info", "Using cached Zapret2 releases after API failure", count=len(cached))
+                return cached[:capped]
+            try:
+                atom_items = self._fetch_release_atom_entries(repository, limit=capped)
+            except Exception as atom_error:
+                self.logging.log("warning", "Zapret2 releases atom fallback failed", error=str(atom_error))
+                atom_items = []
+            if not atom_items:
+                return []
+            out: list[dict[str, str]] = []
+            for item in atom_items:
+                version = str(item.get("version") or "")
+                tag = str(item.get("tag") or f"v{version}")
+                if not tag.startswith("v"):
+                    tag = f"v{version}"
+                asset_url = (
+                    f"https://github.com/{repository}/releases/download/"
+                    f"{urllib.parse.quote(tag)}/zapret2-{urllib.parse.quote(tag)}.zip"
+                )
+                out.append(
+                    {
+                        "version": version,
+                        "tag": tag,
+                        "asset_url": asset_url,
+                        "asset_name": f"zapret2-{tag}.zip",
+                        "source_url": asset_url,
+                        "zipball_url": f"https://codeload.github.com/{repository}/zip/refs/tags/{urllib.parse.quote(tag)}",
+                        "published_at": str(item.get("published_at") or ""),
+                        "prerelease": "0",
+                        "recommended": "1" if not out else "0",
+                    }
+                )
+            if out:
+                self._save_component_releases_cache(cache_key, out)
+            return out[:capped]
         if not isinstance(payload, list):
-            return []
-        out: list[dict[str, str]] = []
+            cached = self._load_component_releases_cache(cache_key)
+            return cached[:capped] if cached else []
+        out = []
         for item in payload:
             if not isinstance(item, dict) or bool(item.get("draft")):
                 continue
@@ -4606,6 +4773,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     "recommended": "1" if not out else "0",
                 }
             )
+        if out:
+            self._save_component_releases_cache(cache_key, out)
         return out
 
     def install_zapret2_version(self, version: str) -> dict[str, str]:
@@ -4678,11 +4847,51 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         """List Flowseal/tg-ws-proxy GitHub releases (newest first)."""
         repository = "Flowseal/tg-ws-proxy"
         capped = max(1, min(int(limit), 40))
+        cache_key = "tg-ws-proxy"
         api_url = f"https://api.github.com/repos/{repository}/releases?per_page={capped}"
         try:
             payload = self.github.github_json(api_url, timeout=25, purpose="tg-ws-proxy-releases")
         except Exception as error:
             self.logging.log("warning", "TG WS Proxy releases API failed", error=str(error))
+            cached = self._load_component_releases_cache(cache_key)
+            if cached:
+                self.logging.log("info", "Using cached TG WS Proxy releases after API failure", count=len(cached))
+                return cached[:capped]
+            try:
+                atom_items = self._fetch_release_atom_entries(repository, limit=capped)
+            except Exception as atom_error:
+                self.logging.log("warning", "TG WS Proxy releases atom fallback failed", error=str(atom_error))
+                atom_items = []
+            if atom_items:
+                out: list[dict[str, str]] = []
+                for item in atom_items:
+                    version = str(item.get("version") or "")
+                    tag = str(item.get("tag") or f"v{version}")
+                    if not str(tag).startswith("v"):
+                        tag = f"v{version}"
+                    out.append(
+                        {
+                            "version": version,
+                            "tag": tag,
+                            "source_url": (
+                                f"https://codeload.github.com/{repository}/zip/refs/tags/{urllib.parse.quote(tag)}"
+                            ),
+                            "zipball_url": (
+                                f"https://codeload.github.com/{repository}/zip/refs/tags/{urllib.parse.quote(tag)}"
+                            ),
+                            "exe_url": (
+                                f"https://github.com/{repository}/releases/download/"
+                                f"{urllib.parse.quote(tag)}/TgWsProxy_windows.exe"
+                            ),
+                            "exe_name": "TgWsProxy_windows.exe",
+                            "published_at": str(item.get("published_at") or ""),
+                            "prerelease": "0",
+                            "recommended": "1" if not out else "0",
+                        }
+                    )
+                if out:
+                    self._save_component_releases_cache(cache_key, out)
+                return out[:capped]
             try:
                 latest = self.fetch_latest_tg_ws_proxy_release()
                 version = str(latest.get("latest_version") or "")
@@ -4704,8 +4913,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             except Exception:
                 return []
         if not isinstance(payload, list):
-            return []
-        out: list[dict[str, str]] = []
+            cached = self._load_component_releases_cache(cache_key)
+            return cached[:capped] if cached else []
+        out = []
         for item in payload:
             if not isinstance(item, dict) or bool(item.get("draft")):
                 continue
@@ -4745,6 +4955,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     "recommended": "1" if not out else "0",
                 }
             )
+        if out:
+            self._save_component_releases_cache(cache_key, out)
         return out
 
     def install_tg_ws_proxy_version(self, version: str) -> dict[str, str]:
@@ -5409,14 +5621,19 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         attempts: int = 12,
         delay: float = 0.1,
     ) -> bool:
-        """Poll until image is visible or owned process exits. Caps ~1.2s by default."""
+        """Poll until the owned PID is alive (not merely any copy of the image)."""
         for _ in range(max(1, int(attempts))):
             if process is not None and process.poll() is not None:
                 return False
-            if self._is_image_running(image_name):
+            if process is not None and getattr(process, "pid", None):
+                if self._pid_running(int(process.pid)):
+                    return True
+            elif self._is_image_running(image_name):
                 return True
             time.sleep(max(0.02, float(delay)))
-        return self._is_image_running(image_name)
+        if process is not None and process.poll() is None and getattr(process, "pid", None):
+            return self._pid_running(int(process.pid))
+        return process is None and self._is_image_running(image_name)
 
     def _schedule_bypass_start_confirm(
         self,
@@ -5457,6 +5674,23 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                             "starting",
                         }:
                             return
+                        # Owned pid may still be running even if Popen handle looks dead
+                        # (or a sibling image is still healthy after a false poll).
+                        pid = int(getattr(process, "pid", 0) or 0)
+                        if pid and self._pid_running(pid):
+                            continue
+                        if image_name and self._is_image_running(image_name):
+                            # Another Hub-managed copy survived — do not false-error.
+                            log_tail = ""
+                            try:
+                                path = Path(self.logging.source_log_path(component_id))
+                                if path.exists():
+                                    log_tail = path.read_text(encoding="utf-8", errors="ignore")[-1200:]
+                            except Exception:
+                                log_tail = ""
+                            if self._zapret_log_indicates_capture_started(log_tail):
+                                self._image_running_cache[image_name] = (time.time(), True)
+                                return
                         log_hint = self._recent_source_log_error(component_id)
                         error_message = log_hint or f"{component_id} exited right after start"
                         try:
@@ -5964,12 +6198,38 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
         except Exception:
             return ""
+        success_markers = (
+            "capture is started",
+            "windivert initialized",
+            "loading plain text list",
+            "loaded ",
+            "session-start",
+            "github version",
+            "we have ",
+            "lua v",
+            "jit:",
+        )
+        failure_markers = (
+            "could not read",
+            "bad identifier",
+            "already running",
+            "failed",
+            "error",
+            "cannot",
+            "unable",
+            "access is denied",
+            "permission",
+            "not found",
+            "fatal",
+        )
         for line in reversed(lines[-80:]):
             text = line.strip()
             if not text or text.startswith("["):
                 continue
             lowered = text.lower()
-            if "error" in lowered or "failed" in lowered or "windivert" in lowered:
+            if any(marker in lowered for marker in success_markers):
+                continue
+            if any(marker in lowered for marker in failure_markers):
                 return text
         return ""
 
