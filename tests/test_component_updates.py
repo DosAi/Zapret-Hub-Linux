@@ -135,18 +135,68 @@ def test_zapret2_default_profiles_include_discord_media_and_voice() -> None:
         "exclude": Path("exclude.txt"),
         "ipset": Path("ipset.txt"),
     }
+    repo = Path(__file__).resolve().parents[1]
+    fake_root = repo / "runtime" / "zapret2"
+    flowseal_bin = repo / "runtime" / "zapret-discord-youtube" / "bin"
     args = zapret2_hub.build_default_profile_args(
         lists=lists,
-        asset_roots=[],
+        asset_roots=[fake_root] if fake_root.is_dir() else [],
         tcp_ports="80,443,2053,2083,2087,2096,8443",
         include_hostlist_auto=False,
+        flowseal_bin=flowseal_bin if flowseal_bin.is_dir() else None,
     )
     joined = " ".join(args)
-    assert "--filter-tcp=2053,2083,2087,2096,8443" in joined
+    assert "--blob=quic_google=@" in joined or not fake_root.is_dir()
+    assert "--blob=tls_google=@" in joined or not fake_root.is_dir()
+    assert "--blob=discord_udp=@" in joined or not (fake_root.is_dir() or flowseal_bin.is_dir())
     assert "--hostlist-domains=discord.media" in joined
+    assert "--hostlist-domains=updates.discord.com" in joined
+    assert "--hostlist-domains=googlevideo.com" in joined
     assert "--filter-udp=19294-19344,50000-50100" in joined
     assert "--filter-l7=discord,stun" in joined
     assert "--lua-desync=hub_discord" in joined
+    assert "--lua-desync=hub_discord_ipdisc" in joined
+    # balanced (default) = youtubediscord Default v5 syndata path
+    assert "--lua-desync=syndata:blob=tls_google" in joined
+    assert "--lua-desync=hub_youtube" in joined
+    assert "--lua-desync=hub_googlevideo" in joined
+    assert "--ipcache-hostname=1" in joined
+    assert "--ipset-exclude-ip=162.158.0.0/15,162.159.128.0/20" in joined
+    # Discord profiles must appear before general TLS.
+    assert joined.index("--lua-desync=hub_discord") < joined.index("--lua-desync=hub_tls")
+
+    multi = zapret2_hub.build_default_profile_args(
+        lists=lists,
+        asset_roots=[fake_root] if fake_root.is_dir() else [],
+        tcp_ports="80,443,2053,2083,2087,2096,8443",
+        strategy_id="multisplit",
+        include_hostlist_auto=False,
+        flowseal_bin=flowseal_bin if flowseal_bin.is_dir() else None,
+    )
+    multi_joined = " ".join(multi)
+    assert "--lua-desync=hub_discord_https" in multi_joined
+    assert "--lua-desync=hub_discord_media" in multi_joined
+
+
+def test_harvest_skips_discord_breaking_cloudflare_cidrs() -> None:
+    from zapret_hub.services.orchestrator import zapret2_hub
+
+    ips = zapret2_hub.harvest_service_ips(["cloudflare", "discord"], include_bypass_seeds=True)
+    lowered = {item.lower() for item in ips}
+    assert "162.158.0.0/15" not in lowered
+    assert "162.159.128.0/20" not in lowered
+    assert "1.1.1.0/24" in lowered
+
+
+def test_flowseal_discord_domains_seeded() -> None:
+    from zapret_hub.services.orchestrator import zapret2_hub
+
+    assert "dis.gd" in zapret2_hub.FLOWSEAL_DISCORD_DOMAINS
+    assert "discordapp.io" in zapret2_hub.FLOWSEAL_DISCORD_DOMAINS
+    assert "discord.com" in zapret2_hub.BYPASS_SEED_DOMAINS
+    assert "stable.dl2.discordapp.net" in zapret2_hub.BYPASS_SEED_DOMAINS
+    assert "youtubekids.com" in zapret2_hub.YOUTUBE_SEED_DOMAINS
+    assert "jnn-pa.googleapis.com" in zapret2_hub.BYPASS_SEED_DOMAINS
 
 
 def test_zapret_bundles_keep_installed_layer_order(tmp_path: Path) -> None:

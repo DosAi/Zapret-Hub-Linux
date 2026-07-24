@@ -1,32 +1,37 @@
 --[[
   Zapret Hub — YouTube / Discord bypass seed for winws2 (Zapret 2).
-  Catalogs mirror Flowseal/FluxRoute-style lists. Packet desync is applied by
-  Hub orchestrator Lua (hub_tls / hub_http / hub_quic / hub_discord) and
-  --hostlist / --ipset files that Hub materializes. This file is loaded via
-  --lua-init so the preset stays available in Manual and Auto modes.
+  Catalogs mirror Flowseal + youtubediscord/zapret2-youtube-discord lists.
+  Packet desync is applied by Hub orchestrator Lua and hostlist/ipset files.
 ]]
 
 HUB_BYPASS_YOUTUBE_DISCORD = true
-HUB_BYPASS_YOUTUBE_DISCORD_VERSION = "1"
+HUB_BYPASS_YOUTUBE_DISCORD_VERSION = "2"
 
 -- Domain catalog (hostlist files are authoritative; this mirrors them for Lua).
 HUB_BYPASS_DOMAINS = {
+  "dis.gd",
   "discord.com",
-  "discordapp.com",
   "discord.gg",
   "discord.media",
+  "discordapp.com",
+  "discordapp.io",
+  "discordapp.net",
   "discordcdn.com",
   "discordstatus.com",
+  "discords.com",
   "cdn.discordapp.com",
   "media.discordapp.net",
   "gateway.discord.gg",
   "images-ext-1.discordapp.net",
   "images-ext-2.discordapp.net",
   "dl.discordapp.net",
+  "stable.dl2.discordapp.net",
   "status.discord.com",
   "latency.discord.media",
   "updates.discord.com",
+  "discord-attachments-uploads-prd.storage.googleapis.com",
   "youtube.com",
+  "youtubekids.com",
   "youtu.be",
   "ytimg.com",
   "googlevideo.com",
@@ -38,6 +43,7 @@ HUB_BYPASS_DOMAINS = {
   "yt3.googleusercontent.com",
   "manifest.googlevideo.com",
   "redirector.googlevideo.com",
+  "jnn-pa.googleapis.com",
 }
 
 HUB_BYPASS_NETWORKS = {

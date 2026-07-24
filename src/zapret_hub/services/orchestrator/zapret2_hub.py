@@ -17,28 +17,59 @@ LUA_TARGETS = "hub-targets.lua"
 # Curated strategy ids — rewritten into hub-strategy.lua; winws2 restart required.
 STRATEGY_IDS = ("balanced", "fake_heavy", "multisplit")
 
-# Seed lists adapted from Downloads/bypass-youtube-discord.lua (FluxRoute → Goshkow).
+# Seed lists adapted from Flowseal zapret-discord-youtube + Hub catalogs.
 # In real winws2 filtering uses hostlist/ipset files; Lua keeps the same catalog for docs/sync.
-BYPASS_SEED_DOMAINS: tuple[str, ...] = (
-    # Discord
+
+# Flowseal list-general Discord section (ported for Zapret2 hostlists).
+FLOWSEAL_DISCORD_DOMAINS: tuple[str, ...] = (
+    # Flowseal list-general + youtubediscord/zapret2-youtube-discord lists/discord.txt
+    "dis.gd",
+    "discord-attachments-uploads-prd.storage.googleapis.com",
+    "discord.app",
+    "discord.co",
     "discord.com",
-    "discordapp.com",
+    "discord.design",
+    "discord.dev",
+    "discord.gift",
+    "discord.gifts",
     "discord.gg",
     "discord.media",
+    "discord.me",
+    "discord.new",
+    "discord.st",
+    "discord.store",
+    "discord.status",
+    "discord.tools",
+    "discord-activities.com",
+    "discordactivities.com",
+    "discordapp.com",
+    "discordapp.io",
+    "discordapp.net",
     "discordcdn.com",
+    "discordmerch.com",
+    "discordpartygames.com",
+    "discords.com",
+    "discordsays.com",
+    "discordsez.com",
     "discordstatus.com",
     "cdn.discordapp.com",
     "media.discordapp.net",
     "gateway.discord.gg",
-    "images-ext-1.discordapp.net",
-    "images-ext-2.discordapp.net",
-    "dl.discordapp.net",
+    "updates.discord.com",
     "status.discord.com",
     "latency.discord.media",
-    "updates.discord.com",
-    # YouTube / Google video
+    "dl.discordapp.net",
+    "stable.dl2.discordapp.net",
+    "images-ext-1.discordapp.net",
+    "images-ext-2.discordapp.net",
+)
+
+# youtubediscord/zapret2-youtube-discord lists/youtube.txt (core).
+YOUTUBE_SEED_DOMAINS: tuple[str, ...] = (
     "youtube.com",
+    "youtubekids.com",
     "youtu.be",
+    "yt.be",
     "ytimg.com",
     "googlevideo.com",
     "youtube-nocookie.com",
@@ -46,10 +77,25 @@ BYPASS_SEED_DOMAINS: tuple[str, ...] = (
     "gvt1.com",
     "youtube.googleapis.com",
     "youtubei.googleapis.com",
+    "youtubeembeddedplayer.googleapis.com",
     "yt3.googleusercontent.com",
+    "lh3.googleusercontent.com",
     "manifest.googlevideo.com",
     "redirector.googlevideo.com",
-    # From the sample script (optional extras)
+    "jnn-pa.googleapis.com",
+    "youtube-ui.l.google.com",
+    "yt-video-upload.l.google.com",
+    "wide-youtube.l.google.com",
+    "ytimg.l.google.com",
+    "googleadservices.com",
+)
+
+BYPASS_SEED_DOMAINS: tuple[str, ...] = (
+    # Discord (Flowseal + youtubediscord lists)
+    *FLOWSEAL_DISCORD_DOMAINS,
+    # YouTube / Google video
+    *YOUTUBE_SEED_DOMAINS,
+    # Common companions
     "instagram.com",
     "cdninstagram.com",
     "twitch.tv",
@@ -68,14 +114,37 @@ BYPASS_SEED_NETWORKS: tuple[str, ...] = (
     # range breaks Discord updates — same rule as classic Zapret / cutover Auto.
 )
 
+# bol-van / Flowseal Discord capture (WinDivert + profile filters).
+DISCORD_MEDIA_TCP_PORTS = "2053,2083,2087,2096,8443"
+DISCORD_VOICE_UDP_PORTS = "19294-19344,50000-50100"
+DISCORD_HOSTLIST_DOMAINS = ",".join(FLOWSEAL_DISCORD_DOMAINS)
+
+# Cloudflare parent that covers Discord CDN. ipset desync on these ranges
+# breaks Discord HTTPS/updates (Flowseal + Hub classic already strip them).
+DISCORD_BREAKING_IPSETS: frozenset[str] = frozenset(
+    {
+        "162.158.0.0/15",
+        "162.159.128.0/20",
+    }
+)
+DISCORD_IPSET_EXCLUDE_IP = "162.158.0.0/15,162.159.128.0/20"
+
 _HUB_ORCHESTRATOR_LUA = r'''--[[
   Zapret Hub orchestrator Lua for winws2 (bol-van zapret2).
-  Domain/IP catalogs mirror bypass-youtube-discord.lua; actual matching uses
-  --hostlist / --ipset files that Hub rewrites (auto-reload, no restart).
-  Strategy knobs come from hub-strategy.lua (HUB_STRATEGY).
+
+  Discord / YouTube stack combines:
+    - Flowseal zapret-discord-youtube (voice UDP ACTIVE_DISCORD_UDP ×6, media multisplit)
+    - youtubediscord/zapret2-youtube-discord Default v5 (send+syndata for Discord TLS,
+      googlevideo multisplit sniext, youtube tls_max fake+multidisorder)
+    - bol-van official IP discovery (zero fake ×2)
+
+  Strategy (HUB_STRATEGY) switches Discord TLS / YouTube helpers:
+    balanced   → syndata path (Default v5) for Discord HTTPS/media; Flowseal voice
+    multisplit → Flowseal multisplit Discord TLS
+    fake_heavy → general ALT style fake+fakedsplit (tcp_ts)
 ]]
 
-HUB_ORCHESTRATOR_VERSION = 2
+HUB_ORCHESTRATOR_VERSION = 5
 
 local function _strategy()
   return (HUB_STRATEGY and tostring(HUB_STRATEGY)) or "balanced"
@@ -92,19 +161,21 @@ function hub_tls(ctx, desync)
   local arg = _ensure_arg(desync)
   local s = _strategy()
   if s == "fake_heavy" then
-    arg.blob = arg.blob or "fake_default_tls"
+    arg.blob = arg.blob or "tls_google"
     arg.tcp_md5 = ""
     arg.repeats = arg.repeats or 11
     arg.tls_mod = arg.tls_mod or "rnd,dupsid,rndsni"
     return fake(ctx, desync)
   elseif s == "multisplit" then
     arg.pos = arg.pos or "1"
-    arg.seqovl = arg.seqovl or "5"
-    arg.seqovl_pattern = arg.seqovl_pattern or "0x1603030000"
+    arg.seqovl = arg.seqovl or "681"
+    arg.seqovl_pattern = arg.seqovl_pattern or "tls_google"
     return multisplit(ctx, desync)
   end
-  arg.blob = arg.blob or "fake_default_tls"
+  arg.blob = arg.blob or "tls_google"
   arg.tcp_md5 = ""
+  arg.tcp_ts = arg.tcp_ts or "-10000"
+  arg.repeats = arg.repeats or 6
   arg.tls_mod = arg.tls_mod or "rnd,rndsni,dupsid"
   return fake(ctx, desync)
 end
@@ -116,14 +187,14 @@ function hub_tls_b(ctx, desync)
     arg.pos = arg.pos or "1,midsld"
     return multidisorder(ctx, desync)
   elseif s == "multisplit" then
-    arg.blob = arg.blob or "fake_default_tls"
+    arg.blob = arg.blob or "tls_google"
     arg.tcp_md5 = ""
     arg.tls_mod = arg.tls_mod or "rnd,dupsid"
     return fake(ctx, desync)
   end
   arg.pos = arg.pos or "1"
-  arg.seqovl = arg.seqovl or "5"
-  arg.seqovl_pattern = arg.seqovl_pattern or "0x1603030000"
+  arg.seqovl = arg.seqovl or "681"
+  arg.seqovl_pattern = arg.seqovl_pattern or "tls_google"
   return multisplit(ctx, desync)
 end
 
@@ -158,20 +229,128 @@ end
 function hub_quic(ctx, desync)
   local arg = _ensure_arg(desync)
   local s = _strategy()
-  arg.blob = arg.blob or "fake_default_quic"
+  arg.blob = arg.blob or "quic_google"
   if s == "fake_heavy" then
     arg.repeats = arg.repeats or 11
-  elseif s == "multisplit" then
+  else
     arg.repeats = arg.repeats or 6
   end
   return fake(ctx, desync)
 end
 
+-- Flowseal voice: dpi-desync-fake-discord=ACTIVE_DISCORD_UDP.bin repeats=6
+-- Registered as --blob=discord_udp=@ACTIVE_DISCORD_UDP.bin; fallback quic_google.
 function hub_discord(ctx, desync)
+  local arg = _ensure_arg(desync)
+  arg.blob = arg.blob or "discord_udp"
+  arg.repeats = arg.repeats or 6
+  return fake(ctx, desync)
+end
+
+-- bol-van official IP-discovery-only (50-discord-media / preset2).
+function hub_discord_ipdisc(ctx, desync)
   local arg = _ensure_arg(desync)
   arg.blob = arg.blob or "0x00000000000000000000000000000000"
   arg.repeats = arg.repeats or 2
   return fake(ctx, desync)
+end
+
+-- Flowseal discord.media: multisplit ONLY (seqovl=681, pos=1, google TLS pattern).
+function hub_discord_media(ctx, desync)
+  local arg = _ensure_arg(desync)
+  arg.pos = arg.pos or "1"
+  arg.seqovl = arg.seqovl or "681"
+  arg.seqovl_pattern = arg.seqovl_pattern or "tls_google"
+  return multisplit(ctx, desync)
+end
+
+-- Community (#131) extra fake before/after media multisplit when strategy is aggressive.
+function hub_discord_media_fake(ctx, desync)
+  local arg = _ensure_arg(desync)
+  arg.blob = arg.blob or "tls_google"
+  arg.tcp_ts = arg.tcp_ts or "-10000"
+  arg.tcp_seq = arg.tcp_seq or "400"
+  arg.repeats = arg.repeats or 8
+  return fake(ctx, desync)
+end
+
+-- Flowseal Discord HTTPS (list-general path): multisplit with 4pda pattern (seqovl=568).
+function hub_discord_https(ctx, desync)
+  local arg = _ensure_arg(desync)
+  arg.pos = arg.pos or "1"
+  arg.seqovl = arg.seqovl or "568"
+  arg.seqovl_pattern = arg.seqovl_pattern or "tls_4pda"
+  return multisplit(ctx, desync)
+end
+
+-- youtubediscord Default v5 / general ALT Discord TLS helpers (used when strategy flips).
+function hub_discord_fake_ts(ctx, desync)
+  local arg = _ensure_arg(desync)
+  arg.blob = arg.blob or "tls_google"
+  arg.tcp_ts = arg.tcp_ts or "-600000"
+  arg.repeats = arg.repeats or 6
+  return fake(ctx, desync)
+end
+
+function hub_discord_fakedsplit(ctx, desync)
+  local arg = _ensure_arg(desync)
+  arg.pattern = arg.pattern or "0x00"
+  arg.tcp_ts = arg.tcp_ts or "-600000"
+  arg.repeats = arg.repeats or 6
+  return fakedsplit(ctx, desync)
+end
+
+-- YouTube (youtubediscord Default v5): fake tls_max + multidisorder seqovl=681.
+function hub_youtube(ctx, desync)
+  local arg = _ensure_arg(desync)
+  local s = _strategy()
+  if s == "multisplit" then
+    arg.pos = arg.pos or "1"
+    arg.seqovl = arg.seqovl or "681"
+    arg.seqovl_pattern = arg.seqovl_pattern or "tls_google"
+    return multisplit(ctx, desync)
+  elseif s == "fake_heavy" then
+    arg.blob = arg.blob or "tls_google"
+    arg.tcp_ts = arg.tcp_ts or "-600000"
+    arg.repeats = arg.repeats or 6
+    return fake(ctx, desync)
+  end
+  arg.blob = arg.blob or "tls_max"
+  arg.badsum = true
+  arg.repeats = arg.repeats or 8
+  return fake(ctx, desync)
+end
+
+function hub_youtube_b(ctx, desync)
+  local arg = _ensure_arg(desync)
+  local s = _strategy()
+  if s == "fake_heavy" then
+    arg.pattern = arg.pattern or "0x00"
+    arg.tcp_ts = arg.tcp_ts or "-600000"
+    arg.repeats = arg.repeats or 6
+    return fakedsplit(ctx, desync)
+  elseif s == "multisplit" then
+    return hub_tls_b(ctx, desync)
+  end
+  arg.pos = arg.pos or "1"
+  arg.seqovl = arg.seqovl or "681"
+  arg.seqovl_pattern = arg.seqovl_pattern or "tls_max"
+  return multidisorder(ctx, desync)
+end
+
+-- googlevideo.com (Default v5): multisplit at sniext+1 / midsld.
+function hub_googlevideo(ctx, desync)
+  local arg = _ensure_arg(desync)
+  local s = _strategy()
+  if s == "fake_heavy" then
+    arg.blob = arg.blob or "tls_google"
+    arg.tcp_ts = arg.tcp_ts or "-600000"
+    arg.repeats = arg.repeats or 6
+    return fake(ctx, desync)
+  end
+  arg.pos = arg.pos or "sniext+1,midsld"
+  arg.seqovl = arg.seqovl or "652"
+  return multisplit(ctx, desync)
 end
 '''
 
@@ -261,9 +440,13 @@ def write_hub_orchestrator_lua(path: Path, *, force: bool = False) -> Path:
         try:
             current = path.read_text(encoding="utf-8", errors="ignore")
             if (
-                "HUB_ORCHESTRATOR_VERSION = 2" in current
+                "HUB_ORCHESTRATOR_VERSION = 5" in current
                 and "function hub_tls" in current
                 and "function hub_discord" in current
+                and "function hub_discord_media" in current
+                and "function hub_discord_https" in current
+                and "function hub_youtube" in current
+                and "function hub_googlevideo" in current
             ):
                 return path
         except Exception:
@@ -277,7 +460,14 @@ def write_hub_targets_lua(path: Path, *, force: bool = False) -> Path:
     if not force and path.exists():
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
-            if "HUB_TARGET_DOMAINS" in text and "HUB_TARGET_NETWORKS" in text:
+            # Refresh when Flowseal Discord catalog markers are missing.
+            if (
+                "HUB_TARGET_DOMAINS" in text
+                and "HUB_TARGET_NETWORKS" in text
+                and "discordapp.io" in text
+                and "youtubekids.com" in text
+                and "stable.dl2.discordapp.net" in text
+            ):
                 return path
         except Exception:
             pass
@@ -311,9 +501,10 @@ def write_hub_strategy_lua(configs_dir: Path, strategy_id: str) -> Path:
 
 def prepare_zapret2_runtime_files(configs_dir: Path, strategy_id: str) -> dict[str, Path]:
     paths = ensure_zapret2_lists(configs_dir)
-    write_hub_orchestrator_lua(paths["lua_orch"])
+    write_hub_orchestrator_lua(paths["lua_orch"], force=False)
     write_hub_targets_lua(paths["lua_targets"])
     write_hub_strategy_lua(configs_dir, strategy_id)
+    sanitize_zapret2_discord_ipset(configs_dir)
     return paths
 
 
@@ -353,8 +544,14 @@ def add_auto_domains(configs_dir: Path, domains: list[str], *, reason: str = "le
 
 def add_ips(configs_dir: Path, ips: list[str]) -> list[str]:
     paths = ensure_zapret2_lists(configs_dir)
-    cleaned = [item.strip() for item in ips if item and item.strip()]
-    return _append_unique(paths["ipset"], cleaned)
+    cleaned = [
+        item.strip()
+        for item in ips
+        if item and item.strip() and item.strip().lower() not in DISCORD_BREAKING_IPSETS
+    ]
+    added = _append_unique(paths["ipset"], cleaned)
+    strip_discord_breaking_ipsets(paths["ipset"])
+    return added
 
 
 def add_auto_ips(configs_dir: Path, ips: list[str], *, reason: str = "learn") -> list[str]:
@@ -548,26 +745,83 @@ def harvest_service_ips(service_ids: list[str], *, include_bypass_seeds: bool = 
     """
     out: list[str] = []
     seen: set[str] = set()
+    selected = {str(item) for item in service_ids}
+    # Always drop Discord-breaking Cloudflare parents when Discord is in the set
+    # (or when seeding the YT/Discord bypass catalog).
+    ban = set(DISCORD_BREAKING_IPSETS) if ("discord" in selected or include_bypass_seeds) else set()
     extras = (
         list(BYPASS_SEED_NETWORKS)
-        if include_bypass_seeds and any(s in {"youtube", "discord"} for s in service_ids)
+        if include_bypass_seeds and any(s in {"youtube", "discord"} for s in selected)
         else []
     )
     for service_id in service_ids:
         rule = SERVICE_RULES.get(service_id)
         if rule is None:
             continue
+        # Discord is hostlist-only — never harvest its identity CDN into ipset.
+        if str(service_id) == "discord":
+            continue
         for item in rule.ipset_all or ():
             value = str(item).strip()
             if not value or value in seen:
                 continue
+            if value.lower() in ban:
+                continue
+            # Cloudflare + Discord: same parent-range kill as classic Zapret.
+            if "discord" in selected and str(service_id) == "cloudflare":
+                if value.lower() in DISCORD_BREAKING_IPSETS:
+                    continue
             seen.add(value)
             out.append(value)
     for value in extras:
-        if value not in seen:
+        if value not in seen and value.lower() not in ban:
             seen.add(value)
             out.append(value)
     return out
+
+
+def strip_discord_breaking_ipsets(*paths: Path) -> int:
+    """Remove Cloudflare/Discord CDN parents from ipset files. Returns removed count."""
+    ban = {item.lower() for item in DISCORD_BREAKING_IPSETS}
+    removed = 0
+    for path in paths:
+        if path is None or not Path(path).is_file():
+            continue
+        try:
+            lines = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            continue
+        kept: list[str] = []
+        changed = 0
+        for line in lines:
+            key = line.strip().lower()
+            if key and not key.startswith("#") and key in ban:
+                changed += 1
+                continue
+            kept.append(line.rstrip())
+        if changed:
+            Path(path).write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+            removed += changed
+    return removed
+
+
+def sanitize_zapret2_discord_ipset(configs_dir: Path, *, runtime_dir: Path | None = None) -> int:
+    """Keep Discord hostlist-only under Zapret2: scrub breaking CIDRs from hub ipsets."""
+    configs = Path(configs_dir)
+    paths: list[Path] = []
+    try:
+        paths.append(ensure_zapret2_lists(configs)["ipset"])
+    except Exception:
+        paths.append(configs / "zapret2" / IPSET_HUB)
+    if runtime_dir is not None:
+        root = Path(runtime_dir) / "zapret2"
+        paths.extend(
+            [
+                root / "lists_auto" / IPSET_HUB,
+                root / "lists_manual" / IPSET_HUB,
+            ]
+        )
+    return strip_discord_breaking_ipsets(*paths)
 
 
 def sanitize_classic_discord_pollution(configs_dir: Path) -> dict[str, int]:
@@ -575,6 +829,7 @@ def sanitize_classic_discord_pollution(configs_dir: Path) -> dict[str, int]:
 
     Older Hub builds wrote BYPASS_SEED_NETWORKS into ipset-all-user.txt and could
     exclude discord.com after failed probes — both break Discord HTTPS vs 2.1.2.
+    Also scrubs Zapret2 ipset-hub.txt (Cloudflare 162.158.0.0/15 covers Discord).
     """
     from zapret_hub.services.orchestrator.auto_overlay import is_service_protected_host
     from zapret_hub.services.service_rules import AUTO_DEFAULT_SERVICE_IDS
@@ -582,36 +837,45 @@ def sanitize_classic_discord_pollution(configs_dir: Path) -> dict[str, int]:
     configs = Path(configs_dir)
     removed_ips = 0
     removed_excludes = 0
-    ban_ips = {str(item).strip().lower() for item in BYPASS_SEED_NETWORKS}
+
+    # Classic user overlay: stock service CIDRs must not live in ipset-all-user.
+    classic_ban = {str(item).strip().lower() for item in BYPASS_SEED_NETWORKS}
+    classic_ban |= {str(item).strip().lower() for item in DISCORD_BREAKING_IPSETS}
     for rule in SERVICE_RULES.values():
         for item in getattr(rule, "identity_networks", ()) or ():
-            ban_ips.add(str(item).strip().lower())
+            classic_ban.add(str(item).strip().lower())
     for sid in AUTO_DEFAULT_SERVICE_IDS:
         rule = SERVICE_RULES.get(sid)
         if rule is None:
             continue
         for item in rule.ipset_all or ():
-            ban_ips.add(str(item).strip().lower())
+            classic_ban.add(str(item).strip().lower())
         for _name, entries in rule.extra_lists or ():
             if "ipset" in str(_name).lower():
                 for item in entries:
-                    ban_ips.add(str(item).strip().lower())
+                    classic_ban.add(str(item).strip().lower())
 
-    ipset_path = configs / "ipset-all-user.txt"
-    if ipset_path.is_file():
+    for ipset_path in (configs / "ipset-all-user.txt", configs / "ipset-all.txt"):
+        if not ipset_path.is_file():
+            continue
         try:
             lines = ipset_path.read_text(encoding="utf-8", errors="ignore").splitlines()
         except Exception:
-            lines = []
+            continue
         kept: list[str] = []
+        changed = 0
         for line in lines:
             key = line.strip().lower()
-            if key and not key.startswith("#") and key in ban_ips:
-                removed_ips += 1
+            if key and not key.startswith("#") and key in classic_ban:
+                changed += 1
                 continue
             kept.append(line.rstrip())
-        if removed_ips:
+        if changed:
             ipset_path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+            removed_ips += changed
+
+    # Zapret2 hub: only Discord-breaking Cloudflare parents (keep other CF ranges).
+    removed_ips += sanitize_zapret2_discord_ipset(configs)
 
     exclude_paths = [configs / "list-exclude-user.txt", configs / "list-exclude.txt"]
     try:
@@ -688,6 +952,89 @@ def _filter_file(asset_roots: Path | list[Path], name: str) -> Path | None:
     return None
 
 
+def _fake_file(asset_roots: Path | list[Path], name: str) -> Path | None:
+    roots = asset_roots if isinstance(asset_roots, list) else [asset_roots]
+    for root in roots:
+        for candidate in (
+            Path(root) / "files" / "fake" / name,
+            Path(root) / "fake" / name,
+            Path(root) / "zapret-winws" / "files" / "fake" / name,
+            Path(root) / "bin" / name,  # Flowseal zapret-discord-youtube/bin
+            Path(root) / name,
+        ):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _blob_args(
+    asset_roots: Path | list[Path],
+    *,
+    flowseal_bin: Path | None = None,
+) -> list[str]:
+    """Register named blobs (bol-van: blob=name, not filename).
+
+    Includes Flowseal ACTIVE_DISCORD_UDP.bin as discord_udp and 4pda TLS pattern.
+    """
+    roots: list[Path] = []
+    if flowseal_bin is not None:
+        roots.append(Path(flowseal_bin))
+    if isinstance(asset_roots, list):
+        roots.extend(asset_roots)
+    else:
+        roots.append(asset_roots)
+
+    mapping = (
+        ("quic_google", "quic_initial_www_google_com.bin"),
+        ("quic2", "quic_2.bin"),
+        ("tls_google", "tls_clienthello_www_google_com.bin"),
+        ("tls_4pda", "tls_clienthello_4pda_to.bin"),
+        ("tls_max", "tls_clienthello_max_ru.bin"),
+        ("discord_udp", "ACTIVE_DISCORD_UDP.bin"),
+        ("fake_stun", "stun.bin"),
+        ("stun_pat", "stun.bin"),
+    )
+    out: list[str] = []
+    for blob_name, filename in mapping:
+        path = _fake_file(roots, filename)
+        if path is not None:
+            out.append(f"--blob={blob_name}=@{path}")
+    # If Flowseal Discord UDP missing, voice still works via quic_google alias below
+    # in profile lua (hub_discord falls back only if discord_udp registered — ensure
+    # a second registration of discord_udp → quic bin when ACTIVE_* absent).
+    if not any(item.startswith("--blob=discord_udp=") for item in out):
+        quic = _fake_file(roots, "quic_initial_www_google_com.bin")
+        if quic is not None:
+            out.append(f"--blob=discord_udp=@{quic}")
+    if not any(item.startswith("--blob=tls_4pda=") for item in out):
+        google = _fake_file(roots, "tls_clienthello_www_google_com.bin")
+        if google is not None:
+            out.append(f"--blob=tls_4pda=@{google}")
+    if not any(item.startswith("--blob=tls_max=") for item in out):
+        google = _fake_file(roots, "tls_clienthello_www_google_com.bin")
+        if google is not None:
+            out.append(f"--blob=tls_max=@{google}")
+    if not any(item.startswith("--blob=quic2=") for item in out):
+        quic = _fake_file(roots, "quic_initial_www_google_com.bin")
+        if quic is not None:
+            out.append(f"--blob=quic2=@{quic}")
+    return out
+
+
+def _strip_port_tokens(ports: str, drop: str) -> str:
+    """Remove comma-separated port tokens from a ports string (keep order)."""
+    drop_set = {part.strip() for part in str(drop or "").split(",") if part.strip()}
+    kept: list[str] = []
+    seen: set[str] = set()
+    for part in str(ports or "").split(","):
+        token = part.strip()
+        if not token or token in drop_set or token in seen:
+            continue
+        seen.add(token)
+        kept.append(token)
+    return ",".join(kept) if kept else "80,443"
+
+
 def find_bundle_lua(asset_roots: Path | list[Path], filename: str) -> Path | None:
     roots = asset_roots if isinstance(asset_roots, list) else [asset_roots]
     for root in roots:
@@ -709,13 +1056,24 @@ def build_default_profile_args(
     tcp_ports: str,
     strategy_id: str = "balanced",
     include_hostlist_auto: bool = True,
+    flowseal_bin: Path | None = None,
 ) -> list[str]:
     """Filter/desync profiles; lua-init files must already be on the command line.
 
-    Manual mode sets include_hostlist_auto=False so winws2 / Hub Auto overlays
-    are not applied — services, mods, and user lists still use hostlist/ipset.
+    Discord/YouTube stack =
+      Flowseal voice + youtubediscord Default v5 Discord TLS/YouTube + bol-van IP disc.
+
+    Profiles (order matters — first match wins):
+      1) IP discovery (zero fake)
+      2) Flowseal voice UDP (ACTIVE_DISCORD_UDP ×6)
+      3) updates.discord.com + discord.media + Discord hostlist (syndata / multisplit / fake)
+      4) googlevideo.com + youtube hostlist domains
+      5) General HTTP/TLS/QUIC (Discord CDN parents excluded from ipset)
     """
-    _ = strategy_id
+    strategy = (strategy_id or "balanced").strip() or "balanced"
+    aggressive = strategy == "fake_heavy"
+    use_syndata = strategy == "balanced"  # youtubediscord Default v5
+    use_multisplit_discord = strategy == "multisplit"
     roots: list[Path]
     if asset_roots is not None:
         roots = asset_roots if isinstance(asset_roots, list) else [asset_roots]
@@ -731,6 +1089,7 @@ def build_default_profile_args(
         f"--hostlist={hub}",
         f"--hostlist-exclude={exclude}",
         f"--ipset={ipset}",
+        f"--ipset-exclude-ip={DISCORD_IPSET_EXCLUDE_IP}",
     ]
     if include_hostlist_auto:
         hostlist_args.insert(1, f"--hostlist-auto={auto}")
@@ -743,7 +1102,21 @@ def build_default_profile_args(
         else []
     )
 
-    args: list[str] = []
+    general_tcp = _strip_port_tokens(tcp_ports, DISCORD_MEDIA_TCP_PORTS)
+    if "443" not in general_tcp.split(","):
+        general_tcp = _strip_port_tokens(f"{general_tcp},443", "")
+
+    # Discord media ports + 443 for HTTPS profiles (youtubediscord Default v5).
+    discord_tcp = f"80,443,{DISCORD_MEDIA_TCP_PORTS}"
+    youtube_domains = ",".join(YOUTUBE_SEED_DOMAINS)
+
+    args: list[str] = [
+        # youtubediscord Default v5 cache knobs (helps syndata/hostname Discord path).
+        "--ctrack-disable=0",
+        "--ipcache-lifetime=8400",
+        "--ipcache-hostname=1",
+    ]
+    args.extend(_blob_args(roots, flowseal_bin=flowseal_bin))
     for name in (
         "windivert_part.discord_media.txt",
         "windivert_part.stun.txt",
@@ -754,8 +1127,96 @@ def build_default_profile_args(
         if path is not None:
             args.append(f"--wf-raw-part=@{path}")
 
+    def _discord_tls_desyncs() -> list[str]:
+        if use_syndata:
+            # Default v5: send ×3 + syndata(tls_google) + syndata
+            return [
+                "--lua-desync=send:repeats=3",
+                "--lua-desync=syndata:blob=tls_google",
+                "--ipcache-hostname",
+                "--lua-desync=syndata",
+            ]
+        if use_multisplit_discord:
+            return ["--lua-desync=hub_discord_https"]
+        return [
+            "--lua-desync=hub_discord_fake_ts",
+            "--lua-desync=hub_discord_fakedsplit",
+        ]
+
+    def _discord_media_desyncs() -> list[str]:
+        if use_syndata:
+            return [
+                "--lua-desync=send:repeats=3",
+                "--lua-desync=syndata:blob=tls_google",
+                "--ipcache-hostname",
+                "--lua-desync=syndata",
+            ]
+        if use_multisplit_discord:
+            out = []
+            if aggressive:
+                out.append("--lua-desync=hub_discord_media_fake")
+            out.append("--lua-desync=hub_discord_media")
+            return out
+        return [
+            "--lua-desync=hub_discord_fake_ts",
+            "--lua-desync=hub_discord_fakedsplit",
+        ]
+
+    # --- Discord + YouTube FIRST, then general ---
     args.extend(
         [
+            # 1) bol-van / youtubediscord IP discovery.
+            "--filter-l7=discord,stun",
+            "--payload=discord_ip_discovery,stun",
+            "--lua-desync=hub_discord_ipdisc",
+            "--new",
+            # 2) Flowseal voice UDP — ACTIVE_DISCORD_UDP ×6 (all discord/stun on voice ports).
+            f"--filter-udp={DISCORD_VOICE_UDP_PORTS}",
+            "--filter-l7=discord,stun",
+            "--lua-desync=hub_discord",
+            "--new",
+            # 3) updates.discord.com (youtubediscord Default v5 dedicated profile).
+            "--filter-tcp=443",
+            "--filter-l7=tls",
+            "--hostlist-domains=updates.discord.com",
+            "--out-range=-d10",
+            "--payload=tls_client_hello",
+            *_discord_tls_desyncs(),
+            "--new",
+            # 4) discord.media (+ media TCP ports).
+            f"--filter-tcp={discord_tcp}",
+            "--filter-l7=tls",
+            "--hostlist-domains=discord.media",
+            "--out-range=-d10",
+            "--payload=tls_client_hello",
+            *_discord_media_desyncs(),
+            "--new",
+            # 5) Remaining Discord HTTPS hostlist-domains.
+            "--filter-tcp=443",
+            "--filter-l7=tls",
+            f"--hostlist-domains={DISCORD_HOSTLIST_DOMAINS}",
+            "--out-range=-d10",
+            "--payload=tls_client_hello",
+            *_discord_tls_desyncs(),
+            "--new",
+            # 6) googlevideo.com (Default v5 multisplit sniext).
+            "--filter-tcp=80,443",
+            "--filter-l7=tls",
+            "--hostlist-domains=googlevideo.com",
+            "--out-range=-d8",
+            "--payload=tls_client_hello",
+            "--lua-desync=hub_googlevideo",
+            "--new",
+            # 7) YouTube hostlist domains (Default v5 tls_max / strategy variants).
+            "--filter-tcp=80,443",
+            "--filter-l7=tls",
+            f"--hostlist-domains={youtube_domains}",
+            "--out-range=-d8",
+            "--payload=tls_client_hello",
+            "--lua-desync=hub_youtube",
+            "--lua-desync=hub_youtube_b",
+            "--new",
+            # 8) General HTTP
             "--filter-tcp=80",
             "--filter-l7=http",
             *hostlist_args,
@@ -765,7 +1226,8 @@ def build_default_profile_args(
             "--lua-desync=hub_http",
             "--lua-desync=hub_http_b",
             "--new",
-            f"--filter-tcp={tcp_ports}",
+            # 9) General TLS (no Discord media ports; CDN parents excluded from ipset).
+            f"--filter-tcp={general_tcp}",
             "--filter-l7=tls",
             *hostlist_args,
             *auto_args,
@@ -774,13 +1236,7 @@ def build_default_profile_args(
             "--lua-desync=hub_tls",
             "--lua-desync=hub_tls_b",
             "--new",
-            # Flowseal: Discord media TLS on non-443 ports (discord.media).
-            "--filter-tcp=2053,2083,2087,2096,8443",
-            "--hostlist-domains=discord.media",
-            "--out-range=-d10",
-            "--payload=tls_client_hello",
-            "--lua-desync=hub_tls",
-            "--new",
+            # 10) QUIC
             "--filter-udp=443",
             "--filter-l7=quic",
             *hostlist_args,
@@ -788,15 +1244,10 @@ def build_default_profile_args(
             "--payload=quic_initial",
             "--lua-desync=hub_quic",
             "--new",
-            # Flowseal / bol-van: Discord voice + STUN on media UDP ranges.
-            "--filter-udp=19294-19344,50000-50100",
-            "--filter-l7=discord,stun",
-            "--payload=stun,discord_ip_discovery",
-            "--lua-desync=hub_discord",
-            "--new",
+            # 11) WireGuard
             "--filter-l7=wireguard",
             "--payload=wireguard_initiation,wireguard_cookie",
-            "--lua-desync=hub_discord",
+            "--lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2",
         ]
     )
     return args
