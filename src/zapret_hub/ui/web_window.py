@@ -411,12 +411,18 @@ class WebBridge(QObject):
                     installed = self._build_marketplace_mods_payload()
                     payload = {**payload, **installed}
                     compatibility = str(payload.get("compatibility") or "zapret").strip().lower()
+                    if compatibility != "zapret2":
+                        self._cached_generals = None
+                        self._cached_file_entries = None
+                    else:
+                        self._cached_file2_entries = None
                     self._queue_mod_runtime_refresh("zapret2" if compatibility == "zapret2" else "zapret")
                     self._schedule_on_gui(lambda value=installed: self._merge_marketplace_mods_cache(value))
                     installed_encoded = json.dumps(installed, ensure_ascii=False)
                     self._schedule_on_gui(
                         lambda value=installed_encoded: self.event.emit("marketplace.mods-changed", value)
                     )
+                    self._schedule_on_gui(lambda: self.emit_state(force=True))
                 except Exception as error:
                     try:
                         self.context.logging.log(
@@ -1507,11 +1513,14 @@ class WebBridge(QObject):
             mod_id = str((payload or {}).get("id", ""))
             self._discard_queued_mod_toggle("zapret", mod_id)
             self._reconfigure_runtimes(("zapret",), lambda: self.context.mods.remove(mod_id))
+            self._cached_generals = None
+            self._cached_file_entries = None
             self.emit_state(force=True)
             return self._build_marketplace_mods_payload()
         if command == "mods.reorder":
             ordered = [str(item) for item in ((payload or {}).get("orderedIds") or [])]
             self.context.mods.reorder(ordered)
+            self._cached_generals = None
             self._queue_mod_runtime_refresh("zapret")
             self.emit_state(force=True)
             return None
@@ -1550,8 +1559,10 @@ class WebBridge(QObject):
                 if not selected:
                     return None
                 item = self.context.mods.import_from_path(selected)
+            self._cached_generals = None
+            self._cached_file_entries = None
             self._queue_mod_runtime_refresh("zapret")
-            self.emit_state()
+            self.emit_state(force=True)
             return asdict(item)
         if command == "mods.export":
             mod_id = str((payload or {}).get("id", ""))
@@ -1836,6 +1847,8 @@ class WebBridge(QObject):
                 summary=str(data.get("summary") or ""),
                 icon_url=str(data.get("iconUrl") or ""),
                 project_url=str(data.get("projectUrl") or ""),
+                marketplace_version=str(data.get("marketplaceVersion") or data.get("latestVersion") or ""),
+                allow_update=bool(data.get("allowUpdate") or data.get("update")),
             )
             pending = result.get("pending") if isinstance(result.get("pending"), list) else []
             if result.get("alreadyQueued"):
@@ -1850,6 +1863,12 @@ class WebBridge(QObject):
                     kind="info",
                     toast_id=f"mp-installed-{result.get('slug')}",
                 )
+            elif result.get("updating"):
+                self._emit_toast(
+                    "Обновление добавлено в очередь." if self._ru() else "Update queued.",
+                    kind="info",
+                    toast_id=f"mp-update-{result.get('slug')}",
+                )
             elif len(pending) > 1:
                 self._emit_toast(
                     "Добавлено в очередь загрузки." if self._ru() else "Queued for download.",
@@ -1863,6 +1882,9 @@ class WebBridge(QObject):
                 ("zapret", "zapret2"),
                 lambda: self.context.marketplace.remove_installed(slug),
             )
+            self._cached_generals = None
+            self._cached_file_entries = None
+            self._cached_file2_entries = None
             installed = self._build_marketplace_mods_payload()
             self._merge_marketplace_mods_cache(installed)
             self._schedule_on_gui(lambda: self.emit_state(force=True))
@@ -2380,7 +2402,9 @@ class WebBridge(QObject):
                     if normalized_backend == "zapret2":
                         self._cached_file2_entries = None
                     else:
+                        # Mod add/remove/toggle can change general*.bat catalogs.
                         self._cached_file_entries = None
+                        self._cached_generals = None
                     self.emit_state(force=True)
                 except Exception as error:
                     self.context.logging.log(
@@ -3617,6 +3641,7 @@ class WebBridge(QObject):
                 "updateAvailable": bool(update),
                 "latestVersion": str(update.get("latestVersion") or ""),
                 "updateChangelog": str(update.get("changelog") or ""),
+                "versionId": update.get("versionId"),
                 "diskSize": self._mod_disk_size(item),
             }
 

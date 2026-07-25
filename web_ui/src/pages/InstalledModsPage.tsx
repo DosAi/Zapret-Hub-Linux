@@ -358,23 +358,33 @@ export function InstalledModsPage({ onOpenMarketplace }: { onOpenMarketplace?: (
 
   const enqueue = async (mod: Mod) => {
     if (!mod.marketplaceSlug) return;
-    setQueued((prev) => new Set(prev).add(mod.marketplaceSlug!));
+    const slug = mod.marketplaceSlug;
+    setQueued((prev) => new Set(prev).add(slug));
+    const clearQueued = () =>
+      setQueued((prev) => {
+        const next = new Set(prev);
+        next.delete(slug);
+        return next;
+      });
     try {
-      await bridge.call("marketplace.download", {
-        slug: mod.marketplaceSlug,
+      const result = await bridge.call("marketplace.download", {
+        slug,
         title: mod.name,
         compatibility,
         author: mod.author,
         summary: mod.description,
         iconUrl: mod.iconUrl,
         projectUrl: mod.sourceUrl,
+        versionId: mod.versionId ?? null,
+        marketplaceVersion: mod.latestVersion || "",
+        allowUpdate: Boolean(mod.updateAvailable),
       });
+      // No-op / reject: clear spinner immediately. Real jobs clear via download-progress.
+      if (!result?.queued || result.alreadyInstalled) {
+        clearQueued();
+      }
     } catch {
-      setQueued((prev) => {
-        const next = new Set(prev);
-        next.delete(mod.marketplaceSlug!);
-        return next;
-      });
+      clearQueued();
     }
   };
 

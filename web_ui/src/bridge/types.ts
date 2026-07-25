@@ -54,6 +54,7 @@ export interface Mod {
   updateAvailable?: boolean;
   latestVersion?: string;
   updateChangelog?: string;
+  versionId?: number | null;
   diskSize?: number;
 }
 
@@ -304,12 +305,19 @@ export type Commands = {
       summary?: string;
       iconUrl?: string;
       projectUrl?: string;
+      marketplaceVersion?: string;
+      latestVersion?: string;
+      allowUpdate?: boolean;
+      update?: boolean;
     };
     out: {
       queued: boolean;
       slug: string;
       jobId?: string;
       modId?: string;
+      alreadyInstalled?: boolean;
+      alreadyQueued?: boolean;
+      updating?: boolean;
       pending: string[];
       alreadyQueued?: boolean;
       alreadyInstalled?: boolean;
