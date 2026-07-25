@@ -331,6 +331,8 @@ export function useMarketplaceQueue() {
       summary?: string;
       iconUrl?: string;
       projectUrl?: string;
+      marketplaceVersion?: string;
+      allowUpdate?: boolean;
     }) => {
       if (!store.queue.items.some((entry) => entry.slug === item.slug && isWorking(entry))) {
         applyQueue({
@@ -372,8 +374,16 @@ export function useMarketplaceQueue() {
           summary: item.summary,
           iconUrl: item.iconUrl,
           projectUrl: item.projectUrl,
+          marketplaceVersion: item.marketplaceVersion || "",
+          allowUpdate: Boolean(item.allowUpdate),
         });
         if (result.alreadyInstalled) {
+          // Drop optimistic queue row — nothing will download.
+          applyQueue({
+            ...store.queue,
+            items: store.queue.items.filter((entry) => entry.slug !== item.slug),
+            pending: store.queue.pending.filter((slug) => slug !== item.slug),
+          });
           const recentlyInstalled = new Set(store.recentlyInstalled);
           recentlyInstalled.add(item.slug);
           setStore({ recentlyInstalled });

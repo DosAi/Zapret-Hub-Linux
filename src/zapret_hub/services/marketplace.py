@@ -584,24 +584,11 @@ class MarketplaceService:
         icon_url: str = "",
         project_url: str = "",
         marketplace_version: str = "",
+        allow_update: bool = False,
     ) -> dict[str, Any]:
         slug = str(slug or "").strip()
         if not slug:
             raise MarketplaceError("invalid_slug", "Empty slug")
-        installed = next((item for item in self._list_marketplace_mods() if item.get("slug") == slug), None)
-        if installed is not None:
-            return {
-                "queued": False,
-                "alreadyInstalled": True,
-                "slug": slug,
-                "modId": str(installed.get("modId") or ""),
-                "pending": [
-                    job.slug
-                    for job in self._jobs
-                    if job.status in {"queued", "downloading", "paused", "installing"}
-                ],
-            }
-        self._ensure_install_space(compatibility)
         cached = self._update_cache.get(slug) if isinstance(self._update_cache.get(slug), dict) else {}
         if not marketplace_version:
             marketplace_version = str(cached.get("latestVersion") or "")
@@ -612,6 +599,37 @@ class MarketplaceService:
                 version_id = None
         if not compatibility:
             compatibility = str(cached.get("compatibility") or "")
+        installed = next((item for item in self._list_marketplace_mods() if item.get("slug") == slug), None)
+        if installed is not None:
+            current = str(installed.get("currentVersion") or "")
+            latest = str(marketplace_version or "").strip()
+            update_known = bool(cached) or (latest and self._is_newer(latest, current))
+            # Installed same/older version → no-op. Newer / explicit update → replace via queue.
+            if not (allow_update or update_known):
+                return {
+                    "queued": False,
+                    "alreadyInstalled": True,
+                    "slug": slug,
+                    "modId": str(installed.get("modId") or ""),
+                    "pending": [
+                        job.slug
+                        for job in self._jobs
+                        if job.status in {"queued", "downloading", "paused", "installing"}
+                    ],
+                }
+            if not title:
+                title = str(installed.get("title") or slug)
+            if not author:
+                author = str(installed.get("author") or "")
+            if not summary:
+                summary = str(installed.get("summary") or "")
+            if not icon_url:
+                icon_url = str(installed.get("iconUrl") or "")
+            if not project_url:
+                project_url = str(installed.get("projectUrl") or "")
+            if not compatibility:
+                compatibility = str(installed.get("compatibility") or "")
+        self._ensure_install_space(compatibility)
         with self._lock:
             for existing in self._jobs:
                 if existing.slug == slug and existing.status in {"queued", "downloading", "paused", "installing"}:
@@ -646,6 +664,7 @@ class MarketplaceService:
             "queued": True,
             "slug": slug,
             "jobId": job.id,
+            "updating": bool(installed is not None),
             "pending": [j.slug for j in self._jobs if j.status in {"queued", "downloading", "paused", "installing"}],
         }
 

@@ -228,7 +228,7 @@ def test_remove_installed_marketplace_mod(tmp_path: Path) -> None:
     assert mods.installed == []
 
 
-def test_enqueue_rejects_already_installed_marketplace_mod(tmp_path: Path) -> None:
+def test_enqueue_rejects_already_installed_same_version(tmp_path: Path) -> None:
     class Paths:
         data_dir = tmp_path / "data"
         cache_dir = tmp_path / "cache"
@@ -256,6 +256,51 @@ def test_enqueue_rejects_already_installed_marketplace_mod(tmp_path: Path) -> No
     assert result["alreadyInstalled"] is True
     assert result["modId"] == "mod-1"
     assert service.queue_status()["items"] == []
+
+
+def test_enqueue_allows_update_when_newer_version_available(tmp_path: Path, monkeypatch) -> None:
+    class Paths:
+        data_dir = tmp_path / "data"
+        cache_dir = tmp_path / "cache"
+        mods_dir = tmp_path / "mods"
+
+    class Logging:
+        def log(self, *_args, **_kwargs) -> None:
+            return None
+
+    installed = SimpleNamespace(
+        id="mod-1",
+        name="Installed",
+        author="",
+        description="",
+        icon_url="",
+        source_url="",
+        version="2.10~4",
+        marketplace_slug="shizapret-mod",
+    )
+    mods = SimpleNamespace(list_installed=lambda: [installed])
+    service = MarketplaceService(storage_paths=Paths(), logging=Logging(), mods=mods)
+    service._update_cache["shizapret-mod"] = {
+        "slug": "shizapret-mod",
+        "latestVersion": "2.10~5",
+        "versionId": 42,
+        "compatibility": "zapret",
+    }
+    monkeypatch.setattr(service, "_ensure_install_space", lambda *_a, **_k: None)
+    monkeypatch.setattr(service, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(service, "_emit_job", lambda *_a, **_k: None)
+    monkeypatch.setattr(service, "_emit_queue", lambda: None)
+
+    result = service.enqueue_download(
+        "shizapret-mod",
+        marketplace_version="2.10~5",
+        allow_update=True,
+    )
+
+    assert result["queued"] is True
+    assert result.get("updating") is True
+    assert result.get("jobId")
+    assert any(item["slug"] == "shizapret-mod" for item in service.queue_status()["items"])
 
 
 def test_enqueue_rejects_download_when_less_than_one_gib_remains(monkeypatch, tmp_path: Path) -> None:

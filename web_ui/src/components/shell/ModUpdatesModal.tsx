@@ -87,6 +87,8 @@ export function ModUpdatesModal({
         iconUrl: item.iconUrl,
         projectUrl: item.projectUrl,
         versionId: item.versionId ?? null,
+        marketplaceVersion: item.latestVersion || "",
+        allowUpdate: true,
       });
       setItems((prev) => prev.filter((row) => row.slug !== item.slug));
     } catch {
@@ -110,6 +112,8 @@ export function ModUpdatesModal({
           iconUrl: item.iconUrl,
           projectUrl: item.projectUrl,
           versionId: item.versionId ?? null,
+          marketplaceVersion: item.latestVersion || "",
+          allowUpdate: true,
         });
       }
       onClose();
