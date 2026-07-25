@@ -319,8 +319,6 @@ export type Commands = {
       alreadyQueued?: boolean;
       updating?: boolean;
       pending: string[];
-      alreadyQueued?: boolean;
-      alreadyInstalled?: boolean;
     };
   };
   "marketplace.remove": {
