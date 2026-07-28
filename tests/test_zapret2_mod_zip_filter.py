@@ -10,6 +10,8 @@ def test_zapret2_zip_filters_executables(tmp_path: Path):
     with zipfile.ZipFile(zip_path, "w") as archive:
         archive.writestr("lists/list-general.txt", "youtube.com\n")
         archive.writestr("helper.lua", "return {}\n")
+        archive.writestr("bin/fake_tls.bin", "payload")
+        archive.writestr("windivert.filter/windivert_part.discord_media.txt", "udp")
         archive.writestr("WinDivert.dll", "dll")
         archive.writestr("tool.exe", "exe")
         archive.writestr("driver.sys", "sys")
@@ -54,6 +56,8 @@ def test_zapret2_zip_filters_executables(tmp_path: Path):
     root = Path(entry.path)
     assert (root / "lists" / "list-general.txt").exists()
     assert (root / "helper.lua").exists()
+    assert (root / "bin" / "fake_tls.bin").exists()
+    assert (root / "windivert.filter" / "windivert_part.discord_media.txt").exists()
     assert not (root / "WinDivert.dll").exists()
     assert not (root / "tool.exe").exists()
     assert not (root / "driver.sys").exists()

@@ -112,12 +112,11 @@ def test_zapret2_auto_discord_capture_includes_voice_udp_ranges() -> None:
             zapret2_udp_ports="443",
             selected_service_ids=["discord"],
             zapret2_control_mode="auto",
-            zapret2_youtube_discord_bypass=False,
         )
     )
     udp_ports = process._normalize_zapret2_ports("443", "443")
     udp_ports = process._merge_zapret2_ports(udp_ports, DISCORD_VOICE_UDP_PORTS)
-    assert udp_ports == "443,19294-19344,50000-50100"
+    assert udp_ports == "443,3478-3497,19294-19344,50000-50100"
     assert "42377" not in udp_ports
     tcp_ports = process._normalize_zapret2_ports("80,443", "80,443")
     tcp_ports = process._merge_zapret2_ports(tcp_ports, DISCORD_MEDIA_TCP_PORTS)

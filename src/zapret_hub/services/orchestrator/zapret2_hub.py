@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
 
@@ -1309,6 +1310,92 @@ def strategy_generals() -> list[dict[str, str]]:
 
 _MOD_OVERLAY_START = "# --- zapret-hub-mod-overlays ---"
 _MOD_OVERLAY_END = "# --- end zapret-hub-mod-overlays ---"
+_ACTIVE_MOD_PROFILE = "active-mod-profile.json"
+
+
+def find_mod_profile(mod_root: Path) -> Path | None:
+    """Find the default profile used by a complete Zapret2 package."""
+    root = Path(mod_root)
+    for candidate in (
+        root / "profiles" / "general.txt",
+        root / "profiles" / "Default v5.txt",
+        root / "general.txt",
+    ):
+        if candidate.is_file():
+            return candidate.resolve()
+    profiles = root / "profiles"
+    if profiles.is_dir():
+        candidates = sorted(
+            (
+                path
+                for path in profiles.glob("*.txt")
+                if path.is_file() and ("general" in path.stem.lower() or "default" in path.stem.lower())
+            ),
+            key=lambda path: path.name.lower(),
+        )
+        if candidates:
+            return candidates[0].resolve()
+    return None
+
+
+def active_mod_profile(configs_dir: Path) -> Path | None:
+    marker = zapret2_lists_dir(configs_dir) / _ACTIVE_MOD_PROFILE
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        profile = Path(str(payload.get("profile") or "")).resolve()
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return profile if profile.is_file() else None
+
+
+_PROFILE_FILE_OPTIONS = {
+    "--hostlist",
+    "--hostlist-exclude",
+    "--hostlist-auto",
+    "--ipset",
+    "--ipset-exclude",
+    "--ipset-auto",
+}
+
+
+def build_mod_profile_args(profile: Path) -> list[str]:
+    """Parse a winws2 profile and resolve package-relative asset paths."""
+    profile = Path(profile).resolve()
+    root = profile.parent.parent if profile.parent.name.lower() == "profiles" else profile.parent
+    root = root.resolve()
+
+    def resolve_asset(raw: str) -> str:
+        relative = raw.lstrip("@").replace("\\", "/")
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as error:
+            raise ValueError(f"Zapret2 profile references a path outside its package: {raw}") from error
+        if not candidate.is_file():
+            raise FileNotFoundError(f"Zapret2 profile asset is missing: {relative}")
+        return str(candidate)
+
+    args: list[str] = []
+    for raw_line in profile.read_text(encoding="utf-8-sig", errors="strict").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not line.startswith("--"):
+            raise ValueError(f"Unsupported Zapret2 profile line: {line}")
+        option, separator, value = line.partition("=")
+        if separator:
+            if value.startswith("@"):
+                value = f"@{resolve_asset(value)}"
+            elif option in _PROFILE_FILE_OPTIONS:
+                value = resolve_asset(value)
+            elif option == "--blob" and ":@" in value:
+                blob_name, asset = value.split(":@", 1)
+                value = f"{blob_name}:@{resolve_asset(asset)}"
+            line = f"{option}={value}"
+        args.append(line)
+    if not args:
+        raise ValueError(f"Zapret2 profile is empty: {profile}")
+    return args
 
 
 def _strip_mod_overlay(text: str) -> str:
@@ -1368,6 +1455,7 @@ def merge_mod_overlays(configs_dir: Path, mod_roots: list[Path]) -> dict[str, ob
     seen_e: set[str] = set()
     seen_i: set[str] = set()
     lua_copied: list[str] = []
+    selected_profile: Path | None = None
 
     mod_lua_root = paths["hub"].parent / "mod_lua"
     if mod_lua_root.exists():
@@ -1378,6 +1466,8 @@ def merge_mod_overlays(configs_dir: Path, mod_roots: list[Path]) -> dict[str, ob
         root = Path(mod_root)
         if not root.is_dir():
             continue
+        if selected_profile is None:
+            selected_profile = find_mod_profile(root)
         domains, excludes, ips = _collect_mod_list_lines(root)
         for item in domains:
             key = item.lower()
@@ -1410,6 +1500,15 @@ def merge_mod_overlays(configs_dir: Path, mod_roots: list[Path]) -> dict[str, ob
             except Exception:
                 continue
 
+    profile_marker = paths["hub"].parent / _ACTIVE_MOD_PROFILE
+    if selected_profile is None:
+        profile_marker.unlink(missing_ok=True)
+    else:
+        profile_marker.write_text(
+            json.dumps({"profile": str(selected_profile)}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     def _rewrite(path: Path, overlay_lines: list[str]) -> None:
         base = ""
         if path.exists():
@@ -1432,4 +1531,5 @@ def merge_mod_overlays(configs_dir: Path, mod_roots: list[Path]) -> dict[str, ob
         "ips": len(all_ips),
         "lua": lua_copied,
         "mods": len(mod_roots),
+        "profile": str(selected_profile or ""),
     }

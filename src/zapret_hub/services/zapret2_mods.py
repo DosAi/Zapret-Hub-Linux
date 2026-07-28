@@ -28,7 +28,7 @@ class Zapret2ModsManager:
 
     METADATA_FILENAME = "zapret-hub-mod.json"
     UNKNOWN_AUTHOR = "неизвестен"
-    ALLOWED_SUFFIXES = {".txt", ".lua"}
+    ALLOWED_SUFFIXES = {".txt", ".lua", ".bin"}
     BLOCKED_SUFFIXES = {
         ".exe",
         ".sys",
@@ -42,7 +42,6 @@ class Zapret2ModsManager:
         ".vbs",
         ".js",
         ".jar",
-        ".bin",
     }
     JUNK_TXT_PREFIXES = ("readme", "license", "changelog", "copying", "authors")
 
@@ -239,14 +238,12 @@ class Zapret2ModsManager:
         lowered = name.lower()
         if lowered == self.METADATA_FILENAME.lower():
             return True
-        if "windivert" in lowered:
-            return False
         if "__pycache__" in relative.parts or ".git" in relative.parts:
             return False
         suffix = relative.suffix.lower()
         if suffix in self.BLOCKED_SUFFIXES:
             return False
-        if suffix == ".lua":
+        if suffix in {".lua", ".bin"}:
             return True
         if suffix == ".txt":
             return not self._is_junk_txt(name)

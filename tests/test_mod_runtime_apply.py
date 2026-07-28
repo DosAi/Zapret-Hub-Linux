@@ -143,9 +143,13 @@ def test_build_zapret2_command_loads_mod_lua_and_uses_zapret2_control_mode(tmp_p
         "zapret_hub.services.orchestrator.zapret2_hub.build_default_profile_args",
         lambda **_kwargs: ["--filter-tcp=80"],
     )
+    monkeypatch.setattr(
+        "zapret_hub.services.orchestrator.zapret2_hub.materialize_auto_lists",
+        lambda *_args, **_kwargs: {},
+    )
 
     process = ProcessManager.__new__(ProcessManager)
-    process.storage = SimpleNamespace(paths=SimpleNamespace(configs_dir=configs))
+    process.storage = SimpleNamespace(paths=SimpleNamespace(configs_dir=configs, runtime_dir=tmp_path / "runtime"))
     process.settings = SimpleNamespace(
         get=lambda: SimpleNamespace(
             zapret2_tcp_ports="80,443",
@@ -157,7 +161,7 @@ def test_build_zapret2_command_loads_mod_lua_and_uses_zapret2_control_mode(tmp_p
             zapret2_lua_strategy="",
         )
     )
-    process._zapret2_lua_arg = lambda runtime_root, filename: str(runtime_root / filename)
+    process._zapret2_lua_arg = lambda runtime_root, filename, **_kwargs: str(runtime_root / filename)
 
     winws2 = tmp_path / "winws2.exe"
     winws2.write_bytes(b"")
@@ -166,6 +170,26 @@ def test_build_zapret2_command_loads_mod_lua_and_uses_zapret2_control_mode(tmp_p
     assert any(arg.startswith("--wf-udp-out=") and "3478-3497" in arg for arg in command)
     assert f"--lua-init=@{lua_file}" in command
     assert "--lua-init=@" + str(lists["lua_targets"]) in command
+
+
+def test_build_zapret2_command_uses_complete_mod_profile(tmp_path: Path, monkeypatch) -> None:
+    configs = tmp_path / "configs"
+    profile = tmp_path / "mod" / "profiles" / "general.txt"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("--wf-tcp-out=80,443\n--filter-tcp=443\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "zapret_hub.services.orchestrator.zapret2_hub.active_mod_profile",
+        lambda *_args: profile,
+    )
+
+    process = ProcessManager.__new__(ProcessManager)
+    process.storage = SimpleNamespace(paths=SimpleNamespace(configs_dir=configs, runtime_dir=tmp_path / "runtime"))
+    process.settings = SimpleNamespace(get=lambda: SimpleNamespace())
+    process.logging = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    winws2 = tmp_path / "winws2.exe"
+
+    command = process._build_zapret2_command(winws2, tmp_path / "runtime")
+    assert command == [str(winws2), "--wf-tcp-out=80,443", "--filter-tcp=443"]
 
 
 def test_build_zapret2_command_keeps_mod_lua_before_custom_strategy(tmp_path: Path, monkeypatch) -> None:
@@ -203,7 +227,7 @@ def test_build_zapret2_command_keeps_mod_lua_before_custom_strategy(tmp_path: Pa
     )
 
     process = ProcessManager.__new__(ProcessManager)
-    process.storage = SimpleNamespace(paths=SimpleNamespace(configs_dir=configs))
+    process.storage = SimpleNamespace(paths=SimpleNamespace(configs_dir=configs, runtime_dir=tmp_path / "runtime"))
     process.settings = SimpleNamespace(
         get=lambda: SimpleNamespace(
             zapret2_tcp_ports="80,443",
@@ -215,7 +239,7 @@ def test_build_zapret2_command_keeps_mod_lua_before_custom_strategy(tmp_path: Pa
             zapret2_lua_strategy="--filter-tcp=443 --dpi-desync=fake",
         )
     )
-    process._zapret2_lua_arg = lambda runtime_root, filename: str(runtime_root / filename)
+    process._zapret2_lua_arg = lambda runtime_root, filename, **_kwargs: str(runtime_root / filename)
 
     command = process._build_zapret2_command(tmp_path / "winws2.exe", tmp_path / "runtime")
     lua_index = command.index(f"--lua-init=@{lua_file}")

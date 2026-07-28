@@ -45,29 +45,8 @@ PINNED_ZAPRET_ZIP_URL = (
 PINNED_ZAPRET_ZIPBALL_URL = (
     f"https://codeload.github.com/Flowseal/zapret-discord-youtube/zip/refs/tags/{PINNED_ZAPRET_TAG}"
 )
-DISCORD_VOICE_UDP_PORTS = "19294-19344,50000-50100"
+DISCORD_VOICE_UDP_PORTS = "3478-3497,19294-19344,50000-50100"
 DISCORD_MEDIA_TCP_PORTS = "2053,2083,2087,2096,8443"
-
-_BUNDLED_BYPASS_YOUTUBE_DISCORD_LUA = r'''--[[
-  Zapret Hub — YouTube / Discord bypass seed for winws2 (Zapret 2).
-]]
-HUB_BYPASS_YOUTUBE_DISCORD = true
-HUB_BYPASS_YOUTUBE_DISCORD_VERSION = "1"
-HUB_BYPASS_DOMAINS = {
-  "discord.com","discordapp.com","discord.gg","discord.media","discordcdn.com",
-  "discordstatus.com","cdn.discordapp.com","media.discordapp.net","gateway.discord.gg",
-  "images-ext-1.discordapp.net","images-ext-2.discordapp.net","dl.discordapp.net",
-  "status.discord.com","latency.discord.media","updates.discord.com",
-  "youtube.com","youtu.be","ytimg.com","googlevideo.com","youtube-nocookie.com",
-  "ggpht.com","gvt1.com","youtube.googleapis.com","youtubei.googleapis.com",
-  "yt3.googleusercontent.com","manifest.googlevideo.com","redirector.googlevideo.com",
-}
--- Hostlist-only for Discord: do not seed Cloudflare Discord CIDR into ipset.
-HUB_BYPASS_NETWORKS = {"149.154.167.0/24","173.194.0.0/16"}
-if type(print) == "function" then
-  print(string.format("[Zapret Hub] YouTube/Discord bypass Lua ready (domains=%d)", #HUB_BYPASS_DOMAINS))
-end
-'''
 
 _VPN_PROCESS_PATTERNS = (
     "nekobox",
@@ -1689,13 +1668,23 @@ foreach ($adapter in @($payload.adapters)) {
         from zapret_hub.services.orchestrator import zapret2_hub
 
         settings = self.settings.get()
+        configs_dir = Path(self.storage.paths.configs_dir)
+        mod_profile = zapret2_hub.active_mod_profile(configs_dir)
+        if mod_profile is not None:
+            profile_args = zapret2_hub.build_mod_profile_args(mod_profile)
+            self.logging.log(
+                "info",
+                "Using full Zapret2 modification profile",
+                profile=str(mod_profile),
+            )
+            return [str(winws2_path), *profile_args]
+
         tcp_ports = self._normalize_zapret2_ports(settings.zapret2_tcp_ports, "80,443")
         udp_ports = self._normalize_zapret2_ports(settings.zapret2_udp_ports, "443")
         control_mode = str(getattr(settings, "zapret2_control_mode", "manual") or "manual")
-        bypass_yt_discord = bool(getattr(settings, "zapret2_youtube_discord_bypass", True))
         selected_services = {str(item) for item in (settings.selected_service_ids or [])}
         # Match Flowseal general.bat: Discord media TCP + voice UDP must be in WinDivert capture.
-        discord_capture = bypass_yt_discord or ("discord" in selected_services)
+        discord_capture = "discord" in selected_services
         if discord_capture:
             tcp_ports = self._merge_zapret2_ports(tcp_ports, DISCORD_MEDIA_TCP_PORTS)
             udp_ports = self._merge_zapret2_ports(udp_ports, DISCORD_VOICE_UDP_PORTS)
@@ -1731,7 +1720,6 @@ foreach ($adapter in @($payload.adapters)) {
         if raw_filter:
             command.append(f"--wf-raw-part={raw_filter}")
 
-        configs_dir = Path(self.storage.paths.configs_dir)
         strategy_id = str(getattr(settings, "zapret2_strategy_id", "balanced") or "balanced")
         lists = zapret2_hub.prepare_zapret2_runtime_files(configs_dir, strategy_id)
         include_hostlist_auto = control_mode == "auto"
@@ -1740,11 +1728,7 @@ foreach ($adapter in @($payload.adapters)) {
             # Append-only: never wipe; seed only what is still missing.
             if selected:
                 zapret2_hub.seed_service_lists(configs_dir, selected, only_missing=True)
-            if bypass_yt_discord:
-                # Manual + Auto: default YouTube/Discord catalogs like Zapret1 services.
-                zapret2_hub.seed_bypass_catalog(configs_dir, only_missing=True)
-                zapret2_hub.seed_service_lists(configs_dir, ["youtube", "discord"], only_missing=True)
-            elif control_mode == "auto" and not zapret2_hub.hub_lists_initialized(configs_dir):
+            if control_mode == "auto" and not zapret2_hub.hub_lists_initialized(configs_dir):
                 zapret2_hub.seed_bypass_catalog(configs_dir, only_missing=True)
         except Exception:
             pass
@@ -1775,11 +1759,6 @@ foreach ($adapter in @($payload.adapters)) {
         except Exception:
             pass
 
-        if bypass_yt_discord:
-            bypass_lua = self._ensure_youtube_discord_bypass_lua(configs_dir)
-            if bypass_lua is not None:
-                command.append(f"--lua-init=@{bypass_lua}")
-
         mod_lua_root = zapret2_hub.zapret2_lists_dir(configs_dir) / "mod_lua"
         if mod_lua_root.is_dir():
             for mod_lua in sorted(mod_lua_root.glob("*.lua")):
@@ -1805,26 +1784,6 @@ foreach ($adapter in @($payload.adapters)) {
         if strategy and control_mode != "auto":
             command.extend(shlex.split(strategy, posix=False))
         return command
-
-    def _ensure_youtube_discord_bypass_lua(self, configs_dir: Path) -> Path | None:
-        """Materialize bundled bypass-youtube-discord.lua into configs/zapret2/."""
-        from zapret_hub.services.orchestrator import zapret2_hub
-
-        target = zapret2_hub.zapret2_lists_dir(configs_dir) / "bypass-youtube-discord.lua"
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            resource = Path(__file__).resolve().parent.parent / "resources" / "bypass-youtube-discord.lua"
-            payload = ""
-            if resource.is_file():
-                payload = resource.read_text(encoding="utf-8")
-            if not payload.strip():
-                payload = _BUNDLED_BYPASS_YOUTUBE_DISCORD_LUA
-            if not target.exists() or target.read_text(encoding="utf-8", errors="ignore") != payload:
-                target.write_text(payload, encoding="utf-8")
-            return target
-        except Exception as error:
-            self.logging.log("warning", "Failed to materialize YouTube/Discord bypass Lua", error=str(error))
-            return None
 
     def _normalize_zapret2_ports(self, value: str, fallback: str) -> str:
         normalized: list[str] = []
