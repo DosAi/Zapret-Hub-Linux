@@ -34,6 +34,48 @@ def test_merge_mod_overlays_appends_lists(tmp_path: Path) -> None:
     assert "# --- zapret-hub-mod-overlays ---" not in hub2
 
 
+def test_full_mod_profile_preserves_profile_order_and_resolves_assets(tmp_path: Path) -> None:
+    configs = tmp_path / "configs"
+    mod = tmp_path / "mods_zapret2" / "youtube-discord"
+    (mod / "profiles").mkdir(parents=True)
+    (mod / "lua").mkdir()
+    (mod / "bin").mkdir()
+    (mod / "lists").mkdir()
+    (mod / "windivert.filter").mkdir()
+    (mod / "lua" / "zapret-lib.lua").write_text("-- lib\n", encoding="utf-8")
+    (mod / "bin" / "fake_tls.bin").write_bytes(b"fake")
+    (mod / "lists" / "discord.txt").write_text("discord.com\n", encoding="utf-8")
+    (mod / "windivert.filter" / "discord.txt").write_text("udp\n", encoding="utf-8")
+    profile = mod / "profiles" / "general.txt"
+    profile.write_text(
+        "\n".join(
+            (
+                "--lua-init=@lua/zapret-lib.lua",
+                "--wf-raw-part=@windivert.filter/discord.txt",
+                "--blob=tls:@bin/fake_tls.bin",
+                "--hostlist=lists/discord.txt",
+                "--filter-tcp=443",
+                "--lua-desync=multisplit:pos=1",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = zapret2_hub.merge_mod_overlays(configs, [mod])
+    assert result["profile"] == str(profile.resolve())
+    assert zapret2_hub.active_mod_profile(configs) == profile.resolve()
+
+    args = zapret2_hub.build_mod_profile_args(profile)
+    assert args[0] == f"--lua-init=@{mod / 'lua' / 'zapret-lib.lua'}"
+    assert args[1] == f"--wf-raw-part=@{mod / 'windivert.filter' / 'discord.txt'}"
+    assert args[2] == f"--blob=tls:@{mod / 'bin' / 'fake_tls.bin'}"
+    assert args[3] == f"--hostlist={mod / 'lists' / 'discord.txt'}"
+    assert args[-1] == "--lua-desync=multisplit:pos=1"
+
+    zapret2_hub.merge_mod_overlays(configs, [])
+    assert zapret2_hub.active_mod_profile(configs) is None
+
+
 def test_zapret2_mods_manager_enable_merge(tmp_path: Path, monkeypatch) -> None:
     class Paths:
         mods_zapret2_dir = tmp_path / "mods_zapret2"
