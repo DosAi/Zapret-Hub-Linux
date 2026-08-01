@@ -1,4 +1,5 @@
-// Allow local administrators to control only the two Linux Zapret services.
+// Allow local administrators to control the two Zapret services and start
+// Happ's daemon when the user explicitly connects.
 // The command line check is intentionally exact: no other systemctl command
 // receives passwordless elevation through pkexec.
 polkit.addRule(function(action, subject) {
@@ -18,7 +19,8 @@ polkit.addRule(function(action, subject) {
         "/usr/bin/systemctl restart zapret2.service",
         "/usr/bin/systemctl start zapret_discord_youtube.service",
         "/usr/bin/systemctl stop zapret_discord_youtube.service",
-        "/usr/bin/systemctl restart zapret_discord_youtube.service"
+        "/usr/bin/systemctl restart zapret_discord_youtube.service",
+        "/usr/bin/systemctl start happd.service"
     ];
 
     if (allowedCommands.indexOf(commandLine) !== -1) {

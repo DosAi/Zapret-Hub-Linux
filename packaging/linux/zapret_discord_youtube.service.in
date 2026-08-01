@@ -1,0 +1,17 @@
+[Unit]
+Description=Zapret Discord YouTube Linux (managed by Zapret Hub)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@CLASSIC_ROOT@
+ExecStart=/usr/bin/env bash @CLASSIC_ROOT@/service.sh daemon
+ExecStop=/usr/bin/env bash @CLASSIC_ROOT@/service.sh kill
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

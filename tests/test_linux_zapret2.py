@@ -125,6 +125,25 @@ def test_classic_zapret_diagnose_discovers_nfqws(tmp_path: Path) -> None:
     assert report["ready"] is True
 
 
+def test_classic_zapret_discovery_skips_incomplete_foreign_root(tmp_path: Path) -> None:
+    incomplete = tmp_path / "foreign"
+    fallback = tmp_path / "managed"
+    incomplete.mkdir()
+    fallback.mkdir()
+    binary = fallback / "nfqws"
+    binary.write_text("binary", encoding="utf-8")
+    service = LinuxZapretService(
+        root_candidates=(incomplete, fallback),
+        runner=FakeRunner([]),
+        which=_which,
+        geteuid=lambda: 1000,
+        platform_name="linux",
+    )
+
+    assert service.discover_root() == fallback
+    assert service.find_nfqws() == binary
+
+
 def test_classic_zapret_dry_run_uses_pkexec() -> None:
     runner = FakeRunner([])
     service = LinuxZapretService(
@@ -150,9 +169,11 @@ def test_shutdown_keeps_external_linux_services_running() -> None:
     manager = ProcessManager.__new__(ProcessManager)
     manager._linux_zapret = object()
     manager._linux_zapret2 = object()
+    manager._linux_happ = object()
     manager.list_components = lambda: [
         SimpleNamespace(id="zapret"),
         SimpleNamespace(id="zapret2"),
+        SimpleNamespace(id="goshkow-vpn"),
         SimpleNamespace(id="tg-ws-proxy"),
     ]
     stopped: list[str] = []

@@ -42,10 +42,10 @@ class StorageManager:
             },
             {
                 "id": "goshkow-vpn",
-                "name": "Legacy VPN (disabled)",
-                "description": "Зарезервировано для будущей интеграции Happ.",
+                "name": "Happ",
+                "description": "Официальный Linux-клиент Happ.",
                 "version": "",
-                "source": "",
+                "source": "https://github.com/Happ-proxy/happ-desktop",
                 "command": [],
                 "enabled": False,
                 "autostart": False,
