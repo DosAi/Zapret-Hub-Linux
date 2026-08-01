@@ -14,7 +14,7 @@
 На новом устройстве вставьте в терминал:
 
 ```bash
-git clone https://github.com/DosAi/Zapret-Hub-Linux.git && cd Zapret-Hub-Linux && ./install.sh
+git clone --depth 1 https://github.com/DosAi/Zapret-Hub-Linux.git && cd Zapret-Hub-Linux && ./install.sh
 ```
 
 Установщик:
