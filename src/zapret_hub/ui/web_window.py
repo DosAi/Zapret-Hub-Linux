@@ -4330,6 +4330,22 @@ class WebMainWindow(QMainWindow):
 
         threading.Thread(target=_run, daemon=True, name="zapret-hub-autostart").start()
 
+    def reconcile_auxiliary_components_async(self) -> None:
+        """Restore enabled auxiliary components when the selected bypass is already live."""
+        if self.context is None or self.bridge is None:
+            return
+        bridge = self.bridge
+        try:
+            if getattr(bridge, "_power_user_touched", False):
+                return
+            if bridge._runtime_is_powered_fast():
+                bridge._set_auxiliary_components_power_async(True)
+        except Exception as error:
+            try:
+                self.context.logging.log("warning", "Auxiliary startup reconciliation failed", error=str(error))
+            except Exception:
+                pass
+
     def request_autostart_power(self) -> None:
         """Turn Quick Access power on with the user's last selected mode/settings."""
         if self.context is None or self.bridge is None:

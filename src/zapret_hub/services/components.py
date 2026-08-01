@@ -50,6 +50,24 @@ PINNED_ZAPRET_ZIPBALL_URL = (
 DISCORD_VOICE_UDP_PORTS = "3478-3497,19294-19344,50000-50100"
 DISCORD_MEDIA_TCP_PORTS = "2053,2083,2087,2096,8443"
 
+_TG_WS_PROXY_REQUIRED_FILES = (
+    "proxy/__init__.py",
+    "proxy/_aes.py",
+    "proxy/balancer.py",
+    "proxy/bridge.py",
+    "proxy/config.py",
+    "proxy/fake_tls.py",
+    "proxy/pool.py",
+    "proxy/raw_websocket.py",
+    "proxy/stats.py",
+    "proxy/tg_ws_proxy.py",
+    "proxy/utils.py",
+)
+
+
+def _missing_tg_ws_proxy_files(runtime_root: Path) -> list[str]:
+    return [relative for relative in _TG_WS_PROXY_REQUIRED_FILES if not (runtime_root / relative).is_file()]
+
 _VPN_PROCESS_PATTERNS = (
     "nekobox",
     "nekoray",
@@ -2977,6 +2995,16 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             game_flag.unlink(missing_ok=True)
 
     def _start_tg_ws_proxy(self, component_id: str) -> ComponentState:
+        runtime_root = self.storage.paths.runtime_dir / "tg-ws-proxy"
+        missing_runtime = _missing_tg_ws_proxy_files(runtime_root)
+        if missing_runtime:
+            error_hint = "TG WS Proxy runtime is incomplete. Missing: " + ", ".join(missing_runtime)
+            state = ComponentState(component_id=component_id, status="error", last_error=error_hint)
+            self._states[component_id] = state
+            self._invalidate_state_cache()
+            self.logging.log("error", "TG WS Proxy runtime validation failed", error=error_hint)
+            return state
+
         # перезапуск без споров со старыми процессами
         self.stop_component(component_id)
 
@@ -5333,6 +5361,12 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             source_root = next((p for p in extract_root.iterdir() if p.is_dir() and (p / "proxy").exists()), None)
             if source_root is None:
                 return {"status": "error", "error": "Invalid tg-ws-proxy source archive"}
+            missing_source = _missing_tg_ws_proxy_files(source_root)
+            if missing_source:
+                return {
+                    "status": "error",
+                    "error": "Incomplete tg-ws-proxy source archive. Missing: " + ", ".join(missing_source),
+                }
 
             windows_exe_path: Path | None = None
             if needs_windows_binary:

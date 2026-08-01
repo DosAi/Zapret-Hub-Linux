@@ -426,6 +426,12 @@ def run(argv: list[str] | None = None) -> int:
                     pass
                 window.attach_backend_client(backend)
                 _startup_trace("attach_backend: attached")
+                # A system-managed Zapret backend can already be active before the
+                # GUI opens. Restore enabled auxiliary components so TG WS Proxy
+                # follows that live power state instead of remaining silently off.
+                reconcile_auxiliary = getattr(window, "reconcile_auxiliary_components_async", None)
+                if callable(reconcile_auxiliary):
+                    reconcile_auxiliary()
                 if autostart_callback is not None:
                     autostart_callback()
                     _startup_trace("attach_backend: autostart callback done")

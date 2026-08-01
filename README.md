@@ -2,142 +2,125 @@
 
 # Zapret Hub Linux
 
-Удобный графический интерфейс для управления Zapret, Zapret 2 и TG WS Proxy в Kali Linux.
+Графическая панель для Zapret, Zapret2 и TG WS Proxy на Kali Linux.
 
-**Linux-форк от [DosAi](https://github.com/DosAi)**<br>
-[Репозиторий форка](https://github.com/DosAi/Zapret-Hub-Linux) · [Telegram: @dosai_main](https://t.me/dosai_main)
+**Автор Linux-форка: [DosAi](https://github.com/DosAi)**<br>
+[Репозиторий](https://github.com/DosAi/Zapret-Hub-Linux) · [Telegram: @dosai_main](https://t.me/dosai_main)
 
 </div>
 
-> [!WARNING]
-> На данный момент приложение и автоматический установщик тестировались
-> **только на Kali Linux**. На других Debian-подобных дистрибутивах запуск
-> возможен, но пока не проверен и не гарантируется.
+> [!IMPORTANT]
+> Это Linux-only форк, разрабатываемый и тестируемый **только на Kali Linux**.
+> **Windows не поддерживается:** мы не выпускаем `.exe`, Windows-инсталляторы
+> или Windows-инструкции. Другие Linux-дистрибутивы пока не проверены.
 
-## О проекте
+## Что это
 
-Zapret Hub Linux — форк [оригинального приложения Zapret Hub](https://github.com/goshkow/Zapret-Hub),
-перенесённый на Linux и адаптированный для системных сервисов, nftables и
-PolicyKit. Форк сохраняет знакомый интерфейс, но использует Linux-бэкенды и не
-пытается запускать Windows-драйверы или исполняемые файлы.
+Zapret Hub Linux — отдельный экспериментальный форк с Linux-бэкендами,
+`systemd`, `nftables` и PolicyKit. Он даёт единое окно для выбора стратегии
+обхода и управления дополнительными компонентами.
 
-Портирование, отладка и подготовка установщика выполнены DosAi при помощи
-**ChatGPT от OpenAI**.
+Портирование, отладка, подготовка установщика и тестов выполнены DosAi
+при помощи **ChatGPT от OpenAI**.
 
-Сейчас поддерживаются:
+## Возможности
 
-- Zapret 2 через `nfqws2`, nftables и systemd;
-- существующая установка классического Zapret для Linux;
-- локальный TG WS Proxy без отдельного системного сервиса;
-- единая кнопка запуска выбранного обхода и TG WS Proxy;
-- выбор варианта обхода без его автоматического включения;
-- PolicyKit-правило: пароль администратора нужен один раз при установке;
+- Zapret2 через `nfqws2`, `nftables` и `zapret2.service`;
+- поддержка уже установленного классического Zapret для Linux;
+- локальный TG WS Proxy на `127.0.0.1:1443`;
+- общая кнопка питания и отдельные переключатели компонентов;
+- свободное листание стратегий без их автоматического запуска;
+- ограниченное PolicyKit-правило для управления Zapret-сервисами;
 - автозапуск и ярлык в меню приложений Kali.
 
-Прежний встроенный VPN в Linux-форке скрыт и не поддерживается. В будущем его
-место планируется использовать для интеграции [Happ](https://github.com/Happ-proxy/happ-desktop).
+Встроенный legacy VPN из upstream-версии в Linux-интерфейсе скрыт и не
+поддерживается. В будущем его место планируется использовать для
+[Happ](https://github.com/Happ-proxy/happ-desktop).
 
-## Установка
+## Установка на Kali Linux
 
-Скачайте или клонируйте весь репозиторий, откройте терминал в его каталоге и
-запустите:
+Клонируйте репозиторий и запустите установщик:
 
 ```bash
+git clone https://github.com/DosAi/Zapret-Hub-Linux.git
+cd Zapret-Hub-Linux
 ./scripts/install_linux.sh
 ```
 
-Установщик один раз запросит права администратора, установит системные
-зависимости, встроенный Zapret 2, PolicyKit-правило, Python-окружение, соберёт
-интерфейс и добавит приложение в меню.
-
-**Telegram Desktop автоматически не устанавливается.** TG WS Proxy будет
-готов к работе с уже установленным клиентом Telegram. Если пользователь
-осознанно хочет поставить мессенджер вместе с приложением, доступен отдельный
-параметр:
-
-```bash
-./scripts/install_linux.sh --with-telegram
-```
-
-Без запуска окна после установки:
-
-```bash
-./scripts/install_linux.sh --no-launch
-```
-
-Предварительный просмотр без изменений системы:
-
-```bash
-./scripts/install_linux.sh --dry-run
-```
-
-Установщик не останавливает и не перезапускает текущий VPN или другие активные
-сетевые службы. Если обнаружена сторонняя установка `/opt/zapret2`, её
-конфигурация не перезаписывается.
-
-Подробности: [README_LINUX.md](README_LINUX.md).
-
-## Запуск
-
-После установки используйте пункт **Zapret Hub** в меню приложений либо:
+Установщик подготовит зависимости, Zapret2, Python-окружение, Web UI,
+PolicyKit-правило и ярлык. После установки приложение доступно в меню
+Kali или по команде:
 
 ```bash
 ~/.local/bin/zapret-hub
 ```
 
-Запуск напрямую из репозитория:
+**Telegram Desktop не устанавливается автоматически.** Если нужно явно
+установить его вместе с Zapret Hub:
 
 ```bash
-./scripts/run_linux.sh
+./scripts/install_linux.sh --with-telegram
 ```
 
-## Использованные проекты и благодарности
+Предварительный просмотр без изменений системы:
 
-Zapret Hub Linux объединяет независимые open-source-проекты и не претендует на
-авторство их исходного кода.
+```bash
+./scripts/install_linux.sh --dry-run --no-launch
+```
 
-| Проект | Назначение | Благодарность |
-|---|---|---|
-| [Оригинальный Zapret Hub](https://github.com/goshkow/Zapret-Hub) | Исходный интерфейс и архитектура приложения | Автору и участникам оригинального проекта |
-| [zapret](https://github.com/bol-van/zapret) | Оригинальный кроссплатформенный DPI bypass | **bol-van** |
-| [zapret-discord-youtube-linux](https://github.com/Sergeydigl3/zapret-discord-youtube-linux) | Готовая Linux-адаптация классического Zapret | **Sergeydigl3** и участникам |
-| [zapret2](https://github.com/bol-van/zapret2) | Новое поколение Zapret и `nfqws2` | **bol-van** |
-| [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) | Локальный MTProto/WebSocket-прокси | **Flowseal** и участникам |
-| [zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) | Конфигурации и идеи исходной Windows-сборки | **Flowseal** и участникам |
+Установщик не останавливает и не перезапускает уже работающий VPN. Сторонняя
+установка `/opt/zapret2` также не перезаписывается.
 
-Спасибо всем авторам, тестировщикам и участникам перечисленных проектов.
+Подробности: [README_LINUX.md](README_LINUX.md).
+
+## TG WS Proxy
+
+Прокси работает локально и не открывает порт во внешную сеть. Его можно
+включать отдельно на главной странице либо запускать вместе с обходом.
+Для подключения Telegram Desktop используйте кнопку **«Подключить Telegram»** в
+карточке компонента.
+
+Быстрая проверка порта:
+
+```bash
+ss -ltn | grep ':1443'
+```
 
 ## Ограничения
 
-- проверено только на Kali Linux;
+- реальное тестирование проводилось только на Kali Linux;
+- форк не является VPN и не отправляет трафик на серверы DosAi;
 - результат обхода зависит от провайдера, региона и выбранной стратегии;
-- приложение не является VPN и не перенаправляет трафик на сторонний сервер;
-- перед изменением сетевой конфигурации рекомендуется сохранить текущие
-  настройки nftables;
-- поддержка Happ пока находится только в планах.
+- поддержка Happ пока находится в планах.
 
-## Диагностика и разработка
-
-Безопасная диагностика без изменения сетевых служб:
+## Диагностика и тесты
 
 ```bash
 .venv/bin/zapret-hub-linux diagnose
 .venv/bin/zapret-hub-linux start --dry-run
-```
-
-Тесты:
-
-```bash
-.venv/bin/pip install -e '.[dev]'
 .venv/bin/pytest -q
 ```
 
-## Обратная связь
+Журнал TG WS Proxy: `logs/tg_ws_proxy.log`.
 
-Вопросы, результаты тестирования и сообщения об ошибках можно отправлять в
-Telegram: [@dosai_main](https://t.me/dosai_main).
+## Исходные проекты и благодарности
+
+Этот форк не претендует на авторство встроенных open-source компонентов.
+
+- [Zapret Hub — upstream, от которого был создан Linux-форк](https://github.com/goshkow/Zapret-Hub)
+- [zapret](https://github.com/bol-van/zapret) и [zapret2](https://github.com/bol-van/zapret2) — **bol-van**
+- [zapret-discord-youtube-linux](https://github.com/Sergeydigl3/zapret-discord-youtube-linux) — **Sergeydigl3**
+- [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) — **Flowseal** и участники
+- [zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) — **Flowseal** и участники
+
+Ссылка на upstream сохранена только для атрибуции и соблюдения лицензии; этот
+Linux-форк не является официальным релизом upstream-проекта.
+
+## Связь
+
+Ошибки, идеи и результаты тесирования: [@dosai_main](https://t.me/dosai_main).
 
 ## Лицензия
 
-Код форка распространяется на условиях [MIT License](LICENSE). Встроенные
-компоненты сохраняют собственные лицензии и авторские уведомления.
+Изменения Linux-форка распространяются на условиях [MIT License](LICENSE).
+Встроенные проекты сохраняют свои лицензии и авторские уведомления.

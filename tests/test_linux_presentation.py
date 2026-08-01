@@ -12,12 +12,16 @@ def test_linux_fork_branding_and_credits_are_present() -> None:
 
     assert "Zapret Hub Linux" in readme
     assert "только на Kali Linux" in readme
+    assert "Windows не поддерживается" in readme
     assert "https://github.com/DosAi/Zapret-Hub-Linux" in readme
     assert "https://t.me/dosai_main" in readme
     assert "ChatGPT" in readme
     assert "https://github.com/bol-van/zapret" in readme
     assert "https://github.com/bol-van/zapret2" in readme
     assert "https://github.com/Flowseal/tg-ws-proxy" in readme
+    assert "shields.io" not in readme
+    assert "stargazers" not in readme
+    assert "goshkow.com" not in readme
     assert '"app.by": "by DosAi"' in locale
 
 
@@ -48,3 +52,13 @@ def test_quick_cards_are_equal_and_window_has_room_for_statuses() -> None:
     assert "grid-cols-[1fr_1fr_1.22fr_1fr_1fr]" not in quick_access
     assert "_WINDOW_WIDTH = 940" in window
     assert "_WINDOW_HEIGHT = 550" in window
+
+
+def test_github_automation_is_linux_only() -> None:
+    ci = (PROJECT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "Linux CI" in ci
+    assert "python-tests" in ci
+    assert "frontend-build" in ci
+    assert "windows-latest" not in ci
+    assert not (PROJECT_ROOT / ".github/workflows/release.yml").exists()

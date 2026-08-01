@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from zapret_hub.services.components import ProcessManager
+from zapret_hub.services.components import ProcessManager, _TG_WS_PROXY_REQUIRED_FILES
 
 
 class FakeLogging:
@@ -75,12 +75,15 @@ def test_linux_stop_terminates_managed_orphan(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux source-only updater test")
-def test_linux_updater_accepts_source_archive_without_windows_exe(tmp_path: Path) -> None:
+def test_linux_updater_accepts_complete_source_archive_without_windows_exe(tmp_path: Path) -> None:
     archive_root = tmp_path / "archive" / "tg-ws-proxy-v1.9.2"
-    (archive_root / "proxy").mkdir(parents=True)
-    (archive_root / "proxy" / "__init__.py").write_text(
-        '__version__ = "1.9.1"\n', encoding="utf-8"
-    )
+    for relative in _TG_WS_PROXY_REQUIRED_FILES:
+        target = archive_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            '__version__ = "1.9.1"\n' if relative == "proxy/__init__.py" else "# runtime module\n",
+            encoding="utf-8",
+        )
     source_zip = tmp_path / "source.zip"
     with zipfile.ZipFile(source_zip, "w") as archive:
         for path in archive_root.rglob("*"):
@@ -123,3 +126,37 @@ def test_linux_updater_accepts_source_archive_without_windows_exe(tmp_path: Path
     installed = runtime_dir / "tg-ws-proxy" / "proxy" / "__init__.py"
     assert result == {"status": "updated", "version": "1.9.2"}
     assert '__version__ = "1.9.2"' in installed.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux source-only updater test")
+def test_linux_updater_rejects_incomplete_source_archive(tmp_path: Path) -> None:
+    archive_root = tmp_path / "archive" / "tg-ws-proxy-v1.9.2"
+    (archive_root / "proxy").mkdir(parents=True)
+    (archive_root / "proxy" / "__init__.py").write_text('__version__ = "1.9.2"\n', encoding="utf-8")
+    source_zip = tmp_path / "source.zip"
+    with zipfile.ZipFile(source_zip, "w") as archive:
+        for path in archive_root.rglob("*"):
+            if path.is_file():
+                archive.write(path, path.relative_to(archive_root.parent))
+
+    runtime_dir = tmp_path / "runtime"
+
+    class Storage:
+        paths = SimpleNamespace(runtime_dir=runtime_dir)
+
+        @staticmethod
+        def _detect_tgws_version() -> str:
+            return "1.9.1"
+
+    manager = ProcessManager.__new__(ProcessManager)
+    manager.storage = Storage()
+    manager.list_states = lambda: []
+    manager._download_to_file = lambda _url, destination, timeout=60: shutil.copy2(source_zip, destination)
+
+    result = manager._install_tg_ws_proxy_release(
+        {"latest_version": "1.9.2", "source_url": "https://example.invalid/tg-ws-proxy.zip", "exe_url": ""}
+    )
+
+    assert result["status"] == "error"
+    assert "Incomplete tg-ws-proxy source archive" in result["error"]
+    assert not runtime_dir.exists()
