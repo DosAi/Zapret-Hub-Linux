@@ -12,9 +12,10 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/install_linux.sh [--dry-run] [--no-launch] [--with-telegram]
 
-Installs Zapret Hub and its bundled Zapret2 backend on Kali Linux.
+Installs Zapret Hub, classic Zapret for Linux, bundled Zapret2, the
+official Happ client, and the bundled TG WS Proxy on Kali Linux.
 Other Debian-based systems are accepted but have not been tested.
-Administrator authorization is requested once. Existing foreign /opt/zapret2
+Administrator authorization is requested once. Existing foreign Zapret
 installations and their configurations are preserved.
 EOF
 }
@@ -50,7 +51,7 @@ if [[ "${ID:-}" != "kali" ]]; then
   echo "WARNING: this fork has only been tested on Kali Linux; continuing in experimental mode." >&2
 fi
 
-if [[ ! -r "$SYSTEM_HELPER" || ! -r "$PROJECT_ROOT/runtime/zapret2/config.default" ]]; then
+if [[ ! -r "$SYSTEM_HELPER" || ! -r "$PROJECT_ROOT/runtime/zapret2/config.default" || ! -r "$PROJECT_ROOT/runtime/tg-ws-proxy/proxy/tg_ws_proxy.py" ]]; then
   echo "The checkout is incomplete. Download or clone the complete fork instead of individual files." >&2
   exit 1
 fi
@@ -62,6 +63,7 @@ if (( DRY_RUN )); then
   echo "Zapret Hub installation preview for: $PROJECT_ROOT"
   /bin/sh "$SYSTEM_HELPER" "${helper_args[@]}" --dry-run
   echo "[dry-run] create $PROJECT_ROOT/.venv and install the Python application"
+  echo "[dry-run] verify bundled TG WS Proxy and its Python dependencies"
   echo "[dry-run] npm ci && npm run build in $PROJECT_ROOT/web_ui"
   echo "[dry-run] create a per-user application launcher"
   (( LAUNCH == 0 )) || echo "[dry-run] launch Zapret Hub"
@@ -82,13 +84,16 @@ else
   exit 1
 fi
 
-echo "Administrator authorization is needed once for packages, Zapret2, systemd, and PolicyKit."
+echo "Administrator authorization is needed once for packages, Zapret, Zapret2, Happ, systemd, and PolicyKit."
 "${elevate[@]}" /bin/sh "$SYSTEM_HELPER" "${helper_args[@]}"
 
 cd "$PROJECT_ROOT"
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -e .
+PYTHONPATH="$PROJECT_ROOT/runtime/tg-ws-proxy" .venv/bin/python -c \
+  'from proxy import tg_ws_proxy; assert callable(tg_ws_proxy.main)'
+echo "Bundled TG WS Proxy is ready."
 
 (
   cd web_ui
@@ -108,7 +113,7 @@ DESKTOP_FILE="$USER_APPS/zapret-hub.desktop"
   echo '[Desktop Entry]'
   echo 'Type=Application'
   echo 'Name=Zapret Hub'
-  echo 'Comment=Manage Zapret2 and TG WS Proxy'
+  echo 'Comment=Manage Zapret, Zapret2, Happ and TG WS Proxy'
   printf 'Exec=%s/zapret-hub\n' "$USER_BIN"
   echo 'Icon=zapret-hub'
   echo 'Terminal=false'
@@ -119,7 +124,7 @@ chmod 0644 "$DESKTOP_FILE"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
 
 echo
-echo "Zapret Hub is installed. The backend is ready but the installer did not change the current VPN or network session."
+echo "Zapret Hub is installed. Zapret, Zapret2, Happ, and TG WS Proxy are ready; the installer did not change the current VPN or network session."
 echo "Launch it later with: $USER_BIN/zapret-hub"
 
 if (( LAUNCH )); then

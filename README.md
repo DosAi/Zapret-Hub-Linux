@@ -2,7 +2,7 @@
 
 # Zapret Hub Linux
 
-Графическая панель для Zapret, Zapret2 и TG WS Proxy на Kali Linux.
+Графическая панель для Zapret, Zapret2, Happ и TG WS Proxy на Kali Linux.
 
 **Автор Linux-форка: [DosAi](https://github.com/DosAi)**<br>
 [Репозиторий](https://github.com/DosAi/Zapret-Hub-Linux) · [Telegram: @dosai_main](https://t.me/dosai_main)
@@ -23,10 +23,23 @@ Zapret Hub Linux — отдельный экспериментальный фо�
 Портирование, отладка, подготовка установщика и тестов выполнены DosAi
 при помощи **ChatGPT от OpenAI**.
 
+## Что вошло в версию 3.1.0
+
+- автоматическая установка Zapret, Zapret 2, Happ и TG WS Proxy из одного скрипта;
+- нативные Linux-бэкенды Zapret и Zapret 2 с `systemd` и `nftables`;
+- выбор Zapret/Zapret 2 без автозапуска при пролистывании;
+- независимый Happ, который может работать параллельно с Zapret или Zapret 2;
+- отдельные тумблеры Happ и TG WS Proxy на главной странице;
+- локальный Telegram-прокси и кнопка подключения Telegram Desktop;
+- одноразовая авторизация администратора при установке и ограниченные PolicyKit-правила;
+- сохранение текущих VPN, сетевых служб и сторонних конфигураций при повторной установке;
+- исправленные Linux-иконка, размер окна и одинаковые карточки статуса.
+
 ## Возможности
 
 - Zapret2 через `nfqws2`, `nftables` и `zapret2.service`;
-- поддержка уже установленного классического Zapret для Linux;
+- автоматическая установка классического Zapret для Linux;
+- [Happ](https://github.com/Happ-proxy/happ-desktop) через официальный Linux-клиент и deeplink-команды;
 - локальный TG WS Proxy на `127.0.0.1:1443`;
 - общая кнопка питания и отдельные переключатели компонентов;
 - свободное листание стратегий без их автоматического запуска;
@@ -34,22 +47,19 @@ Zapret Hub Linux — отдельный экспериментальный фо�
 - автозапуск и ярлык в меню приложений Kali.
 
 Встроенный legacy VPN из upstream-версии в Linux-интерфейсе скрыт и не
-поддерживается. В будущем его место планируется использовать для
-[Happ](https://github.com/Happ-proxy/happ-desktop).
+поддерживается. Happ добавлен как отдельный независимый компонент.
 
 ## Установка на Kali Linux
 
-Клонируйте репозиторий и запустите установщик:
+Вставьте в терминал одну команду:
 
 ```bash
-git clone https://github.com/DosAi/Zapret-Hub-Linux.git
-cd Zapret-Hub-Linux
-./scripts/install_linux.sh
+git clone https://github.com/DosAi/Zapret-Hub-Linux.git && cd Zapret-Hub-Linux && ./install.sh
 ```
 
-Установщик подготовит зависимости, Zapret2, Python-окружение, Web UI,
-PolicyKit-правило и ярлык. После установки приложение доступно в меню
-Kali или по команде:
+Установщик подготовит зависимости, классический Zapret, Zapret2, Happ, TG WS Proxy,
+Python-окружение, Web UI, PolicyKit-правило и ярлык. После установки приложение доступно в меню
+Kali и автоматически запустится. Позже его можно открыть из меню или командой:
 
 ```bash
 ~/.local/bin/zapret-hub
@@ -59,17 +69,19 @@ Kali или по команде:
 установить его вместе с Zapret Hub:
 
 ```bash
-./scripts/install_linux.sh --with-telegram
+./install.sh --with-telegram
 ```
 
 Предварительный просмотр без изменений системы:
 
 ```bash
-./scripts/install_linux.sh --dry-run --no-launch
+./install.sh --dry-run --no-launch
 ```
 
-Установщик не останавливает и не перезапускает уже работающий VPN. Сторонняя
-установка `/opt/zapret2` также не перезаписывается.
+Установщик не запускает, не останавливает и не перезапускает сетевые службы,
+а также не меняет их автозапуск. Уже установленный Happ пропускается без обновления и
+перезапуска, поэтому текущий VPN остаётся нетронутым. Сторонние
+установки Zapret и `/opt/zapret2` не перезаписываются.
 
 Подробности: [README_LINUX.md](README_LINUX.md).
 
@@ -86,12 +98,21 @@ Kali или по команде:
 ss -ltn | grep ':1443'
 ```
 
+## Happ
+
+Happ включается отдельным тумблером на главной странице или в разделе
+«Компоненты». Он может работать одновременно с Zapret или Zapret 2; переключение и выключение
+основного обхода Happ не затрагивает. Подключение и отключение выполняются через официальные
+deeplink-команды. Импорт
+подписки и выбор сервера выполняются в самом Happ по кнопке **«Открыть Happ»**.
+Серверы или VPN-подписки в репозиторий не входят: пользователь добавляет свою конфигурацию в Happ.
+
 ## Ограничения
 
 - реальное тестирование проводилось только на Kali Linux;
 - форк не является VPN и не отправляет трафик на серверы DosAi;
 - результат обхода зависит от провайдера, региона и выбранной стратегии;
-- поддержка Happ пока находится в планах.
+- управление Happ проверено только с официальным Linux-клиентом 3.3.6.
 
 ## Диагностика и тесты
 
@@ -111,6 +132,7 @@ ss -ltn | grep ':1443'
 - [zapret](https://github.com/bol-van/zapret) и [zapret2](https://github.com/bol-van/zapret2) — **bol-van**
 - [zapret-discord-youtube-linux](https://github.com/Sergeydigl3/zapret-discord-youtube-linux) — **Sergeydigl3**
 - [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) — **Flowseal** и участники
+- [Happ Desktop](https://github.com/Happ-proxy/happ-desktop) — **Happ-proxy**
 - [zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) — **Flowseal** и участники
 
 Ссылка на upstream сохранена только для атрибуции и соблюдения лицензии; этот
@@ -118,7 +140,7 @@ Linux-форк не является официальным релизом upstr
 
 ## Связь
 
-Ошибки, идеи и результаты тесирования: [@dosai_main](https://t.me/dosai_main).
+Ошибки, идеи и результаты тестирования: [@dosai_main](https://t.me/dosai_main).
 
 ## Лицензия
 

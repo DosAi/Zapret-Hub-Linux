@@ -31,6 +31,7 @@ from zapret_hub.domain import ComponentDefinition, ComponentState
 from zapret_hub.runtime_env import is_packaged_runtime
 from zapret_hub.services.github_network import GitHubNetworkClient, is_recoverable_github_error
 from zapret_hub.services.logging_service import LoggingManager
+from zapret_hub.services.linux_happ import LinuxHappService
 from zapret_hub.services.linux_zapret2 import LinuxZapret2Service, LinuxZapretService
 from zapret_hub.services.service_catalog import prioritize_generals_for_services
 from zapret_hub.services.service_rules import SERVICE_RULES
@@ -265,6 +266,7 @@ class ProcessManager:
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
         self._linux_zapret = LinuxZapretService() if sys.platform.startswith("linux") else None
         self._linux_zapret2 = LinuxZapret2Service() if sys.platform.startswith("linux") else None
+        self._linux_happ = LinuxHappService() if sys.platform.startswith("linux") else None
         self.github = GitHubNetworkClient(logging, recovery_runner=self.with_github_connectivity_recovery)
         # Optional UI hook: (component_id, status, last_error) after optimistic starts fail.
         self._status_listener: Callable[[str, str, str], None] | None = None
@@ -322,9 +324,22 @@ class ProcessManager:
         settings = self.settings.get()
         components = [ComponentDefinition(**item) for item in raw_items]
         if self._linux_zapret2 is not None:
-            # The inherited subscription VPN is intentionally unavailable in
-            # this Linux fork. Its slot is reserved for a future Happ backend.
-            components = [component for component in components if component.id != "goshkow-vpn"]
+            normalized: list[ComponentDefinition] = []
+            for component in components:
+                if component.id != "goshkow-vpn":
+                    normalized.append(component)
+                    continue
+                if self._linux_happ is None or not self._linux_happ.available:
+                    continue
+                # Keep the legacy internal id for settings compatibility while
+                # exposing only the official Happ client in this Linux fork.
+                component.name = "Happ"
+                component.description = "Official Happ client managed through native Linux deeplinks."
+                component.version = self._linux_happ.version()
+                component.source = "https://github.com/Happ-proxy/happ-desktop"
+                component.command = []
+                normalized.append(component)
+            components = normalized
         for component in components:
             component.enabled = component.id in settings.enabled_component_ids
             component.autostart = component.id in settings.autostart_component_ids
@@ -518,13 +533,23 @@ class ProcessManager:
                     state.status = "stopped"
                     state.pid = None
             elif component.id == "goshkow-vpn":
-                process = self._processes.get(component.id)
-                if process and process.poll() is None:
-                    state.status = "running"
-                    state.pid = process.pid
+                if self._linux_happ is not None:
+                    happ_state = self._linux_happ.status()
+                    state.status = (
+                        happ_state.status
+                        if happ_state.status in {"running", "stopped"}
+                        else "error"
+                    )
+                    state.pid = happ_state.pid
+                    state.last_error = happ_state.message if state.status == "error" else ""
                 else:
-                    state.status = "stopped"
-                    state.pid = None
+                    process = self._processes.get(component.id)
+                    if process and process.poll() is None:
+                        state.status = "running"
+                        state.pid = process.pid
+                    else:
+                        state.status = "stopped"
+                        state.pid = None
             elif component.id == "xbox-dns":
                 dns_state = self._read_xbox_dns_state()
                 state.status = "running" if bool(dns_state.get("active", False)) else "stopped"
@@ -593,6 +618,10 @@ class ProcessManager:
             self._invalidate_state_cache()
             return
         if runtime_id == "goshkow-vpn":
+            if getattr(self, "_linux_happ", None) is not None:
+                # Happ is an independent Linux auxiliary component. Runtime
+                # cleanup for Zapret/Zapret2 must never disconnect its tunnel.
+                return
             owned = self._processes.get("goshkow-vpn")
             if owned is None or owned.poll() is not None:
                 return
@@ -610,7 +639,7 @@ class ProcessManager:
 
     def _start_component_unlocked(self, component_id: str) -> ComponentState:
         component = next(item for item in self.list_components() if item.id == component_id)
-        if self._linux_zapret2 is not None and component.id in {"goshkow-vpn", "xbox-dns"}:
+        if self._linux_zapret2 is not None and component.id == "xbox-dns":
             state = ComponentState(
                 component_id=component_id,
                 status="error",
@@ -800,6 +829,20 @@ class ProcessManager:
             self._invalidate_state_cache()
             return state
         if component_id == "goshkow-vpn":
+            if self._linux_happ is not None:
+                result = self._linux_happ.stop()
+                state.status = result.status if result.status in {"running", "stopped"} else "error"
+                state.pid = result.pid
+                state.last_error = result.message if state.status == "error" else ""
+                self._states[component_id] = state
+                self.logging.log(
+                    "info" if state.status == "stopped" else "error",
+                    "Linux Happ disconnect",
+                    status=state.status,
+                    error=state.last_error,
+                )
+                self._invalidate_state_cache()
+                return state
             process = self._processes.get(component_id)
             if process and process.poll() is None:
                 process.terminate()
@@ -943,6 +986,7 @@ class ProcessManager:
             is_external_linux_service = (
                 (component.id == "zapret" and self._linux_zapret is not None)
                 or (component.id == "zapret2" and self._linux_zapret2 is not None)
+                or (component.id == "goshkow-vpn" and getattr(self, "_linux_happ", None) is not None)
             )
             if is_external_linux_service and not include_external_services:
                 continue
@@ -2024,6 +2068,23 @@ foreach ($adapter in @($payload.adapters)) {
         return state
 
     def _start_goshkow_vpn(self, component_id: str) -> ComponentState:
+        if self._linux_happ is not None:
+            result = self._linux_happ.start()
+            state = ComponentState(
+                component_id=component_id,
+                status=result.status if result.status in {"running", "stopped"} else "error",
+                pid=result.pid,
+                last_error=result.message if result.status not in {"running", "stopped"} else "",
+            )
+            self._states[component_id] = state
+            self.logging.log(
+                "info" if state.status == "running" else "error",
+                "Linux Happ connect",
+                status=state.status,
+                error=state.last_error,
+                command=list(result.command),
+            )
+            return state
         current = self._processes.get(component_id)
         if current and current.poll() is None:
             existing = self._states.get(component_id, ComponentState(component_id=component_id, status="running", pid=current.pid))

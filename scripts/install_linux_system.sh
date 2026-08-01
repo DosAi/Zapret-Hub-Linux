@@ -9,9 +9,10 @@ usage() {
     cat <<'EOF'
 Usage: install_linux_system.sh --project-root PATH [--dry-run] [--with-telegram]
 
-Root-only helper for install_linux.sh. It installs Kali packages, the bundled
-Zapret2 backend, its systemd unit, and the narrow Zapret Hub PolicyKit rule.
-It deliberately does not start, stop, or restart any network service.
+Root-only helper for install_linux.sh. It installs Kali packages, classic
+Zapret for Linux, the bundled Zapret2 backend, their systemd units, and the
+narrow Zapret Hub PolicyKit rule. It deliberately does not start, stop,
+restart, enable, or disable any network service.
 EOF
 }
 
@@ -45,6 +46,8 @@ done
 [ -n "$PROJECT_ROOT" ] || { echo "--project-root is required" >&2; exit 2; }
 PROJECT_ROOT=$(CDPATH= cd -- "$PROJECT_ROOT" && pwd)
 ZAPRET_SOURCE="$PROJECT_ROOT/runtime/zapret2"
+CLASSIC_HELPER="$PROJECT_ROOT/scripts/install_linux_classic_zapret.sh"
+HAPP_HELPER="$PROJECT_ROOT/scripts/install_linux_happ.sh"
 POLKIT_SOURCE="$PROJECT_ROOT/packaging/polkit/49-zapret-hub.rules"
 HOSTLIST_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hosts-user.txt"
 
@@ -53,13 +56,15 @@ for required in \
     "$ZAPRET_SOURCE/install_bin.sh" \
     "$ZAPRET_SOURCE/init.d/sysv/zapret2" \
     "$ZAPRET_SOURCE/init.d/systemd/zapret2.service" \
+    "$CLASSIC_HELPER" \
+    "$HAPP_HELPER" \
     "$POLKIT_SOURCE" \
     "$HOSTLIST_SOURCE"
 do
     [ -r "$required" ] || { echo "Required installation file is missing: $required" >&2; exit 1; }
 done
 
-PACKAGES="python3 python3-venv python3-pip nodejs npm policykit-1 nftables iproute2 ca-certificates desktop-file-utils"
+PACKAGES="python3 python3-venv python3-pip nodejs npm policykit-1 nftables iproute2 ca-certificates desktop-file-utils curl git tar gzip"
 if [ "$INSTALL_TELEGRAM" -eq 1 ]; then
     PACKAGES="$PACKAGES telegram-desktop"
 fi
@@ -67,9 +72,10 @@ fi
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] apt-get update"
     echo "[dry-run] apt-get install -y $PACKAGES"
+    /bin/sh "$CLASSIC_HELPER" --project-root "$PROJECT_ROOT" --dry-run
+    /bin/sh "$HAPP_HELPER" --dry-run
     echo "[dry-run] install bundled Zapret2 in /opt/zapret2 (preserve foreign installs)"
     echo "[dry-run] install zapret2.service without starting or restarting it"
-    echo "[dry-run] enable zapret2.service for future boots"
     echo "[dry-run] install /etc/polkit-1/rules.d/49-zapret-hub.rules"
     exit 0
 fi
@@ -83,6 +89,9 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 # shellcheck disable=SC2086
 apt-get install -y $PACKAGES
+
+/bin/sh "$CLASSIC_HELPER" --project-root "$PROJECT_ROOT"
+/bin/sh "$HAPP_HELPER"
 
 ZAPRET_TARGET=/opt/zapret2
 MANAGED_MARKER="$ZAPRET_TARGET/.zapret-hub-managed"
@@ -155,6 +164,5 @@ install -o root -g root -m 0644 \
     /etc/polkit-1/rules.d/49-zapret-hub.rules
 
 systemctl daemon-reload
-systemctl enable zapret2.service
 
-echo "System integration is ready. No active network service was stopped or restarted."
+echo "System integration is ready. No network service was started, stopped, restarted, enabled, or disabled."

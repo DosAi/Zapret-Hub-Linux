@@ -10,9 +10,8 @@ import { uiAssetUrl } from "@/lib/assets";
 import { ScrollGlassHeader } from "@/components/ui/ScrollGlassHeader";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 
-// The legacy subscription VPN is kept internally only for possible migration.
-// The Linux fork will use this slot for Happ after its integration is ready.
-const ORDER: ComponentId[] = ["zapret", "zapret2", "tg-ws-proxy", "xbox-dns"];
+// Happ keeps the upstream VPN id internally so existing settings migrate cleanly.
+const ORDER: ComponentId[] = ["zapret", "zapret2", "goshkow-vpn", "tg-ws-proxy", "xbox-dns"];
 const GITHUB_VERSION_IDS: ComponentId[] = ["zapret", "zapret2", "tg-ws-proxy"];
 
 const componentIcon: Record<ComponentId, string> = {
@@ -165,9 +164,8 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
 
   const toggleComponent = (id: ComponentId, on: boolean) => {
     setOptimisticToggle((current) => ({ ...current, [id]: on }));
-    // Only show starting/stopping when power is on (backend will actually start/stop).
-    // With power off, toggle only updates "enabled" — process stays off.
-    if (powered) {
+    // TG/DNS follow main power. Happ is independent and always starts/stops.
+    if (powered || (id === "goshkow-vpn" && state.ui.platform === "linux")) {
       patchOptimistic({
         components: {
           [id]: {
@@ -262,13 +260,13 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
                 <div className="mt-3 flex items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-1.5">
                     {id !== "xbox-dns" && id !== "goshkow-vpn" && <button disabled={checkingId === id || updatingId === id} onClick={() => checkUpdate(id)} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg disabled:opacity-50">{updatingId === id ? t("component.updating") : checkingId === id ? t("component.checking") : t("component.update")}</button>}
-                    {id === "goshkow-vpn" && <button onClick={onConnectVpn} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.connect")}</button>}
-                    {id === "goshkow-vpn" && <button onClick={() => bridge.call("component.open-external", { id })} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.trial")}</button>}
+                    {id === "goshkow-vpn" && state.ui.platform !== "linux" && <button onClick={onConnectVpn} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.connect")}</button>}
+                    {id === "goshkow-vpn" && <button onClick={() => bridge.call("component.open-external", { id })} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{state.ui.platform === "linux" ? (locale === "ru" ? "Открыть Happ" : "Open Happ") : t("component.trial")}</button>}
                     {id === "xbox-dns" && <button onClick={() => setDnsOpen((value) => !value)} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.chooseDns")}</button>}
                     {id === "zapret" && controlMode("zapret") !== "auto" && <button onClick={onReconfigure} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.reconfigure")}</button>}
                     {id === "tg-ws-proxy" && <button onClick={() => bridge.call("tg.connect", undefined)} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.connectTg")}</button>}
                   </div>
-                  {(id === "tg-ws-proxy" || id === "xbox-dns") && <IosToggle on={on} onChange={(v) => toggleComponent(id, v)} label={c.name} />}
+                  {(id === "tg-ws-proxy" || id === "xbox-dns" || (id === "goshkow-vpn" && state.ui.platform === "linux")) && <IosToggle on={on} onChange={(v) => toggleComponent(id, v)} label={c.name} />}
                 </div>
                 {(id === "zapret" || id === "zapret2") && (
                   <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-line-1 pt-2.5">

@@ -156,11 +156,10 @@ export function SettingsModal({
     { key: "app", label: t("settings.tab.app") },
     { key: "zapret", label: "Zapret" },
     { key: "zapret2", label: "Zapret 2" },
-    // Reserved for a future Happ integration. The legacy subscription VPN is
-    // intentionally hidden in this Linux fork.
+    // Happ is configured in its own official application, so no extra tab is needed.
     { key: "tg", label: "TG WS Proxy" },
   ];
-  const modeLabels: Record<RuntimeId, string> = { zapret: "Zapret", "goshkow-vpn": "Legacy VPN", zapret2: "Zapret2", none: L("Без основного компонента", "No primary component") };
+  const modeLabels: Record<RuntimeId, string> = { zapret: "Zapret", "goshkow-vpn": state.ui.platform === "linux" ? "Happ" : "Legacy VPN", zapret2: "Zapret2", none: L("Без основного компонента", "No primary component") };
   const selectTab = (next: SettingsTab) => {
     const currentIndex = tabs.findIndex((item) => item.key === tab);
     const nextIndex = tabs.findIndex((item) => item.key === next);

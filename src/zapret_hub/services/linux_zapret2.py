@@ -228,6 +228,21 @@ class LinuxZapretService(LinuxZapret2Service):
             platform_name=platform_name,
         )
 
+    def discover_root(self) -> Path | None:
+        # A preserved foreign directory may be incomplete. Continue to the
+        # Hub-managed fallback instead of treating the first directory as a
+        # usable classic Zapret installation.
+        first_directory: Path | None = None
+        for candidate in self._root_candidates:
+            path = Path(candidate).expanduser()
+            if not path.is_dir():
+                continue
+            resolved = path.resolve()
+            first_directory = first_directory or resolved
+            if self.find_nfqws(resolved) is not None:
+                return resolved
+        return first_directory
+
     def find_nfqws(self, root: Path | None = None) -> Path | None:
         base = root or self.discover_root()
         if base is None:
@@ -303,6 +318,7 @@ class LinuxZapretService(LinuxZapret2Service):
             (
                 Path.home() / "zapret-discord-youtube-linux",
                 Path("/opt/zapret-discord-youtube-linux"),
+                Path("/opt/zapret-hub/zapret-discord-youtube-linux"),
                 Path("/opt/zapret-discord-youtube"),
             )
         )
