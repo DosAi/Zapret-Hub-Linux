@@ -4512,9 +4512,7 @@ class WebMainWindow(QMainWindow):
             except Exception:
                 pass
         install_root = Path(self.context.paths.install_root)
-        icon_path = install_root / "ui_assets" / "icons" / "app.ico"
-        if not icon_path.exists():
-            icon_path = install_root / "ui_assets" / "icons" / "app.png"
+        icon_path = install_root / "ui_assets" / "icons" / "app.png"
         if not icon_path.exists():
             icon_path = install_root / "ui_assets" / "icons" / "app.svg"
         icon = QIcon(str(icon_path)) if icon_path.exists() else self.windowIcon()

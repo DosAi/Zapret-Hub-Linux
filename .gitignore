@@ -10,28 +10,10 @@ __pycache__/
 .venv/
 *.egg-info/
 web_ui/node_modules/
-installer_web/node_modules/
-uninstaller_web/node_modules/
 
-# builds / local outputs
+# build outputs
 build/
 dist/
-dist_*/
-dist_fresh*/
-dist_inst*/
-dist_new*/
-dist_nuitka_*/
-release_*/
-.release_cache/
-.nuitka_staging/
-.build_outdir.txt
-github_release/
-portable/
-installer_payload/
-bundled_uninstaller/
-nuitka-crash-report.xml
-backup_*/
-*.pfx
 
 # runtime data / local state
 logs/
@@ -50,8 +32,6 @@ runtime/**/.service/
 *.7z
 *.log
 *.tmp
-web_ui/qa-*.png
-README.md
 
 # ide
 .idea/

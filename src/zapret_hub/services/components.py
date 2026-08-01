@@ -1244,7 +1244,7 @@ if ($rows.Count -eq 0) {
 
     def _apply_windows_dns(self, adapters: list[dict[str, Any]], ipv4: list[str], ipv6: list[str]) -> None:
         payload = json.dumps({"adapters": adapters, "ipv4": ipv4, "ipv6": ipv6}, ensure_ascii=False)
-        script = """
+        script = r"""
 $payload = @'
 __PAYLOAD__
 '@ | ConvertFrom-Json
@@ -1289,7 +1289,7 @@ foreach ($adapter in @($payload.adapters)) {
 
     def _restore_windows_dns(self, adapters: list[dict[str, Any]]) -> None:
         payload = json.dumps({"adapters": adapters}, ensure_ascii=False)
-        script = """
+        script = r"""
 $payload = @'
 __PAYLOAD__
 '@ | ConvertFrom-Json
@@ -4807,6 +4807,14 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
     def install_zapret_version(self, version: str) -> dict[str, str]:
         """Download and install a specific Flowseal Zapret release (upgrade or rollback)."""
+        linux_zapret = getattr(self, "_linux_zapret", None)
+        if linux_zapret is not None:
+            report = linux_zapret.diagnose()
+            return {
+                "status": "external",
+                "version": "system",
+                "path": str(report.get("zapret_root") or ""),
+            }
         wanted = str(version or "").strip().lstrip("vV")
         if not wanted:
             return {"status": "error", "error": "Version is required"}
@@ -5256,6 +5264,14 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return self._install_tg_ws_proxy_release(release)
 
     def update_zapret_runtime(self) -> dict[str, str]:
+        linux_zapret = getattr(self, "_linux_zapret", None)
+        if linux_zapret is not None:
+            report = linux_zapret.diagnose()
+            return {
+                "status": "external",
+                "version": "system",
+                "path": str(report.get("zapret_root") or ""),
+            }
         release = self.fetch_latest_zapret_release()
         latest_version = str(release.get("latest_version", "")).strip()
         current_version = self.storage._detect_zapret_version()
@@ -5439,7 +5455,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
             backup = self.storage.create_backup(runtime_root, "pre-update-tg-ws-proxy")
             staging_root = temp_root / "runtime_new"
-            shutil.copytree(source_root, staging_root, dirs_exist_ok=True)
+            shutil.copytree(source_root / "proxy", staging_root / "proxy")
+            logging_source = source_root / "utils" / "logging_setup.py"
+            if logging_source.is_file():
+                (staging_root / "utils").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(logging_source, staging_root / "utils" / "logging_setup.py")
+                (staging_root / "utils" / "__init__.py").touch()
+            license_source = source_root / "LICENSE"
+            if license_source.is_file():
+                shutil.copy2(license_source, staging_root / "LICENSE")
             if windows_exe_path is not None:
                 (staging_root / "bin").mkdir(parents=True, exist_ok=True)
                 shutil.copy2(windows_exe_path, staging_root / "bin" / "TgWsProxy_windows.exe")
