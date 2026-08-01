@@ -164,9 +164,8 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
 
   const toggleComponent = (id: ComponentId, on: boolean) => {
     setOptimisticToggle((current) => ({ ...current, [id]: on }));
-    // Only show starting/stopping when power is on (backend will actually start/stop).
-    // With power off, toggle only updates "enabled" — process stays off.
-    if (powered) {
+    // TG/DNS follow main power. Happ is independent and always starts/stops.
+    if (powered || (id === "goshkow-vpn" && state.ui.platform === "linux")) {
       patchOptimistic({
         components: {
           [id]: {
@@ -267,7 +266,7 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
                     {id === "zapret" && controlMode("zapret") !== "auto" && <button onClick={onReconfigure} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.reconfigure")}</button>}
                     {id === "tg-ws-proxy" && <button onClick={() => bridge.call("tg.connect", undefined)} className="rounded-lg border border-line-1 bg-bg-1 px-2.5 py-1.5 text-[11px] text-fg-dim transition-all duration-200 hover:bg-bg-3 hover:text-fg">{t("component.connectTg")}</button>}
                   </div>
-                  {(id === "tg-ws-proxy" || id === "xbox-dns") && <IosToggle on={on} onChange={(v) => toggleComponent(id, v)} label={c.name} />}
+                  {(id === "tg-ws-proxy" || id === "xbox-dns" || (id === "goshkow-vpn" && state.ui.platform === "linux")) && <IosToggle on={on} onChange={(v) => toggleComponent(id, v)} label={c.name} />}
                 </div>
                 {(id === "zapret" || id === "zapret2") && (
                   <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-line-1 pt-2.5">

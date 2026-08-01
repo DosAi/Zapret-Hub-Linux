@@ -159,7 +159,7 @@ def test_linux_preserves_tg_proxy_component_selection(
     assert settings.autostart_component_ids == ["tg-ws-proxy"]
 
 
-def test_linux_preserves_happ_as_selected_runtime_when_installed(
+def test_linux_migrates_happ_to_independent_component_when_installed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -180,5 +180,5 @@ def test_linux_preserves_happ_as_selected_runtime_when_installed(
 
     settings = SettingsManager(storage).get()
 
-    assert settings.enabled_component_ids == ["goshkow-vpn"]
-    assert settings.selected_runtime_mode == "goshkow-vpn"
+    assert settings.enabled_component_ids == ["zapret", "goshkow-vpn"]
+    assert settings.selected_runtime_mode == "zapret"

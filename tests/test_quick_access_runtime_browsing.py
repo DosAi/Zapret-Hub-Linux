@@ -33,3 +33,11 @@ def test_quick_access_exposes_independent_tg_proxy_toggle() -> None:
     assert 'bridge.call("component.toggle", { id: "tg-ws-proxy", on: enabled })' in source
     assert 'TG Proxy: включать вместе с обходом' in source
     assert 'event.stopPropagation()' in source
+
+
+def test_quick_access_exposes_independent_happ_toggle() -> None:
+    source = QUICK_ACCESS.read_text(encoding="utf-8")
+
+    assert 'bridge.call("component.toggle", { id: "goshkow-vpn", on: enabled })' in source
+    assert 'Happ: независимое VPN-подключение' in source
+    assert 'grid-cols-6' in source

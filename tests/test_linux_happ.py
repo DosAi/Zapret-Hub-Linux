@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 
+from zapret_hub.services.backend_worker import _sync_bypass_enabled_for_mode
+from zapret_hub.services.components import ProcessManager
 from zapret_hub.services.linux_happ import LinuxHappService
+from zapret_hub.services.linux_happ import LinuxHappResult
 
 
 class _PopenRecorder:
@@ -94,3 +98,56 @@ def test_open_uses_official_open_deeplink(tmp_path: Path) -> None:
 
     assert result.status == "opened"
     assert popen.commands == [[str(executable.resolve()), "happ://open"]]
+
+
+def test_linux_happ_start_does_not_stop_zapret_services() -> None:
+    manager = ProcessManager.__new__(ProcessManager)
+    manager._linux_happ = SimpleNamespace(
+        start=lambda: LinuxHappResult("running", pid=4242, command=("happ", "happ://connect"))
+    )
+    manager._linux_zapret = SimpleNamespace(status=lambda: (_ for _ in ()).throw(AssertionError("Zapret was inspected")))
+    manager._linux_zapret2 = SimpleNamespace(status=lambda: (_ for _ in ()).throw(AssertionError("Zapret2 was inspected")))
+    manager._states = {}
+    manager.logging = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+
+    state = manager._start_goshkow_vpn("goshkow-vpn")
+
+    assert state.status == "running"
+    assert state.pid == 4242
+
+
+def test_linux_runtime_selection_preserves_enabled_happ() -> None:
+    values = SimpleNamespace(
+        enabled_component_ids=["zapret", "goshkow-vpn"],
+        autostart_component_ids=["goshkow-vpn"],
+    )
+
+    class Settings:
+        def get(self):
+            return values
+
+        def update(self, **changes):
+            for key, value in changes.items():
+                setattr(values, key, value)
+            return values
+
+    context = SimpleNamespace(
+        settings=Settings(),
+        processes=SimpleNamespace(_linux_happ=SimpleNamespace(available=True)),
+    )
+
+    _sync_bypass_enabled_for_mode(context, "zapret2")
+
+    assert values.selected_runtime_mode == "zapret2"
+    assert set(values.enabled_component_ids) == {"zapret2", "goshkow-vpn"}
+    assert values.autostart_component_ids == ["goshkow-vpn"]
+
+
+def test_linux_runtime_cleanup_never_disconnects_happ() -> None:
+    manager = ProcessManager.__new__(ProcessManager)
+    manager._linux_zapret2 = object()
+    manager._linux_happ = SimpleNamespace(
+        status=lambda: (_ for _ in ()).throw(AssertionError("Happ status was inspected"))
+    )
+
+    manager.stop_running_bypass_copies("goshkow-vpn")

@@ -50,9 +50,9 @@ def test_quick_cards_are_equal_and_window_has_room_for_statuses() -> None:
     quick_access = (PROJECT_ROOT / "web_ui/src/pages/QuickAccessPage.tsx").read_text(encoding="utf-8")
     window = (PROJECT_ROOT / "src/zapret_hub/ui/web_window.py").read_text(encoding="utf-8")
 
-    assert "grid-cols-5" in quick_access
+    assert "grid-cols-6" in quick_access
     assert "grid-cols-[1fr_1fr_1.22fr_1fr_1fr]" not in quick_access
-    assert "_WINDOW_WIDTH = 940" in window
+    assert "_WINDOW_WIDTH = 1080" in window
     assert "_WINDOW_HEIGHT = 550" in window
 
 

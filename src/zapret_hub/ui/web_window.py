@@ -25,7 +25,7 @@ from zapret_hub.runtime_env import development_install_root, is_packaged_runtime
 
 
 _COMPONENT_IDS = ("zapret", "zapret2", "goshkow-vpn", "tg-ws-proxy", "xbox-dns")
-_WINDOW_WIDTH = 940
+_WINDOW_WIDTH = 1080
 _WINDOW_HEIGHT = 550
 
 # Inline shell shown before the React bundle is available. Keep visually in sync with web_ui/index.html.
@@ -1994,11 +1994,9 @@ class WebBridge(QObject):
                 if active_backend == "zapret2":
                     enabled_ids.add("zapret2")
                     enabled_ids.discard("zapret")
-                    enabled_ids.discard("goshkow-vpn")
                 else:
                     enabled_ids.add("zapret")
                     enabled_ids.discard("zapret2")
-                    enabled_ids.discard("goshkow-vpn")
             else:
                 enabled_ids.discard("zapret")
                 enabled_ids.discard("zapret2")
@@ -3790,7 +3788,7 @@ class WebBridge(QObject):
             for item in self.context.notifications.list()
         ]
         runtime_order = list(settings.runtime_mode_order or ["zapret", "zapret2", "none"])
-        if sys.platform.startswith("linux") and "goshkow-vpn" not in definitions:
+        if sys.platform.startswith("linux"):
             runtime_order = [mode for mode in runtime_order if mode != "goshkow-vpn"]
 
         return {

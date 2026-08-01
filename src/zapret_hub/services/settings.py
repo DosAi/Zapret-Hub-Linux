@@ -120,13 +120,12 @@ class SettingsManager:
         if sys.platform.startswith("linux"):
             linux_zapret = LinuxZapretService()
             linux_zapret2 = LinuxZapret2Service()
+            linux_happ_available = LinuxHappService().available
             available_primary: list[str] = []
             if linux_zapret.find_nfqws() is not None:
                 available_primary.append("zapret")
             if linux_zapret2.find_nfqws2() is not None:
                 available_primary.append("zapret2")
-            if LinuxHappService().available:
-                available_primary.append("goshkow-vpn")
             # Keep Zapret2 visible as the installable fallback on a clean Linux
             # machine, but prefer an already-installed classic service.
             if not available_primary:
@@ -135,6 +134,8 @@ class SettingsManager:
             # the Windows-only component cleanup. Otherwise every Hub restart
             # silently clears its "follow bypass power" toggle.
             supported_components = {*available_primary, "tg-ws-proxy"}
+            if linux_happ_available:
+                supported_components.add("goshkow-vpn")
             filtered_components = [
                 component_id
                 for component_id in settings.enabled_component_ids
@@ -148,6 +149,9 @@ class SettingsManager:
                 changed = True
             if settings.selected_runtime_mode not in {*available_primary, "none"}:
                 settings.selected_runtime_mode = preferred_runtime
+                if preferred_runtime not in filtered_components:
+                    filtered_components.insert(0, preferred_runtime)
+                    settings.enabled_component_ids = filtered_components
                 changed = True
 
         if raw.get("zapret_control_mode") not in {"manual", "auto"}:

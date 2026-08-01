@@ -619,14 +619,8 @@ class ProcessManager:
             return
         if runtime_id == "goshkow-vpn":
             if getattr(self, "_linux_happ", None) is not None:
-                if self._linux_happ.status().status != "running":
-                    return
-                self.logging.log("info", "Found connected Happ tunnel; disconnecting before mode switch")
-                try:
-                    self.stop_component("goshkow-vpn")
-                except Exception:
-                    pass
-                self._invalidate_state_cache()
+                # Happ is an independent Linux auxiliary component. Runtime
+                # cleanup for Zapret/Zapret2 must never disconnect its tunnel.
                 return
             owned = self._processes.get("goshkow-vpn")
             if owned is None or owned.poll() is not None:
@@ -674,8 +668,6 @@ class ProcessManager:
             if self._linux_zapret is not None:
                 if self._linux_zapret2 is not None and self._linux_zapret2.status().status == "running":
                     self.stop_component("zapret2")
-                if self._linux_happ is not None and self._linux_happ.status().status == "running":
-                    self.stop_component("goshkow-vpn")
                 state = self._start_linux_zapret(component_id)
                 self._invalidate_state_cache()
                 return state
@@ -703,8 +695,6 @@ class ProcessManager:
             if self._linux_zapret2 is not None:
                 if self._linux_zapret is not None and self._linux_zapret.status().status == "running":
                     self.stop_component("zapret")
-                if self._linux_happ is not None and self._linux_happ.status().status == "running":
-                    self.stop_component("goshkow-vpn")
                 state = self._start_linux_zapret2(component_id)
                 self._invalidate_state_cache()
                 return state
@@ -2079,10 +2069,6 @@ foreach ($adapter in @($payload.adapters)) {
 
     def _start_goshkow_vpn(self, component_id: str) -> ComponentState:
         if self._linux_happ is not None:
-            if self._linux_zapret is not None and self._linux_zapret.status().status == "running":
-                self.stop_component("zapret")
-            if self._linux_zapret2 is not None and self._linux_zapret2.status().status == "running":
-                self.stop_component("zapret2")
             result = self._linux_happ.start()
             state = ComponentState(
                 component_id=component_id,

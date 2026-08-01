@@ -22,7 +22,7 @@ function statusTone(status: RuntimeStatus) {
   return status === "on" ? "ok" : status === "starting" || status === "stopping" ? "warn" : status === "error" ? "err" : "muted" as const;
 }
 
-function StatusIcon({ kind, status }: { kind: "app" | "mode" | "tg" | "mods" | "theme"; status?: string }) {
+function StatusIcon({ kind, status }: { kind: "app" | "mode" | "tg" | "happ" | "mods" | "theme"; status?: string }) {
   if (kind === "theme") return <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-sky-500/15 text-sky-400"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="block"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 1 1-9-9Z" /></svg></span>;
   if (kind === "mods") return <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-violet-500/15 text-violet-400"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" className="block"><path d="m12 2 8.7 5v10L12 22l-8.7-5V7z" /></svg></span>;
   const color = status === "on" ? "var(--ok)" : status === "error" ? "var(--err)" : status === "starting" || status === "stopping" ? "var(--warn)" : "var(--fg-mute)";
@@ -168,6 +168,8 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
   const on = status === "on";
   const tgStatus = state.components["tg-ws-proxy"].status;
   const tgEnabled = Boolean(state.components["tg-ws-proxy"].enabled);
+  const happStatus = state.components["goshkow-vpn"].status;
+  const happEnabled = Boolean(state.components["goshkow-vpn"].enabled) || happStatus === "on";
   const enabledMods = state.mods.filter((mod) => mod.enabled).length;
   const selectedVpnLocation = state.settings.vpn.selectedServerId === "auto"
     ? (locale === "ru" ? "Автоматически" : "Automatic")
@@ -221,10 +223,19 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
     });
     bridgeIdle(() => bridge.call("component.toggle", { id: "tg-ws-proxy", on: enabled }));
   };
+  const toggleHapp = (enabled: boolean) => {
+    patchOptimistic({
+      components: {
+        "goshkow-vpn": { enabled, status: enabled ? "starting" : "stopping" },
+      },
+    });
+    bridgeIdle(() => bridge.call("component.toggle", { id: "goshkow-vpn", on: enabled }));
+  };
   const cards = [
     { label: t("status.app"), value: runtimeLabel(appStatus), kind: "app" as const, status: appStatus },
     { label: modeNames[active], value: runtimeLabel(status), kind: "mode" as const, status },
     { label: t("status.tgproxy"), value: tgStatus === "on" ? t("power.on") : tgStatus === "starting" ? t("power.starting") : tgStatus === "stopping" ? (locale === "ru" ? "Отключение…" : "Disconnecting…") : tgStatus === "error" ? t("power.error") : t("power.off"), kind: "tg" as const, status: tgStatus },
+    { label: "Happ", value: happStatus === "on" ? t("power.on") : happStatus === "starting" ? t("power.starting") : happStatus === "stopping" ? (locale === "ru" ? "Отключение…" : "Disconnecting…") : happStatus === "error" ? t("power.error") : t("power.off"), kind: "happ" as const, status: happStatus },
     { label: t("status.mods"), value: `${enabledMods} ${locale === "ru" ? "активно" : "active"}`, kind: "mods" as const },
     { label: t("status.theme"), value: themeName[state.settings.theme] ?? state.settings.theme, kind: "theme" as const },
   ];
@@ -335,12 +346,12 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
         </div>
       </section>
 
-      <div className="grid w-full shrink-0 grid-cols-5 gap-2.5">
+      <div className="grid w-full shrink-0 grid-cols-6 gap-2.5">
         {cards.map((card) => {
-          const componentId = card.kind === "mode" && active !== "none" ? active : card.kind === "tg" ? "tg-ws-proxy" : null;
+          const componentId = card.kind === "mode" && active !== "none" ? active : card.kind === "tg" ? "tg-ws-proxy" : card.kind === "happ" ? "goshkow-vpn" : null;
           const content = (
             <>
-              <div className={`flex min-w-0 items-center justify-between ${card.kind === "tg" ? "gap-1" : "gap-2"}`}>
+              <div className={`flex min-w-0 items-center justify-between ${card.kind === "tg" || card.kind === "happ" ? "gap-1" : "gap-2"}`}>
                 <AnimatePresence mode="wait" initial={false}>
                   <motion.div key={`${card.label}-${card.status}`} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.18 }} className={`flex min-w-0 items-center leading-none text-[12px] text-fg-dim ${card.kind === "tg" ? "gap-1" : "gap-2"}`}><StatusIcon kind={card.kind} status={card.status} /><span className="truncate leading-5">{card.label}</span></motion.div>
                 </AnimatePresence>
@@ -351,6 +362,16 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
                       disabled={tgStatus === "starting" || tgStatus === "stopping"}
                       onChange={toggleTgProxy}
                       label={locale === "ru" ? "TG Proxy: включать вместе с обходом" : "TG Proxy: follow bypass power"}
+                    />
+                  </span>
+                )}
+                {card.kind === "happ" && (
+                  <span className="relative z-20 shrink-0" onClick={(event) => event.stopPropagation()}>
+                    <IosToggle
+                      on={happEnabled}
+                      disabled={happStatus === "starting" || happStatus === "stopping"}
+                      onChange={toggleHapp}
+                      label={locale === "ru" ? "Happ: независимое VPN-подключение" : "Happ: independent VPN connection"}
                     />
                   </span>
                 )}
@@ -371,10 +392,10 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
               </div>
             </>
           );
-          if (card.kind === "tg") {
+          if (card.kind === "tg" || card.kind === "happ") {
             return (
               <div key={card.kind} className="quick-status-card soft-card relative min-w-0 rounded-[15px] border border-line-1 px-3.5 py-3.5 text-left">
-                <button type="button" aria-label={locale === "ru" ? "Открыть настройки TG Proxy" : "Open TG Proxy settings"} onClick={() => onOpenComponent?.("tg-ws-proxy")} className="absolute inset-0 z-0 rounded-[15px]" />
+                <button type="button" aria-label={card.kind === "happ" ? (locale === "ru" ? "Открыть Happ" : "Open Happ") : (locale === "ru" ? "Открыть настройки TG Proxy" : "Open TG Proxy settings")} onClick={() => onOpenComponent?.(card.kind === "happ" ? "goshkow-vpn" : "tg-ws-proxy")} className="absolute inset-0 z-0 rounded-[15px]" />
                 <div className="pointer-events-none relative z-10 [&_[role=switch]]:pointer-events-auto">{content}</div>
               </div>
             );
