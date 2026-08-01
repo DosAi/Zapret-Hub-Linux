@@ -483,8 +483,8 @@ export function OnboardingFlow({
                   {([
                     ["zapret", "Zapret", "component_zapret.svg", ru ? "Локальная обработка трафика с подбором стратегии" : "Local traffic processing with strategy selection"],
                     ["zapret2", "Zapret 2", "component_zapret2.svg", ru ? "Автоматическая настройка нового поколения" : "Automatic next-generation setup"],
-                    ["goshkow-vpn", "goshkow VPN", "vpn.svg", ru ? "VPN по ключу подписки" : "Subscription-based VPN"],
-                  ] as const).map(([id, title, icon, description]) => (
+                  ] as const)
+                    .map(([id, title, icon, description]) => (
                     <button key={id} onClick={() => setSelectedMode(id)} className="rounded-[16px] border p-4 text-left transition-all duration-200 hover:bg-bg-2" style={{ borderColor: selectedMode === id ? "var(--fg-dim)" : "var(--line-1)", background: selectedMode === id ? "var(--bg-2)" : "var(--bg-1)" }}>
                       <img src={uiAssetUrl(`icons/${icon}`)} alt="" className="h-10 w-10 object-contain" decoding="async" loading="eager" />
                       <div className="mt-3 text-[13px] font-semibold text-fg">{title}</div>
@@ -526,7 +526,7 @@ export function OnboardingFlow({
             {step === 2 && selectedMode === "goshkow-vpn" && !reconfigure && (
               <div className="flex h-full flex-col items-center justify-center px-16 text-center">
                 <img src={uiAssetUrl("icons/vpn.svg")} alt="" className="h-16 w-16 object-contain" decoding="async" />
-                <h1 className="brand-font mt-5 text-[23px] font-semibold text-fg">{ru ? "Подключите goshkow VPN" : "Connect goshkow VPN"}</h1>
+                <h1 className="brand-font mt-5 text-[23px] font-semibold text-fg">{ru ? "Устаревший VPN отключён" : "Legacy VPN is disabled"}</h1>
                 <p className="mt-2 max-w-[520px] text-[12px] text-fg-dim">{ru ? "Вставьте ключ подписки или получите пробный доступ." : "Paste a subscription key or get a free trial."}</p>
                 <div className="mt-5 flex w-full max-w-[520px] flex-col gap-2">
                   <input

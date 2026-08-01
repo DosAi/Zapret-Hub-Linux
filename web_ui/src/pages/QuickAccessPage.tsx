@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { PowerButton } from "@/components/ui/PowerButton";
+import { IosToggle } from "@/components/ui/IosToggle";
 import { StatusPill } from "@/components/ui/Chevron";
 import { useAppState, useBridge, patchOptimistic } from "@/hooks/useBridgeState";
 import { useLocale } from "@/hooks/useLocale";
@@ -42,102 +43,39 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
   const { t, locale } = useLocale();
   const modeNames: Record<RuntimeId, string> = {
     zapret: "Zapret",
-    "goshkow-vpn": "goshkow VPN",
+    "goshkow-vpn": "Legacy VPN",
     zapret2: "Zapret 2",
     none: locale === "ru" ? "Без основного компонента" : "No primary component",
   };
   const [previewMode, setPreviewMode] = useState<RuntimeId | null>(null);
+  const [pendingMode, setPendingMode] = useState<RuntimeId | null>(null);
   const [pendingPower, setPendingPower] = useState<"starting" | "stopping" | null>(null);
   const [locationOpen, setLocationOpen] = useState(false);
   const [locationMenuStyle, setLocationMenuStyle] = useState<React.CSSProperties>({});
-  const switchTimer = useRef<number | null>(null);
-  const pendingModeRef = useRef<RuntimeId | null>(null);
-  /** Keep power on across browse→commit so intermediate/failed selects don't leave the button off. */
-  const keepPowerRef = useRef(false);
   const locationRef = useRef<HTMLDivElement>(null);
   const locationButtonRef = useRef<HTMLButtonElement>(null);
   const locationMenuRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const wheelLock = useRef(0);
   const previewModeRef = useRef<RuntimeId | null>(null);
+  const pendingModeRef = useRef<RuntimeId | null>(null);
   const stateRef = useRef(state);
-  const bridgeRef = useRef(bridge);
   previewModeRef.current = previewMode;
+  pendingModeRef.current = pendingMode;
   stateRef.current = state;
-  bridgeRef.current = bridge;
 
-  // Commit only after the user stops browsing (wheel / clicks) for 1.5s.
-  const MODE_SETTLE_MS = 1500;
-
-  const clearModeTimer = () => {
-    if (switchTimer.current !== null) {
-      window.clearTimeout(switchTimer.current);
-      switchTimer.current = null;
-    }
-  };
-
-  const notePowerIntent = (currentState: NonNullable<typeof state>) => {
-    const status = currentState.runtime.status;
-    keepPowerRef.current = status === "on" || status === "starting";
-  };
-
-  const scheduleModeCommit = (nextId: RuntimeId) => {
-    const currentState = stateRef.current;
-    if (!currentState) return;
-    pendingModeRef.current = nextId;
-    clearModeTimer();
-    if (nextId === currentState.runtime.active) {
-      setPreviewMode(null);
-      pendingModeRef.current = null;
+  // Browsing is UI-only. Clear the preview only after an explicit power-button
+  // commit has reached the selected backend and settled.
+  useEffect(() => {
+    if (!pendingMode) {
+      if (previewMode && previewMode === state?.runtime.active) setPreviewMode(null);
       return;
     }
-    setPreviewMode(nextId);
-    switchTimer.current = window.setTimeout(() => {
-      const target = pendingModeRef.current;
-      const latest = stateRef.current;
-      switchTimer.current = null;
-      pendingModeRef.current = null;
-      if (!target || !latest || target === latest.runtime.active) {
-        setPreviewMode(null);
-        return;
-      }
-      const keepPower = keepPowerRef.current
-        || latest.runtime.status === "on"
-        || latest.runtime.status === "starting";
-      if (target === "goshkow-vpn" && !latest.ui.hasValidVpnKey && keepPower) {
-        setPreviewMode(null);
-        onConnectVpn?.();
-        return;
-      }
-      patchOptimistic({
-        runtime: {
-          active: target,
-          status: keepPower ? "starting" : latest.runtime.status,
-        },
-      });
-      bridgeIdle(() => bridgeRef.current.call("runtime.select", { id: target, keepPower }));
-    }, MODE_SETTLE_MS);
-  };
-
-  // Keep preview (and "Переключение…") until the new mode is active AND power settled.
-  useEffect(() => {
-    if (!previewMode) return;
-    if (previewMode !== state?.runtime.active) return;
+    if (pendingMode !== state?.runtime.active) return;
     if (state?.runtime.status === "starting" || state?.runtime.status === "stopping") return;
+    setPendingMode(null);
     setPreviewMode(null);
-    if (state?.runtime.status === "on") keepPowerRef.current = true;
-    if (state?.runtime.status === "off") keepPowerRef.current = false;
-  }, [previewMode, state?.runtime.active, state?.runtime.status]);
-  // Tray/context-menu changes bypass the local selector. Once no local action is
-  // pending, mirror the authoritative power state so a later browse cannot
-  // accidentally restore an old "on" intent.
-  useEffect(() => {
-    if (!state || previewMode || pendingPower || pendingModeRef.current) return;
-    keepPowerRef.current = state.runtime.status === "on" || state.runtime.status === "starting";
-  }, [pendingPower, previewMode, state?.runtime.active, state?.runtime.status]);
-  useEffect(() => () => {
-    clearModeTimer();
-  }, []);
+  }, [pendingMode, previewMode, state?.runtime.active, state?.runtime.status]);
   useEffect(() => {
     const close = (event: PointerEvent) => {
       const target = event.target as Node;
@@ -180,13 +118,14 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
     if (state?.runtime.status === "error") setPendingPower(null);
   }, [pendingPower, state?.runtime.status]);
   useEffect(() => {
-    if (!pendingPower && !previewMode) return;
+    if (!pendingPower && !pendingMode) return;
     const timeout = window.setTimeout(() => {
       setPendingPower(null);
+      setPendingMode(null);
       setPreviewMode(null);
     }, 30000);
     return () => window.clearTimeout(timeout);
-  }, [pendingPower, previewMode]);
+  }, [pendingMode, pendingPower]);
 
   // Wheel listener uses refs so it is not rebound on every preview/state change.
   useEffect(() => {
@@ -195,29 +134,22 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
     const onWheel = (event: WheelEvent) => {
       const currentState = stateRef.current;
       if (!currentState) return;
+      if (pendingModeRef.current) return;
       if (currentState.settings.scrollModeSwitch === false) return;
       if (Math.abs(event.deltaY) < 2) return;
       event.preventDefault();
-      notePowerIntent(currentState);
-      // Any wheel activity delays commit — even when mode step is throttled.
-      if (pendingModeRef.current || previewModeRef.current) {
-        const pending = pendingModeRef.current ?? previewModeRef.current;
-        if (pending && pending !== currentState.runtime.active) {
-          scheduleModeCommit(pending);
-        }
-      }
       const now = performance.now();
       if (now - wheelLock.current < 280) return;
       wheelLock.current = now;
       const order = currentState.runtime.order;
-      const current = previewModeRef.current ?? pendingModeRef.current ?? currentState.runtime.active;
+      const current = previewModeRef.current ?? currentState.runtime.active;
       const index = Math.max(0, order.indexOf(current));
       const nextIndex = event.deltaY < 0
         ? (index - 1 + order.length) % order.length
         : (index + 1) % order.length;
       const nextId = order[nextIndex];
       if (!nextId || nextId === current) return;
-      scheduleModeCommit(nextId);
+      setPreviewMode(nextId === currentState.runtime.active ? null : nextId);
     };
     stage.addEventListener("wheel", onWheel, { passive: false });
     return () => stage.removeEventListener("wheel", onWheel);
@@ -226,35 +158,44 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
   if (!state) return null;
 
   const order = state.runtime.order;
-  const displayedMode = previewMode ?? state.runtime.active;
+  const displayedMode = pendingMode ?? previewMode ?? state.runtime.active;
   const activeIdx = Math.max(0, order.indexOf(displayedMode));
   const active = order[activeIdx];
-  // Mode switch in flight (preview settle or backend starting after select).
-  const modeSwitching = Boolean(previewMode) || (state.runtime.status === "starting" && !pendingPower);
-  const status: RuntimeStatus = modeSwitching && (state.runtime.status === "on" || state.runtime.status === "starting" || keepPowerRef.current)
-    ? "starting"
-    : pendingPower ?? state.runtime.status;
+  const browsingMode = Boolean(previewMode && previewMode !== state.runtime.active && !pendingMode);
+  const modeSwitching = Boolean(pendingMode);
+  const appStatus: RuntimeStatus = pendingPower ?? state.runtime.status;
+  const status: RuntimeStatus = browsingMode ? "off" : modeSwitching ? "starting" : appStatus;
   const on = status === "on";
   const tgStatus = state.components["tg-ws-proxy"].status;
+  const tgEnabled = Boolean(state.components["tg-ws-proxy"].enabled);
   const enabledMods = state.mods.filter((mod) => mod.enabled).length;
   const selectedVpnLocation = state.settings.vpn.selectedServerId === "auto"
     ? (locale === "ru" ? "Автоматически" : "Automatic")
     : state.settings.vpn.servers.find((server) => server.id === state.settings.vpn.selectedServerId)?.name
       ?? (locale === "ru" ? "Автоматически" : "Automatic");
-  // Same settle for click and wheel — apply only after 1.5s without further input.
   const selectMode = (id: RuntimeId) => {
-    notePowerIntent(state);
-    scheduleModeCommit(id);
+    if (pendingMode) return;
+    setPreviewMode(id === state.runtime.active ? null : id);
   };
   const togglePower = () => {
-    // Allow cancel during "starting" (incl. Auto tuning restarts). Only block while already stopping.
-    if (status === "stopping") return;
+    if (pendingMode || pendingPower || state.runtime.status === "starting" || state.runtime.status === "stopping") return;
+    if (previewMode && previewMode !== state.runtime.active) {
+      const target = previewMode;
+      if (target === "goshkow-vpn" && !state.ui.hasValidVpnKey) {
+        onConnectVpn?.();
+        return;
+      }
+      setPendingMode(target);
+      setPendingPower("starting");
+      patchOptimistic({ runtime: { active: target, status: "starting" } });
+      bridgeIdle(() => bridge.call("runtime.select", { id: target, keepPower: true }));
+      return;
+    }
     const nextOn = status === "off" || status === "error";
     if (nextOn && active === "goshkow-vpn" && !state.ui.hasValidVpnKey) {
       onConnectVpn?.();
       return;
     }
-    keepPowerRef.current = nextOn;
     setPendingPower(nextOn ? "starting" : "stopping");
     patchOptimistic({ runtime: { status: nextOn ? "starting" : "stopping" } });
     bridgeIdle(() => bridge.call("runtime.power", { on: nextOn }));
@@ -268,8 +209,20 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
         : value === "error"
           ? t("power.error")
           : t("power.off");
+  const toggleTgProxy = (enabled: boolean) => {
+    const runtimePowered = state.runtime.status === "on" || state.runtime.status === "starting";
+    patchOptimistic({
+      components: {
+        "tg-ws-proxy": {
+          enabled,
+          ...(runtimePowered ? { status: enabled ? "starting" : "stopping" } : {}),
+        },
+      },
+    });
+    bridgeIdle(() => bridge.call("component.toggle", { id: "tg-ws-proxy", on: enabled }));
+  };
   const cards = [
-    { label: t("status.app"), value: runtimeLabel(status), kind: "app" as const, status },
+    { label: t("status.app"), value: runtimeLabel(appStatus), kind: "app" as const, status: appStatus },
     { label: modeNames[active], value: runtimeLabel(status), kind: "mode" as const, status },
     { label: t("status.tgproxy"), value: tgStatus === "on" ? t("power.on") : tgStatus === "starting" ? t("power.starting") : tgStatus === "stopping" ? (locale === "ru" ? "Отключение…" : "Disconnecting…") : tgStatus === "error" ? t("power.error") : t("power.off"), kind: "tg" as const, status: tgStatus },
     { label: t("status.mods"), value: `${enabledMods} ${locale === "ru" ? "активно" : "active"}`, kind: "mods" as const },
@@ -295,12 +248,13 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
                 style={{ zIndex: selected ? 3 : visible ? 2 : 0, pointerEvents: visible ? "auto" : "none" }}
               >
                 {selected ? (
-                  <PowerButton data-sound={on || status === "starting" ? "off" : "none"} accent={modeColor[id]} on={on || status === "starting"} status={status} disabled={status === "stopping"} onClick={togglePower} />
+                  <PowerButton data-sound={on || status === "starting" ? "off" : "none"} accent={modeColor[id]} on={on || status === "starting"} status={status} disabled={Boolean(pendingMode || pendingPower) || state.runtime.status === "starting" || state.runtime.status === "stopping"} onClick={togglePower} />
                 ) : (
                   <PowerButton
                     variant="side"
                     aria-label={`Select ${modeNames[id]}`}
                     onClick={() => selectMode(id)}
+                    disabled={Boolean(pendingMode)}
                     accent={modeColor[id]}
                     on={false}
                     status="off"
@@ -382,25 +336,50 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
       <div className="grid w-full shrink-0 grid-cols-5 gap-2.5">
         {cards.map((card) => {
           const componentId = card.kind === "mode" && active !== "none" ? active : card.kind === "tg" ? "tg-ws-proxy" : null;
+          const content = (
+            <>
+              <div className={`flex min-w-0 items-center justify-between ${card.kind === "tg" ? "gap-1" : "gap-2"}`}>
+                <AnimatePresence mode="wait" initial={false}>
+                  <motion.div key={`${card.label}-${card.status}`} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.18 }} className={`flex min-w-0 items-center leading-none text-[12px] text-fg-dim ${card.kind === "tg" ? "gap-1" : "gap-2"}`}><StatusIcon kind={card.kind} status={card.status} /><span className="truncate leading-5">{card.label}</span></motion.div>
+                </AnimatePresence>
+                {card.kind === "tg" && (
+                  <span className="relative z-20 shrink-0" onClick={(event) => event.stopPropagation()}>
+                    <IosToggle
+                      on={tgEnabled}
+                      disabled={tgStatus === "starting" || tgStatus === "stopping"}
+                      onChange={toggleTgProxy}
+                      label={locale === "ru" ? "TG Proxy: включать вместе с обходом" : "TG Proxy: follow bypass power"}
+                    />
+                  </span>
+                )}
+              </div>
+              <div className="relative mt-2.5 flex h-5 items-center overflow-hidden">
+                <AnimatePresence mode="wait" initial={false}>
+                  <motion.div
+                    key={`${card.label}-${card.value}`}
+                    initial={{ opacity: 0, y: 5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -4 }}
+                    transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+                    className="truncate text-[16px] font-semibold text-fg"
+                  >
+                    {card.value}
+                  </motion.div>
+                </AnimatePresence>
+              </div>
+            </>
+          );
+          if (card.kind === "tg") {
+            return (
+              <div key={card.kind} className="quick-status-card soft-card relative min-w-0 rounded-[15px] border border-line-1 px-3.5 py-3.5 text-left">
+                <button type="button" aria-label={locale === "ru" ? "Открыть настройки TG Proxy" : "Open TG Proxy settings"} onClick={() => onOpenComponent?.("tg-ws-proxy")} className="absolute inset-0 z-0 rounded-[15px]" />
+                <div className="pointer-events-none relative z-10 [&_[role=switch]]:pointer-events-auto">{content}</div>
+              </div>
+            );
+          }
           return (
           <button key={card.kind} disabled={!componentId} onClick={() => componentId && onOpenComponent?.(componentId)} className="quick-status-card soft-card min-w-0 rounded-[15px] border border-line-1 px-3.5 py-3.5 text-left disabled:cursor-default">
-            <AnimatePresence mode="wait" initial={false}>
-              <motion.div key={`${card.label}-${card.status}`} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.18 }} className="flex min-w-0 items-center gap-2 leading-none text-[12px] text-fg-dim"><StatusIcon kind={card.kind} status={card.status} /><span className="truncate leading-5">{card.label}</span></motion.div>
-            </AnimatePresence>
-            <div className="relative mt-2.5 h-5 overflow-hidden">
-              <AnimatePresence mode="wait" initial={false}>
-                <motion.div
-                  key={`${card.label}-${card.value}`}
-                  initial={{ opacity: 0, y: 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
-                  className="truncate text-[16px] font-semibold text-fg"
-                >
-                  {card.value}
-                </motion.div>
-              </AnimatePresence>
-            </div>
+            {content}
           </button>
           );
         })}

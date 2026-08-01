@@ -20,7 +20,7 @@ param(
     [string]$Compiler = "msvc"
 )
 
-# Slim installer: downloads runtime from goshkow.com; does NOT embed installer_payload/*.zip.
+# Legacy Windows slim installer. The Linux fork uses scripts/install_linux.sh.
 # Prefer exit-code checks over treating Nuitka stderr progress as terminating errors.
 $ErrorActionPreference = "Continue"
 if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
@@ -78,7 +78,7 @@ if ($Standalone) {
   $modeArgs += @(
     "--onefile",
     "--onefile-as-archive",
-    "--onefile-tempdir-spec={CACHE_DIR}/goshkow/zapret-hub-installer/{VERSION}-{PID}"
+    "--onefile-tempdir-spec={CACHE_DIR}/DosAi/zapret-hub-installer/{VERSION}-{PID}"
   )
 }
 
@@ -96,7 +96,7 @@ function Build-Uninstaller {
       "--onefile",
       "--onefile-as-archive",
       "--onefile-no-compression",
-      "--onefile-tempdir-spec={CACHE_DIR}/goshkow/zapret-hub-uninstaller/{VERSION}-{PID}"
+      "--onefile-tempdir-spec={CACHE_DIR}/DosAi/zapret-hub-uninstaller/{VERSION}-{PID}"
     )
   }
   $uninstallNuitkaArgs = @(
@@ -111,12 +111,12 @@ function Build-Uninstaller {
     "--windows-uac-admin",
     "--deployment",
     "--windows-icon-from-ico=ui_assets\icons\app_shell.ico",
-    "--company-name=goshkow",
+    "--company-name=DosAi",
     "--product-name=Zapret Hub Uninstaller",
     "--file-version=$fileVersion",
     "--product-version=$fileVersion",
     "--file-description=Zapret Hub Uninstaller",
-    "--copyright=goshkow",
+    "--copyright=DosAi",
     "--output-dir=$OutDir",
     "--output-filename=uninstall_zaprethub.exe",
     "--include-data-dir=ui_assets=ui_assets",
@@ -207,12 +207,12 @@ $nuitkaArgs = @(
   "--windows-uac-admin",
   "--deployment",
   "--windows-icon-from-ico=ui_assets\icons\app_shell.ico",
-  "--company-name=goshkow",
+  "--company-name=DosAi",
   "--product-name=Zapret Hub Installer",
   "--file-version=$fileVersion",
   "--product-version=$fileVersion",
   "--file-description=Zapret Hub Installer",
-  "--copyright=goshkow",
+  "--copyright=DosAi",
   "--output-dir=$OutputDir",
   "--output-filename=$installerName",
   "--include-data-dir=ui_assets=ui_assets",

@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 
 
-PACKAGE_IDENTIFIER = "Goshkow.ZapretHub"
+PACKAGE_IDENTIFIER = "DosAi.ZapretHubLinux"
 MANIFEST_VERSION = "1.12.0"
 
 
@@ -64,13 +64,13 @@ ManifestVersion: {MANIFEST_VERSION}
 """,
         f"{PACKAGE_IDENTIFIER}.locale.en-US.yaml": f"""# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.{MANIFEST_VERSION}.schema.json
 {common}PackageLocale: en-US
-Publisher: goshkow
-PublisherUrl: https://goshkow.com/
-PublisherSupportUrl: https://github.com/goshkow/Zapret-Hub/issues
+Publisher: DosAi
+PublisherUrl: https://github.com/DosAi
+PublisherSupportUrl: https://github.com/DosAi/Zapret-Hub-Linux/issues
 PackageName: Zapret Hub
-PackageUrl: https://github.com/goshkow/Zapret-Hub
+PackageUrl: https://github.com/DosAi/Zapret-Hub-Linux
 License: MIT
-LicenseUrl: https://github.com/goshkow/Zapret-Hub/blob/main/LICENSE
+LicenseUrl: https://github.com/DosAi/Zapret-Hub-Linux/blob/main/LICENSE
 ShortDescription: Windows application for managing censorship-circumvention components.
 Moniker: zapret-hub
 Tags:
@@ -82,7 +82,7 @@ ManifestVersion: {MANIFEST_VERSION}
 """,
         f"{PACKAGE_IDENTIFIER}.locale.ru-RU.yaml": f"""# yaml-language-server: $schema=https://aka.ms/winget-manifest.locale.{MANIFEST_VERSION}.schema.json
 {common}PackageLocale: ru-RU
-Publisher: goshkow
+Publisher: DosAi
 PackageName: Zapret Hub
 ShortDescription: Приложение для управления компонентами обхода блокировок в Windows.
 ManifestType: locale

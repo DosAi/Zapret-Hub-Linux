@@ -150,9 +150,8 @@ def _parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
         description=(
-            "Prepare GitHub/mirror release assets for the slim installer model. "
-            "Portable zips are published for goshkow.com; the installer downloads them later "
-            "and does not embed these archives."
+            "Prepare legacy Windows release assets. The Linux fork is distributed "
+            "through GitHub and scripts/install_linux.sh."
         )
     )
     parser.add_argument(
@@ -248,7 +247,10 @@ def main() -> None:
         "assets": {
             key: {
                 "name": value["name"],
-                "download_url": f"https://goshkow.com/zapret-hub/{key}",
+                "download_url": (
+                    f"https://github.com/DosAi/Zapret-Hub-Linux/releases/download/"
+                    f"v{version}/{value['name']}"
+                ),
                 "digest": value["digest"],
                 "size": value["size"],
             }
@@ -265,16 +267,15 @@ def main() -> None:
     note.write_text(
         "Slim installer release model\n"
         "============================\n"
-        "1) Publish portable_win_x64.zip and portable_win_arm64.zip to the goshkow.com mirror\n"
-        "   (and/or keep them as GitHub release assets).\n"
+        "1) Publish portable_win_x64.zip and portable_win_arm64.zip as GitHub release assets.\n"
         "2) install_zaprethub_*_universal.exe is a slim installer: at runtime it downloads the\n"
-        "   matching arch build from https://goshkow.com/zapret-hub/update — it does NOT embed\n"
+        "   matching architecture from the configured release source — it does NOT embed\n"
         "   the portable archives.\n"
         "3) Each portable folder includes arch-matching uninstall_zaprethub.exe.\n"
         "4) Standalone uninstallers may also be published as separate release assets.\n"
         "\n"
-        "Mirror update JSON (https://goshkow.com/zapret-hub/update)\n"
-        "----------------------------------------------------------\n"
+        "Update JSON\n"
+        "-----------\n"
         "Required fields for same-version hotfix detection:\n"
         "  - version / tag  (product version, e.g. 3.0.1 — may stay unchanged for hotfixes)\n"
         "  - assets.x64.digest     = sha256:<portable x64 zip bytes on the mirror>\n"

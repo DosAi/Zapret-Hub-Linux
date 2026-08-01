@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime
@@ -41,10 +42,10 @@ class StorageManager:
             },
             {
                 "id": "goshkow-vpn",
-                "name": "goshkow vpn",
-                "description": "Авторская VPN-подписка без ограничений по трафику и количеству устройств. Доступна на смартфонах, ПК, ноутбуках и других устройствах.",
+                "name": "Legacy VPN (disabled)",
+                "description": "Зарезервировано для будущей интеграции Happ.",
                 "version": "",
-                "source": "https://vpn.goshkow.com",
+                "source": "",
                 "command": [],
                 "enabled": False,
                 "autostart": False,
@@ -172,13 +173,17 @@ class StorageManager:
         return "unknown"
 
     def _detect_zapret2_version(self) -> str:
-        version_file = self.paths.runtime_dir / "zapret2" / ".zapret-hub-version"
-        try:
-            value = version_file.read_text(encoding="utf-8").strip()
-            if value:
-                return value
-        except OSError:
-            pass
+        version_files = [self.paths.runtime_dir / "zapret2" / ".zapret-hub-version"]
+        if sys.platform.startswith("linux"):
+            linux_root = Path(os.environ.get("ZAPRET_HUB_ZAPRET2_ROOT", "/opt/zapret2"))
+            version_files.insert(0, linux_root / ".zapret-hub-version")
+        for version_file in version_files:
+            try:
+                value = version_file.read_text(encoding="utf-8").strip()
+                if value:
+                    return value
+            except OSError:
+                pass
         return "master"
 
     def _ensure_default_bundled_mod_and_index(self, settings_file: Path) -> None:
@@ -188,7 +193,7 @@ class StorageManager:
             "id": default_mod_id,
             "name": "Hub",
             "description": "Позволяет обойти блокировки самых популярных сервисов, включая игровые сервисы, социальные сети и другие платформы.",
-            "author": "goshkow",
+            "author": "DosAi",
             "version": "1.9.9a-unified4",
             "source_url": "bundled://unified-by-goshkow",
             "category": "gaming",

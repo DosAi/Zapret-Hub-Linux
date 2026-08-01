@@ -472,3 +472,38 @@ def test_auto_resume_restarts_zapret_with_rebuilt_services(tmp_path: Path) -> No
     assert values.selected_service_ids == ["discord", "youtube"]
     # Resume rebuilds snapshot then soft-starts (no hard stop when seamless API absent).
     assert events[-3:] == ["snapshot", "start:zapret", "cutover"]
+
+
+def test_enabled_tg_proxy_follows_main_power() -> None:
+    events: list[str] = []
+    values = SimpleNamespace(enabled_component_ids=["tg-ws-proxy"])
+
+    class Processes:
+        _states = {}
+
+        @staticmethod
+        def _invalidate_state_cache() -> None:
+            return None
+
+        @staticmethod
+        def stop_component(component_id: str) -> None:
+            events.append(f"stop:{component_id}")
+
+    bridge = WebBridge.__new__(WebBridge)
+    bridge.context = SimpleNamespace(
+        settings=SimpleNamespace(get=lambda: values),
+        processes=Processes(),
+        logging=FakeLogging(),
+    )
+    bridge.emit_state = lambda *args, **kwargs: None
+    bridge._start_component = lambda component_id: events.append(f"start:{component_id}")
+
+    bridge._set_auxiliary_components_power(True)
+    bridge._set_auxiliary_components_power(False)
+
+    assert events == [
+        "start:tg-ws-proxy",
+        "stop:xbox-dns",
+        "stop:tg-ws-proxy",
+        "stop:xbox-dns",
+    ]

@@ -65,7 +65,7 @@ def _set_windows_app_id() -> None:
     if not sys.platform.startswith("win"):
         return
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("goshkow.ZapretHub")  # type: ignore[attr-defined]
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DosAi.ZapretHub")  # type: ignore[attr-defined]
     except Exception:
         return
 
@@ -135,8 +135,10 @@ def _resolve_app_icon_path() -> Path | None:
             [
                 install_root / "ui_assets" / "icons" / "app.png",
                 install_root / "ui_assets" / "icons" / "app.ico",
+                install_root / "ui_assets" / "icons" / "app.svg",
                 resource_root / "ui_assets" / "icons" / "app.png",
                 resource_root / "ui_assets" / "icons" / "app.ico",
+                resource_root / "ui_assets" / "icons" / "app.svg",
             ]
         )
     else:
@@ -145,6 +147,7 @@ def _resolve_app_icon_path() -> Path | None:
             [
                 install_root / "ui_assets" / "icons" / "app.png",
                 install_root / "ui_assets" / "icons" / "app.ico",
+                install_root / "ui_assets" / "icons" / "app.svg",
             ]
         )
     for path in candidates:
@@ -365,7 +368,10 @@ def run(argv: list[str] | None = None) -> int:
                     if context.backend is not None:
                         context.backend.request_shutdown_background()
                     else:
-                        threading.Thread(target=context.processes.stop_all, daemon=True).start()
+                        threading.Thread(
+                            target=lambda: context.processes.stop_all(include_external_services=False),
+                            daemon=True,
+                        ).start()
                 except Exception:
                     pass
 
@@ -420,6 +426,12 @@ def run(argv: list[str] | None = None) -> int:
                     pass
                 window.attach_backend_client(backend)
                 _startup_trace("attach_backend: attached")
+                # A system-managed Zapret backend can already be active before the
+                # GUI opens. Restore enabled auxiliary components so TG WS Proxy
+                # follows that live power state instead of remaining silently off.
+                reconcile_auxiliary = getattr(window, "reconcile_auxiliary_components_async", None)
+                if callable(reconcile_auxiliary):
+                    reconcile_auxiliary()
                 if autostart_callback is not None:
                     autostart_callback()
                     _startup_trace("attach_backend: autostart callback done")
@@ -468,4 +480,3 @@ def run(argv: list[str] | None = None) -> int:
     QTimer.singleShot(0, bootstrap_thread.start)
     _startup_trace("run: bootstrap scheduled")
     return app.exec()
-

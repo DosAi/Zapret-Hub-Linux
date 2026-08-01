@@ -29,14 +29,14 @@ version_info = VSVersionInfo(
                 StringTable(
                     "040904B0",
                     [
-                        StringStruct("CompanyName", "goshkow"),
+                        StringStruct("CompanyName", "DosAi"),
                         StringStruct("FileDescription", "Zapret Hub Installer"),
                         StringStruct("FileVersion", "1.4.2"),
                         StringStruct("InternalName", "install_zaprethub"),
                         StringStruct("OriginalFilename", "install_zaprethub.exe"),
                         StringStruct("ProductName", "Zapret Hub"),
                         StringStruct("ProductVersion", "1.4.2"),
-                        StringStruct("Publisher", "goshkow"),
+                        StringStruct("Publisher", "DosAi"),
                     ],
                 )
             ]
