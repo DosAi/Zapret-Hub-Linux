@@ -85,7 +85,10 @@ export default function App() {
 function Shell() {
   useSmoothWheel();
   const bridge = useBridge();
-  const [nav, setNav] = useState<NavKey>("quick");
+  const [nav, setNav] = useState<NavKey>(() => {
+    const previewPage = new URLSearchParams(window.location.search).get("previewPage");
+    return previewPage === "components" ? "components" : "quick";
+  });
   const [mountedPages, setMountedPages] = useState<Set<NavKey>>(() => new Set<NavKey>());
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("app");
   const state = useAppState();
@@ -119,8 +122,10 @@ function Shell() {
   const onboardingFadeOutRef = useRef(false);
   onboardingFadeOutRef.current = onboardingFadeOut;
 
+  const previewOnboarding = window.location.protocol.startsWith("http")
+    && new URLSearchParams(window.location.search).has("onboardingStep");
   const showOnboarding = state
-    ? forcedOnboarding || Boolean(state.onboarding.forceOpen) || (!state.onboarding.completed && !onboardingSkipped)
+    ? previewOnboarding || forcedOnboarding || Boolean(state.onboarding.forceOpen) || (!state.onboarding.completed && !onboardingSkipped)
     : false;
   // Hard gate: exiting keeps the shell mounted even if completed flips mid-fade.
   const onboardingVisible = showOnboarding || onboardingExiting;
