@@ -26,9 +26,6 @@ from zapret_hub.services.storage import StorageManager
 
 class UpdatesManager:
     REPO_URL = "https://github.com/DosAi/Zapret-Hub-Linux"
-    MIRROR_BASE_URL = "https://goshkow.com"
-    MIRROR_UPDATE_URL = MIRROR_BASE_URL + "/zapret-hub/update"
-    MIRROR_INFO_URL = MIRROR_BASE_URL + "/zapret-hub/info"
     _EXE_NAMES = ("zapret_hub.exe", "Zapret_Hub.exe")
     # Hard ceilings so UI never sticks on "Скачиваем обновление…" forever.
     META_DEADLINE_SEC = 10.0

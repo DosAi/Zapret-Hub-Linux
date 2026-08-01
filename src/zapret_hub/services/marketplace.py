@@ -50,7 +50,8 @@ class DownloadJob:
 class MarketplaceService:
     """Public Marketplace API client + sequential download queue."""
 
-    BASE_URL = "https://goshkow.com/api/marketplace/v1"
+    SITE_URL = os.environ.get("ZAPRET_HUB_MARKETPLACE_URL", "").strip().rstrip("/")
+    BASE_URL = f"{SITE_URL}/api/marketplace/v1" if SITE_URL else ""
     USER_AGENT = "Zapret-Hub"
     # Metadata (catalog /latest /project): fail fast — UI must not freeze on a stall.
     API_DEADLINE_SEC = 8.0
@@ -378,7 +379,7 @@ class MarketplaceService:
                 seconds = max(1, int(round(limit)))
                 raise MarketplaceError(
                     "timeout",
-                    f"Не удалось подключиться к goshkow.com за {seconds} с. Проверьте сеть и попробуйте снова.",
+                    f"Не удалось подключиться к серверу модификаций за {seconds} с.",
                 )
             if done.wait(timeout=min(0.25, remaining)):
                 break
@@ -392,20 +393,20 @@ class MarketplaceService:
             text = str(error).strip()
             return text or error.code
         if isinstance(error, TimeoutError):
-            return "goshkow.com не отвечает (таймаут). Проверьте сеть и попробуйте снова."
+            return "Сервер модификаций не отвечает (таймаут)."
         if isinstance(error, urllib.error.HTTPError):
             code = int(getattr(error, "code", 0) or 0)
             if code == 404:
-                return "Модификация не найдена на goshkow.com (HTTP 404)."
+                return "Модификация не найдена (HTTP 404)."
             if code == 409:
                 return "На сервере уже есть активная загрузка. Повторите через несколько секунд."
             if code == 429:
                 return "Слишком много запросов к маркетплейсу. Подождите немного."
             if 500 <= code <= 599:
-                return f"Маркетплейс goshkow.com временно недоступен (HTTP {code})."
+                return f"Сервер модификаций временно недоступен (HTTP {code})."
             return f"Ошибка маркетплейса (HTTP {code})."
         if isinstance(error, (urllib.error.URLError, OSError)):
-            return "Не удалось подключиться к маркетплейсу goshkow.com. Проверьте сеть."
+            return "Не удалось подключиться к серверу модификаций."
         text = str(error).strip()
         return text or "Сетевая ошибка маркетплейса."
 
@@ -418,6 +419,8 @@ class MarketplaceService:
         body: dict[str, Any] | None = None,
         timeout: float = 8.0,
     ) -> dict[str, Any]:
+        if not self.BASE_URL and not path.startswith("http"):
+            raise MarketplaceError("unavailable", "Marketplace is not configured for this Linux fork")
         url = path if path.startswith("http") else f"{self.BASE_URL}{path}"
         if query:
             cleaned = {k: v for k, v in query.items() if v is not None and str(v) != ""}
@@ -1077,7 +1080,7 @@ class MarketplaceService:
             if not url:
                 continue
             if url.startswith("/"):
-                url = urllib.parse.urljoin("https://goshkow.com", url)
+                url = urllib.parse.urljoin(self.SITE_URL, url)
             if url not in candidates:
                 candidates.append(url)
         return candidates
@@ -1209,16 +1212,16 @@ class MarketplaceService:
         selected_id = int(version_id or 0) or latest_id
         forced = str(forced_url or "").strip()
         if forced.startswith("/"):
-            forced = urllib.parse.urljoin("https://goshkow.com", forced)
+            forced = urllib.parse.urljoin(self.SITE_URL, forced)
         if forced:
             download_url = forced
             legacy = ""
         elif selected_id and selected_id != latest_id:
-            download_url = f"https://goshkow.com/zapret-hub/marketplace/download/{selected_id}"
+            download_url = f"{self.SITE_URL}/zapret-hub/marketplace/download/{selected_id}"
             legacy = download_url
         else:
             download_url = (
-                "https://goshkow.com/zapret-hub/marketplace/projects/"
+                f"{self.SITE_URL}/zapret-hub/marketplace/projects/"
                 f"{urllib.parse.quote(slug)}/download/latest"
             )
             legacy = f"/zapret-hub/marketplace/download/{selected_id}" if selected_id else ""
@@ -1253,7 +1256,8 @@ class MarketplaceService:
         source = str(url or "").strip()
         parsed = urllib.parse.urlparse(source)
         host = str(parsed.hostname or "").lower()
-        allowed = host == "goshkow.com" or host.endswith(".goshkow.com") or host == "i.imgur.com"
+        configured_host = str(urllib.parse.urlparse(self.SITE_URL).hostname or "").lower()
+        allowed = bool(configured_host and host == configured_host) or host == "i.imgur.com"
         if parsed.scheme != "https" or not allowed:
             raise MarketplaceError("invalid_image_url", "Unsupported Marketplace image URL")
 
@@ -1341,7 +1345,7 @@ class MarketplaceService:
             if not url:
                 continue
             if url.startswith("/"):
-                url = urllib.parse.urljoin("https://goshkow.com", url)
+                url = urllib.parse.urljoin(self.SITE_URL, url)
             if url not in normalized:
                 normalized.append(url)
         if not normalized:

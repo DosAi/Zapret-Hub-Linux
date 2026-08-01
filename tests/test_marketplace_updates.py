@@ -422,6 +422,7 @@ def test_download_tries_absolute_fallback_after_marketplace_error(monkeypatch, t
     service.DOWNLOAD_ATTEMPTS = 2
     service.DOWNLOAD_WALL_SEC = 30.0
     service.DOWNLOAD_STALL_SEC = 5.0
+    service.SITE_URL = "https://mods.example.com"
     calls: list[tuple[str, int]] = []
 
     def stream(url: str, _target: Path, *, resume_from: int, job=None) -> None:
@@ -435,15 +436,15 @@ def test_download_tries_absolute_fallback_after_marketplace_error(monkeypatch, t
 
     service._download_file(
         [
-            "https://download.goshkow.com/file.zip",
+            "https://download.mods.example.com/file.zip",
             "/zapret-hub/marketplace/download/4",
         ],
         tmp_path / "mod.zip",
         expected_size=0,
     )
 
-    assert calls[0] == ("https://download.goshkow.com/file.zip", 0)
-    assert calls[1][0] == "https://goshkow.com/zapret-hub/marketplace/download/4"
+    assert calls[0] == ("https://download.mods.example.com/file.zip", 0)
+    assert calls[1][0] == "https://mods.example.com/zapret-hub/marketplace/download/4"
 
 
 def test_download_resumes_partial_with_range(monkeypatch, tmp_path: Path) -> None:
@@ -468,7 +469,7 @@ def test_download_resumes_partial_with_range(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setattr(service, "_log", lambda *_args, **_kwargs: None)
 
     service._download_file(
-        ["https://download.goshkow.com/file.zip"],
+        ["https://download.mods.example.com/file.zip"],
         target,
         expected_size=11,
     )
@@ -614,8 +615,9 @@ def test_marketplace_image_uses_content_signature_and_disk_cache(monkeypatch, tm
         return Response()
 
     service = MarketplaceService(storage_paths=Paths(), logging=Logging())
+    service.SITE_URL = "https://mods.example.com"
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    url = "https://goshkow.com/zapret-hub/marketplace/media/project/2/icon"
+    url = "https://mods.example.com/zapret-hub/marketplace/media/project/2/icon"
 
     first = service.load_image_data_url(url)
     second = service.load_image_data_url(url)
