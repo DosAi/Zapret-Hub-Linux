@@ -83,6 +83,7 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
         PROJECT_ROOT / "runtime" / "zapret2" / "install_bin.sh",
         PROJECT_ROOT / "runtime" / "zapret2" / "init.d" / "systemd" / "zapret2.service",
         PROJECT_ROOT / "runtime" / "zapret2" / "binaries" / "linux-x86_64" / "nfqws2",
+        PROJECT_ROOT / "runtime" / "zapret2" / "binaries" / "linux-arm64" / "nfqws2",
         PROJECT_ROOT / "runtime" / "tg-ws-proxy" / "proxy" / "tg_ws_proxy.py",
         PROJECT_ROOT / "runtime" / "tg-ws-proxy" / "proxy" / "balancer.py",
         PROJECT_ROOT / "runtime" / "tg-ws-proxy" / "proxy" / "raw_websocket.py",
@@ -101,6 +102,35 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
     assert os.access(ROOT_INSTALLER, os.X_OK)
     assert os.access(SYSTEM_INSTALLER, os.X_OK)
     assert os.access(HAPP_INSTALLER, os.X_OK)
+
+
+def test_repository_contains_only_linux_runtime_payloads() -> None:
+    result = subprocess.run(
+        ["git", "ls-files"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    )
+    tracked = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    forbidden_suffixes = {".exe", ".dll", ".sys", ".bat", ".ps1", ".ico"}
+    forbidden_prefixes = {
+        "assets/",
+        "installer/",
+        "installer_web/",
+        "uninstaller_web/",
+        "runtime/v2rayN/",
+        "runtime/zapret-discord-youtube/",
+        "sample_data/default_mods/",
+    }
+
+    assert not {path for path in tracked if Path(path).suffix.lower() in forbidden_suffixes}
+    assert not {
+        path
+        for path in tracked
+        if any(path.startswith(prefix) for prefix in forbidden_prefixes)
+    }
 
 
 def test_classic_zapret_source_is_pinned_and_verified() -> None:

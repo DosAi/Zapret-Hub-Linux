@@ -126,6 +126,8 @@ def test_linux_updater_accepts_complete_source_archive_without_windows_exe(tmp_p
     installed = runtime_dir / "tg-ws-proxy" / "proxy" / "__init__.py"
     assert result == {"status": "updated", "version": "1.9.2"}
     assert '__version__ = "1.9.2"' in installed.read_text(encoding="utf-8")
+    assert not (runtime_dir / "tg-ws-proxy" / "docs").exists()
+    assert not (runtime_dir / "tg-ws-proxy" / "windows.py").exists()
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux source-only updater test")

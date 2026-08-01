@@ -134,10 +134,8 @@ def _resolve_app_icon_path() -> Path | None:
         candidates.extend(
             [
                 install_root / "ui_assets" / "icons" / "app.png",
-                install_root / "ui_assets" / "icons" / "app.ico",
                 install_root / "ui_assets" / "icons" / "app.svg",
                 resource_root / "ui_assets" / "icons" / "app.png",
-                resource_root / "ui_assets" / "icons" / "app.ico",
                 resource_root / "ui_assets" / "icons" / "app.svg",
             ]
         )
@@ -146,7 +144,6 @@ def _resolve_app_icon_path() -> Path | None:
         candidates.extend(
             [
                 install_root / "ui_assets" / "icons" / "app.png",
-                install_root / "ui_assets" / "icons" / "app.ico",
                 install_root / "ui_assets" / "icons" / "app.svg",
             ]
         )

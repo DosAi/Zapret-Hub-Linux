@@ -36,7 +36,7 @@ class StorageManager:
                 "description": "Основной модуль локальной обработки сетевого трафика.",
                 "version": zapret_version,
                 "source": "https://github.com/Flowseal/zapret-discord-youtube",
-                "command": ["cmd.exe", "/c", "general.bat"],
+                "command": [],
                 "enabled": True,
                 "autostart": False,
             },
@@ -66,7 +66,7 @@ class StorageManager:
                 "description": "Прокси для Telegram через локальный порт.",
                 "version": tg_version,
                 "source": "https://github.com/Flowseal/tg-ws-proxy",
-                "command": ["TgWsProxy_windows.exe"],
+                "command": [],
                 "enabled": True,
                 "autostart": True,
             },
@@ -233,7 +233,10 @@ class StorageManager:
             if item.get("id") in {"sample-hosts-pack", legacy_mod_id}:
                 continue
             filtered_index.append(item)
-        if not any(isinstance(item, dict) and item.get("id") == default_mod_id for item in filtered_index):
+        if default_bundle is not None and not any(
+            isinstance(item, dict) and item.get("id") == default_mod_id
+            for item in filtered_index
+        ):
             filtered_index.append(default_mod_meta)
         if mods_index != filtered_index:
             self.write_json(mods_index_path, filtered_index)
@@ -296,7 +299,6 @@ class StorageManager:
         source_candidates = [
             sample_root,
             self.paths.runtime_dir / "zapret-discord-youtube",
-            Path(r"C:\zapret-discord-youtube-1.9.7"),
         ]
         source_root = next((path for path in source_candidates if self._looks_like_zapret_bundle(path)), None)
         if source_root is None:
