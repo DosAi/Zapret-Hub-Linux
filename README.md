@@ -61,7 +61,7 @@ v2rayN, WinGet/Nuitka-инсталляторов и унаследованных
 Вставьте в терминал одну команду:
 
 ```bash
-git clone https://github.com/DosAi/Zapret-Hub-Linux.git && cd Zapret-Hub-Linux && ./install.sh
+git clone --depth 1 https://github.com/DosAi/Zapret-Hub-Linux.git && cd Zapret-Hub-Linux && ./install.sh
 ```
 
 Установщик подготовит зависимости, классический Zapret, Zapret2, Happ, TG WS Proxy,
