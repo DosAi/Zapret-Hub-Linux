@@ -11,8 +11,10 @@
 
 ## Автоматическая установка
 
+На новом устройстве вставьте в терминал:
+
 ```bash
-./scripts/install_linux.sh
+git clone https://github.com/DosAi/Zapret-Hub-Linux.git && cd Zapret-Hub-Linux && ./install.sh
 ```
 
 Установщик:
@@ -32,14 +34,14 @@
 Telegram Desktop по умолчанию **не устанавливается**. Опциональная установка:
 
 ```bash
-./scripts/install_linux.sh --with-telegram
+./install.sh --with-telegram
 ```
 
 Дополнительные режимы:
 
 ```bash
-./scripts/install_linux.sh --no-launch
-./scripts/install_linux.sh --dry-run
+./install.sh --no-launch
+./install.sh --dry-run
 ```
 
 Повторный запуск обновляет управляемую копию приложения. Уже установленный Happ

@@ -7,6 +7,7 @@ import subprocess
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ROOT_INSTALLER = PROJECT_ROOT / "install.sh"
 USER_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux.sh"
 SYSTEM_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_system.sh"
 HAPP_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_happ.sh"
@@ -14,7 +15,7 @@ HAPP_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_happ.sh"
 
 def test_linux_installer_dry_run_is_complete_and_non_mutating() -> None:
     result = subprocess.run(
-        [str(USER_INSTALLER), "--dry-run", "--no-launch"],
+        [str(ROOT_INSTALLER), "--dry-run", "--no-launch"],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -97,6 +98,7 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
 
     assert all(path.is_file() for path in required)
     assert os.access(USER_INSTALLER, os.X_OK)
+    assert os.access(ROOT_INSTALLER, os.X_OK)
     assert os.access(SYSTEM_INSTALLER, os.X_OK)
     assert os.access(HAPP_INSTALLER, os.X_OK)
 
