@@ -13,7 +13,6 @@ import { QuickAccessPage } from "@/pages/QuickAccessPage";
 import { ComponentsPage } from "@/pages/ComponentsPage";
 import { ModsPage } from "@/pages/ModsPage";
 import { FilesPage } from "@/pages/FilesPage";
-import { MarketplacePage } from "@/pages/MarketplacePage";
 import { InstalledModsPage } from "@/pages/InstalledModsPage";
 import { LogsPage } from "@/pages/LogsPage";
 import { useAppState, useBridge, patchOptimistic, pauseStatePushes } from "@/hooks/useBridgeState";
@@ -25,8 +24,8 @@ import { uiAssetUrl } from "@/lib/assets";
 import { serviceIconUrl } from "@/lib/serviceAssets";
 import { TextContextMenu } from "@/components/shell/TextContextMenu";
 
-const NAV_KEYS: NavKey[] = ["quick", "components", "marketplace", "installed", "mods", "files", "logs", "settings"];
-const PRELOAD_ORDER: NavKey[] = ["components", "marketplace", "installed", "settings", "mods", "files", "logs"];
+const NAV_KEYS: NavKey[] = ["quick", "components", "installed", "mods", "files", "logs", "settings"];
+const PRELOAD_ORDER: NavKey[] = ["components", "installed", "settings", "mods", "files", "logs"];
 
 function preloadImage(src: string, timeoutMs = 1200) {
   return new Promise<void>((resolve) => {
@@ -103,9 +102,6 @@ function Shell() {
   const sidebarPersistTimer = useRef(0);
   const [updatePrompt, setUpdatePrompt] = useState<AppUpdatePrompt | null>(null);
   const [modUpdates, setModUpdates] = useState<ModUpdateItem[] | null>(null);
-  const [marketplaceSlug, setMarketplaceSlug] = useState<string | null>(null);
-  const [marketplaceInstall, setMarketplaceInstall] = useState(false);
-  const [marketplaceVersionId, setMarketplaceVersionId] = useState<string | null>(null);
   const [introActive, setIntroActive] = useState(false);
   const [uiPrewarmed, setUiPrewarmed] = useState(false);
   const bootRevealedRef = useRef(false);
@@ -364,27 +360,6 @@ function Shell() {
     return off;
   }, []);
 
-  useEffect(() => {
-    const off = getBridge().subscribe("marketplace.navigate", (payload) => {
-      const slug = String(payload?.slug || "").trim();
-      if (!slug) return;
-      const action = String(payload?.action || "").trim().toLowerCase();
-      const shouldInstall = !action || ["install", "add", "download", "open", "project"].includes(action);
-      setSettingsChild(null);
-      setMountedPages((prev) => {
-        if (prev.has("marketplace")) return prev;
-        const next = new Set(prev);
-        next.add("marketplace");
-        return next;
-      });
-      setMarketplaceInstall(shouldInstall);
-      setMarketplaceVersionId(String(payload?.versionId || "").trim() || null);
-      setMarketplaceSlug(slug);
-      setNav("marketplace");
-    });
-    return off;
-  }, []);
-
   const labels: Record<NavKey, string> = {
     quick: t("nav.quick"),
     components: t("nav.components"),
@@ -437,22 +412,8 @@ function Shell() {
             setNav("settings");
           }}
         />;
-      } else if (key === "marketplace") {
-        nodes.marketplace = (
-          <MarketplacePage
-            active={nav === "marketplace"}
-            openSlug={marketplaceSlug}
-            autoInstall={marketplaceInstall}
-            openVersionId={marketplaceVersionId}
-            onSlugHandled={() => {
-              setMarketplaceSlug(null);
-              setMarketplaceInstall(false);
-              setMarketplaceVersionId(null);
-            }}
-          />
-        );
       } else if (key === "installed") {
-        nodes.installed = <InstalledModsPage onOpenMarketplace={() => setNav("marketplace")} />;
+        nodes.installed = <InstalledModsPage onOpenMarketplace={() => undefined} />;
       } else if (key === "logs") {
         nodes.logs = <LogsPage active={nav === "logs"} />;
       } else if (key === "settings") {
@@ -477,7 +438,7 @@ function Shell() {
       }
     }
     return nodes;
-  }, [mountedPages, focusedComponent, settingsChild, settingsTab, nav, marketplaceSlug, marketplaceInstall, marketplaceVersionId]);
+  }, [mountedPages, focusedComponent, settingsChild, settingsTab, nav]);
 
   const navAccent: Record<NavKey, string> = {
     quick: "#9b69e8",
