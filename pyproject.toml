@@ -5,18 +5,20 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "zapret-hub"
 version = "3.0.1"
-description = "Windows desktop hub for managing external network utilities and configuration packs."
+description = "Desktop hub for managing Zapret network utilities and configuration packs."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "PySide6>=6.7",
     "certifi>=2024.0.0",
     "cryptography>=46.0.0",
-    "pydivert>=3.1.1",
+    "pydivert>=3.1.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "pytest>=8.0",
+    "PyYAML>=6.0",
     "pyinstaller>=6.6",
     "nuitka>=2.7",
     "Pillow>=10.0",
@@ -25,6 +27,7 @@ dev = [
 
 [project.scripts]
 zapret-hub = "zapret_hub.main:main"
+zapret-hub-linux = "zapret_hub.linux_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

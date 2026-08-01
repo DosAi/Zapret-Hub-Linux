@@ -8,6 +8,7 @@ __pycache__/
 
 # venv / deps
 .venv/
+*.egg-info/
 web_ui/node_modules/
 installer_web/node_modules/
 uninstaller_web/node_modules/

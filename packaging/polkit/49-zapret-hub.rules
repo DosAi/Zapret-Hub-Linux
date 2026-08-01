@@ -1,0 +1,28 @@
+// Allow local administrators to control only the two Linux Zapret services.
+// The command line check is intentionally exact: no other systemctl command
+// receives passwordless elevation through pkexec.
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.policykit.exec" ||
+        !subject.local || !subject.active || !subject.isInGroup("sudo")) {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    if (action.lookup("program") !== "/usr/bin/systemctl") {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    var commandLine = action.lookup("command_line");
+    var allowedCommands = [
+        "/usr/bin/systemctl start zapret2.service",
+        "/usr/bin/systemctl stop zapret2.service",
+        "/usr/bin/systemctl restart zapret2.service",
+        "/usr/bin/systemctl start zapret_discord_youtube.service",
+        "/usr/bin/systemctl stop zapret_discord_youtube.service",
+        "/usr/bin/systemctl restart zapret_discord_youtube.service"
+    ];
+
+    if (allowedCommands.indexOf(commandLine) !== -1) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

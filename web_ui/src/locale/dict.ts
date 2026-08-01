@@ -2,7 +2,7 @@ import type { Locale } from "@/bridge/types";
 
 const ru = {
   "app.name": "Zapret Hub",
-  "app.by": "by goshkow",
+  "app.by": "by DosAi",
 
   "nav.quick": "Быстрый доступ",
   "nav.services": "Сервисы",
@@ -161,7 +161,7 @@ const ru = {
   "notif.dismiss": "Скрыть",
 
   "onboarding.welcome.title": "Добро пожаловать в Zapret Hub",
-  "onboarding.welcome.body": "Управление сетевыми подключениями для Windows",
+  "onboarding.welcome.body": "Управление сетевыми подключениями",
   "onboarding.control.title": "Как настроить Zapret?",
   "onboarding.control.body": "Можно выбрать сервисы вручную или доверить подбор оркестратору",
   "onboarding.control.manual": "Выберу сервисы сам",
@@ -198,7 +198,7 @@ const ru = {
 
 const en: Record<keyof typeof ru, string> = {
   "app.name": "Zapret Hub",
-  "app.by": "by goshkow",
+  "app.by": "by DosAi",
 
   "nav.quick": "Quick access",
   "nav.services": "Services",
@@ -357,7 +357,7 @@ const en: Record<keyof typeof ru, string> = {
   "notif.dismiss": "Dismiss",
 
   "onboarding.welcome.title": "Welcome to Zapret Hub",
-  "onboarding.welcome.body": "Network connection manager for Windows",
+  "onboarding.welcome.body": "Network connection manager",
   "onboarding.control.title": "How should Zapret be set up?",
   "onboarding.control.body": "Pick services yourself or let the orchestrator handle it",
   "onboarding.control.manual": "I'll pick services myself",

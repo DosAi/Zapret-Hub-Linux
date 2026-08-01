@@ -25,8 +25,8 @@ from zapret_hub.runtime_env import development_install_root, is_packaged_runtime
 
 
 _COMPONENT_IDS = ("zapret", "zapret2", "goshkow-vpn", "tg-ws-proxy", "xbox-dns")
-_WINDOW_WIDTH = 860
-_WINDOW_HEIGHT = 520
+_WINDOW_WIDTH = 940
+_WINDOW_HEIGHT = 550
 
 # Inline shell shown before the React bundle is available. Keep visually in sync with web_ui/index.html.
 _STARTUP_PRELOADER_HTML = """<!doctype html>
@@ -321,7 +321,7 @@ class WebBridge(QObject):
         self._runtime_transition_status: str | None = None
         self._last_runtime_status = "off"
         self._runtime_action_lock = threading.Lock()
-        self._onboarding_initial_mode = "zapret"
+        self._onboarding_initial_mode = "zapret2" if sys.platform.startswith("linux") else "zapret"
         self._component_toggle_lock = threading.Lock()
         self._component_toggle_desired: dict[str, bool] = {}
         self._component_toggle_running: set[str] = set()
@@ -344,7 +344,7 @@ class WebBridge(QObject):
         self._mod_apply_running: set[str] = set()
         self._power_lock = threading.Lock()
         self._power_desired: bool | None = None
-        self._power_runtime_id = "zapret"
+        self._power_runtime_id = "zapret2" if sys.platform.startswith("linux") else "zapret"
         self._power_running = False
         self._power_user_touched = False
         self._pending_app_release: dict[str, str] | None = None
@@ -1704,7 +1704,7 @@ class WebBridge(QObject):
             # never block the WebEngine bridge / onboarding animations.
             self._onboarding_configuration_cancelled = True
             self._cached_generals = None
-            self._onboarding_initial_mode = "zapret"
+            self._onboarding_initial_mode = "zapret2" if sys.platform.startswith("linux") else "zapret"
             if dismiss:
                 self.show_onboarding = False
                 if self._pending_emit_after_onboarding:
@@ -3765,10 +3765,16 @@ class WebBridge(QObject):
             }
             for item in self.context.notifications.list()
         ]
+        runtime_order = list(settings.runtime_mode_order or ["zapret", "zapret2", "none"])
+        if sys.platform.startswith("linux"):
+            # Legacy VPN is not exposed by this fork. Happ may occupy this
+            # position after a native Linux integration is implemented.
+            runtime_order = [mode for mode in runtime_order if mode != "goshkow-vpn"]
+
         return {
             "runtime": {
                 "active": runtime_id,
-                "order": list(settings.runtime_mode_order or ["zapret", "goshkow-vpn", "zapret2", "none"]),
+                "order": runtime_order,
                 "status": runtime_status,
             },
             "services": {
@@ -3866,6 +3872,7 @@ class WebBridge(QObject):
                 "locale": settings.language if settings.language in {"ru", "en"} else "ru",
                 "theme": settings.theme,
                 "hasValidVpnKey": str(vpn_state.get("subscription_state", "")) == "valid" or bool(settings.goshkow_vpn_subscription_url.strip()),
+                "platform": "linux" if sys.platform.startswith("linux") else "windows",
             },
         }
 
@@ -4253,7 +4260,7 @@ class WebMainWindow(QMainWindow):
                 "• Исправления стабильности переключения страниц\n"
                 "• Обновления компонентов обхода"
             ),
-            "htmlUrl": "https://github.com/goshkow/Zapret-Hub/releases",
+            "htmlUrl": "https://github.com/DosAi/Zapret-Hub-Linux/releases",
             "demo": True,
         }
         QTimer.singleShot(700, lambda: self.bridge.event.emit("app.update-available", json.dumps(payload, ensure_ascii=False)))
@@ -4470,9 +4477,11 @@ class WebMainWindow(QMainWindow):
         icon_path = install_root / "ui_assets" / "icons" / "app.ico"
         if not icon_path.exists():
             icon_path = install_root / "ui_assets" / "icons" / "app.png"
+        if not icon_path.exists():
+            icon_path = install_root / "ui_assets" / "icons" / "app.svg"
         icon = QIcon(str(icon_path)) if icon_path.exists() else self.windowIcon()
         if icon.isNull():
-            icon = QIcon(str(install_root / "ui_assets" / "icons" / "app.png"))
+            icon = self.windowIcon()
         self.tray_icon = QSystemTrayIcon(icon, self)
         # QMenu must NOT be parented to QApplication (not a QWidget) — that broke
         # the tray icon/menu on Windows after tray_fix2/fix3. Keep an unparented
@@ -4820,7 +4829,7 @@ class WebMainWindow(QMainWindow):
                     except Exception:
                         pass
                 else:
-                    context.processes.stop_all()
+                    context.processes.stop_all(include_external_services=False)
             except Exception:
                 pass
 

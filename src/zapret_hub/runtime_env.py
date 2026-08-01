@@ -28,7 +28,19 @@ def is_packaged_runtime() -> bool:
 
 
 def development_install_root(anchor: str | Path) -> Path:
-    return Path(anchor).resolve().parents[2]
+    resolved = Path(anchor).resolve()
+    start = resolved if resolved.is_dir() else resolved.parent
+
+    # Modules below ``src/zapret_hub`` are not all at the same depth.  Walking
+    # to the project marker keeps resources such as ``web_ui/dist`` resolvable
+    # from both top-level modules and nested UI modules.
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").is_file() and (candidate / "src").is_dir():
+            return candidate
+
+    # Preserve the original source-layout fallback for unusual development
+    # environments where the project metadata is not present.
+    return resolved.parents[2]
 
 
 def packaged_install_root() -> Path:
@@ -38,4 +50,3 @@ def packaged_install_root() -> Path:
 def packaged_resource_root() -> Path:
     install_root = packaged_install_root()
     return Path(getattr(sys, "_MEIPASS", install_root))
-

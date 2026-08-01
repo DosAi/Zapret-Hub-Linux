@@ -1,0 +1,12 @@
+# Initial desktop profile. Users can extend this list in
+# /opt/zapret2/ipset/zapret-hosts-user.txt after installation.
+youtube.com
+youtu.be
+googlevideo.com
+ytimg.com
+youtubei.googleapis.com
+discord.com
+discord.gg
+discordapp.com
+discordapp.net
+discord.media

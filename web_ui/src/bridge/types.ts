@@ -222,7 +222,7 @@ export interface AppState {
   notifications: Notification[];
   orchestrator: OrchestratorStatus;
   onboarding: { completed: boolean; isUpdate: boolean; forceOpen?: boolean; initialMode?: RuntimeId };
-  ui: { locale: Locale; theme: string; hasValidVpnKey: boolean };
+  ui: { locale: Locale; theme: string; hasValidVpnKey: boolean; platform: "windows" | "linux" };
 }
 
 // ---------- Commands (typed IN → OUT) ----------

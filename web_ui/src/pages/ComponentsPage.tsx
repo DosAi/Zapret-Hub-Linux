@@ -10,7 +10,9 @@ import { uiAssetUrl } from "@/lib/assets";
 import { ScrollGlassHeader } from "@/components/ui/ScrollGlassHeader";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 
-const ORDER: ComponentId[] = ["zapret", "zapret2", "goshkow-vpn", "tg-ws-proxy", "xbox-dns"];
+// The legacy subscription VPN is kept internally only for possible migration.
+// The Linux fork will use this slot for Happ after its integration is ready.
+const ORDER: ComponentId[] = ["zapret", "zapret2", "tg-ws-proxy", "xbox-dns"];
 const GITHUB_VERSION_IDS: ComponentId[] = ["zapret", "zapret2", "tg-ws-proxy"];
 
 const componentIcon: Record<ComponentId, string> = {

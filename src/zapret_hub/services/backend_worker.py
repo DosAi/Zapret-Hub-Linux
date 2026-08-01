@@ -572,7 +572,7 @@ def _worker_main(task_queue, result_queue) -> None:
         action = str(task.get("action", ""))
         if action == "shutdown":
             try:
-                context.processes.stop_all()
+                context.processes.stop_all(include_external_services=False)
             except Exception:
                 pass
             result_queue.put({"id": task.get("id", ""), "action": action, "ok": True, "payload": {}})
