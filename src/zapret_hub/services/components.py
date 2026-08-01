@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from zapret_hub.domain import ComponentDefinition, ComponentState
 from zapret_hub.runtime_env import is_packaged_runtime
 from zapret_hub.services.github_network import GitHubNetworkClient, is_recoverable_github_error
 from zapret_hub.services.logging_service import LoggingManager
+from zapret_hub.services.linux_zapret2 import LinuxZapret2Service, LinuxZapretService
 from zapret_hub.services.service_catalog import prioritize_generals_for_services
 from zapret_hub.services.service_rules import SERVICE_RULES
 from zapret_hub.services.settings import SettingsManager
@@ -47,6 +49,24 @@ PINNED_ZAPRET_ZIPBALL_URL = (
 )
 DISCORD_VOICE_UDP_PORTS = "3478-3497,19294-19344,50000-50100"
 DISCORD_MEDIA_TCP_PORTS = "2053,2083,2087,2096,8443"
+
+_TG_WS_PROXY_REQUIRED_FILES = (
+    "proxy/__init__.py",
+    "proxy/_aes.py",
+    "proxy/balancer.py",
+    "proxy/bridge.py",
+    "proxy/config.py",
+    "proxy/fake_tls.py",
+    "proxy/pool.py",
+    "proxy/raw_websocket.py",
+    "proxy/stats.py",
+    "proxy/tg_ws_proxy.py",
+    "proxy/utils.py",
+)
+
+
+def _missing_tg_ws_proxy_files(runtime_root: Path) -> list[str]:
+    return [relative for relative in _TG_WS_PROXY_REQUIRED_FILES if not (runtime_root / relative).is_file()]
 
 _VPN_PROCESS_PATTERNS = (
     "nekobox",
@@ -243,6 +263,8 @@ class ProcessManager:
         self._component_releases_mem: dict[str, tuple[float, list[dict[str, str]]]] = {}
         self._zapret_runtime_lock = threading.RLock()
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
+        self._linux_zapret = LinuxZapretService() if sys.platform.startswith("linux") else None
+        self._linux_zapret2 = LinuxZapret2Service() if sys.platform.startswith("linux") else None
         self.github = GitHubNetworkClient(logging, recovery_runner=self.with_github_connectivity_recovery)
         # Optional UI hook: (component_id, status, last_error) after optimistic starts fail.
         self._status_listener: Callable[[str, str, str], None] | None = None
@@ -299,12 +321,21 @@ class ProcessManager:
         raw_items = self.storage.read_json(self.storage.paths.data_dir / "components.json", default=[])
         settings = self.settings.get()
         components = [ComponentDefinition(**item) for item in raw_items]
+        if self._linux_zapret2 is not None:
+            # The inherited subscription VPN is intentionally unavailable in
+            # this Linux fork. Its slot is reserved for a future Happ backend.
+            components = [component for component in components if component.id != "goshkow-vpn"]
         for component in components:
             component.enabled = component.id in settings.enabled_component_ids
             component.autostart = component.id in settings.autostart_component_ids
+            if self._linux_zapret2 is not None and component.id == "xbox-dns":
+                component.enabled = False
+                component.autostart = False
         return components
 
     def list_zapret_generals(self) -> list[dict[str, str]]:
+        if self._linux_zapret2 is not None:
+            return []
         options: list[dict[str, str]] = []
         bundles = self._get_zapret_bundles(enabled_only=True, include_hidden_generals=True)
         selected_services = {str(item) for item in list(self.settings.get().selected_service_ids or [])}
@@ -421,6 +452,13 @@ class ProcessManager:
         for component in self.list_components():
             state = self._states.get(component.id, ComponentState(component_id=component.id))
             if component.id == "zapret":
+                if self._linux_zapret is not None:
+                    service_state = self._linux_zapret.status()
+                    state.status = service_state.status if service_state.status in {"running", "stopped"} else "error"
+                    state.pid = None
+                    state.last_error = service_state.message if state.status == "error" else ""
+                    states.append(state)
+                    continue
                 # Prefer owned Popen — image scan cache can lag right after kill/start.
                 owned = self._processes.get(component.id)
                 if owned is not None and owned.poll() is None:
@@ -438,6 +476,13 @@ class ProcessManager:
                         state.status = "stopped"
                     state.pid = None
             elif component.id == "zapret2":
+                if self._linux_zapret2 is not None:
+                    service_state = self._linux_zapret2.status()
+                    state.status = service_state.status if service_state.status in {"running", "stopped"} else "error"
+                    state.pid = None
+                    state.last_error = service_state.message if state.status == "error" else ""
+                    states.append(state)
+                    continue
                 owned = self._processes.get(component.id)
                 if owned is not None and owned.poll() is None:
                     state.status = "running"
@@ -460,6 +505,9 @@ class ProcessManager:
                 if worker is not None and worker.poll() is None:
                     state.status = "running"
                     state.pid = worker.pid
+                elif (managed_pid := self._read_tg_proxy_pid()) is not None:
+                    state.status = "running"
+                    state.pid = managed_pid
                 elif self._is_port_listening(settings.tg_proxy_host, int(settings.tg_proxy_port)):
                     state.status = "running"
                     state.pid = None
@@ -505,6 +553,11 @@ class ProcessManager:
         Hub-owned process that list_states can track.
         """
         runtime_id = str(runtime_id or "").strip()
+        if self._linux_zapret2 is not None and runtime_id in {"zapret", "zapret2"}:
+            # Linux backends are system services, not Hub-owned child processes.
+            # systemctl start is idempotent, so never tear down an already-working
+            # external service merely to acquire ownership.
+            return
         if runtime_id == "zapret":
             owned = self._processes.get("zapret")
             owned_alive = owned is not None and owned.poll() is None
@@ -557,6 +610,14 @@ class ProcessManager:
 
     def _start_component_unlocked(self, component_id: str) -> ComponentState:
         component = next(item for item in self.list_components() if item.id == component_id)
+        if self._linux_zapret2 is not None and component.id in {"goshkow-vpn", "xbox-dns"}:
+            state = ComponentState(
+                component_id=component_id,
+                status="error",
+                last_error="Этот компонент пока доступен только в Windows-версии Zapret Hub.",
+            )
+            self._states[component_id] = state
+            return state
         if component.id == "zapret":
             # Never let a stale Auto cutover flip Quick Access back after the user
             # already selected another mode.
@@ -575,6 +636,12 @@ class ProcessManager:
                         selected=selected,
                     )
                     return state
+            if self._linux_zapret is not None:
+                if self._linux_zapret2 is not None and self._linux_zapret2.status().status == "running":
+                    self.stop_component("zapret2")
+                state = self._start_linux_zapret(component_id)
+                self._invalidate_state_cache()
+                return state
             self.stop_component("goshkow-vpn")
             self.stop_component("zapret2")
             state = self._start_zapret(component_id)
@@ -596,6 +663,12 @@ class ProcessManager:
                         selected=selected,
                     )
                     return state
+            if self._linux_zapret2 is not None:
+                if self._linux_zapret is not None and self._linux_zapret.status().status == "running":
+                    self.stop_component("zapret")
+                state = self._start_linux_zapret2(component_id)
+                self._invalidate_state_cache()
+                return state
             self.stop_component("zapret")
             self.stop_component("goshkow-vpn")
             state = self._start_zapret2(component_id)
@@ -640,6 +713,20 @@ class ProcessManager:
         state = self._states.get(component_id, ComponentState(component_id=component_id))
 
         if component_id == "zapret":
+            if self._linux_zapret is not None:
+                result = self._linux_zapret.stop()
+                state.status = result.status if result.status in {"running", "stopped"} else "error"
+                state.pid = None
+                state.last_error = result.message if state.status == "error" else ""
+                self._states[component_id] = state
+                self.logging.log(
+                    "info" if state.status == "stopped" else "error",
+                    "Linux Zapret stop",
+                    status=state.status,
+                    error=state.last_error,
+                )
+                self._invalidate_state_cache()
+                return state
             active_runtime = self._current_zapret_runtime
             self._force_stop_zapret_runtime()
             self._close_source_log_stream("zapret")
@@ -668,10 +755,41 @@ class ProcessManager:
                         process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
                         pass
-            if process and process.pid:
+            elif sys.platform.startswith("linux"):
+                managed_pid = self._read_tg_proxy_pid()
+                if managed_pid is not None:
+                    try:
+                        os.kill(managed_pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    except OSError as error:
+                        self.logging.log(
+                            "warning",
+                            "Failed to terminate managed TG WS Proxy",
+                            pid=managed_pid,
+                            error=str(error),
+                        )
+                    deadline = time.monotonic() + 4.0
+                    while self._pid_running(managed_pid) and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    if self._pid_running(managed_pid):
+                        try:
+                            os.kill(managed_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        except OSError as error:
+                            self.logging.log(
+                                "warning",
+                                "Failed to kill managed TG WS Proxy",
+                                pid=managed_pid,
+                                error=str(error),
+                            )
+            if sys.platform.startswith("win") and process and process.pid:
                 self._run_quiet(["taskkill", "/PID", str(process.pid), "/F"])
             self._processes.pop(component_id, None)
-            self._kill_image("TgWsProxy_windows.exe")
+            self._remove_tg_proxy_pid()
+            if sys.platform.startswith("win"):
+                self._kill_image("TgWsProxy_windows.exe")
             self._close_source_log_stream("tg-ws-proxy")
             still_listening = self._is_port_listening(settings.tg_proxy_host, int(settings.tg_proxy_port))
             state.status = "running" if still_listening else "stopped"
@@ -705,6 +823,15 @@ class ProcessManager:
             self._invalidate_state_cache()
             return state
         if component_id == "zapret2":
+            if self._linux_zapret2 is not None:
+                result = self._linux_zapret2.stop()
+                state.status = result.status if result.status in {"running", "stopped"} else "error"
+                state.pid = None
+                state.last_error = result.message if state.status == "error" else ""
+                self._states[component_id] = state
+                self.logging.log("info" if state.status == "stopped" else "error", "Linux Zapret2 stop", status=state.status, error=state.last_error)
+                self._invalidate_state_cache()
+                return state
             process = self._processes.get(component_id)
             if process and process.poll() is None:
                 process.terminate()
@@ -810,8 +937,16 @@ class ProcessManager:
                 started.append(state)
         return started
 
-    def stop_all(self) -> list[ComponentState]:
-        stopped = [self.stop_component(component.id) for component in self.list_components()]
+    def stop_all(self, *, include_external_services: bool = True) -> list[ComponentState]:
+        stopped: list[ComponentState] = []
+        for component in self.list_components():
+            is_external_linux_service = (
+                (component.id == "zapret" and self._linux_zapret is not None)
+                or (component.id == "zapret2" and self._linux_zapret2 is not None)
+            )
+            if is_external_linux_service and not include_external_services:
+                continue
+            stopped.append(self.stop_component(component.id))
         self._cleanup_merged_runtime()
         return stopped
 
@@ -1848,6 +1983,46 @@ foreach ($adapter in @($payload.adapters)) {
         urllib.request.urlretrieve(selected_url, target)
         return target
 
+    def _start_linux_zapret2(self, component_id: str) -> ComponentState:
+        if self._linux_zapret2 is None:
+            return ComponentState(component_id=component_id, status="error", last_error="Linux backend is unavailable")
+        result = self._linux_zapret2.start()
+        state = ComponentState(
+            component_id=component_id,
+            status=result.status if result.status in {"running", "stopped"} else "error",
+            pid=None,
+            last_error=result.message if result.status not in {"running", "stopped"} else "",
+        )
+        self._states[component_id] = state
+        self.logging.log(
+            "info" if state.status == "running" else "error",
+            "Linux Zapret2 start",
+            status=state.status,
+            error=state.last_error,
+            command=list(result.command),
+        )
+        return state
+
+    def _start_linux_zapret(self, component_id: str) -> ComponentState:
+        if self._linux_zapret is None:
+            return ComponentState(component_id=component_id, status="error", last_error="Linux backend is unavailable")
+        result = self._linux_zapret.start()
+        state = ComponentState(
+            component_id=component_id,
+            status=result.status if result.status in {"running", "stopped"} else "error",
+            pid=None,
+            last_error=result.message if result.status not in {"running", "stopped"} else "",
+        )
+        self._states[component_id] = state
+        self.logging.log(
+            "info" if state.status == "running" else "error",
+            "Linux Zapret start",
+            status=state.status,
+            error=state.last_error,
+            command=list(result.command),
+        )
+        return state
+
     def _start_goshkow_vpn(self, component_id: str) -> ComponentState:
         current = self._processes.get(component_id)
         if current and current.poll() is None:
@@ -2820,6 +2995,16 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             game_flag.unlink(missing_ok=True)
 
     def _start_tg_ws_proxy(self, component_id: str) -> ComponentState:
+        runtime_root = self.storage.paths.runtime_dir / "tg-ws-proxy"
+        missing_runtime = _missing_tg_ws_proxy_files(runtime_root)
+        if missing_runtime:
+            error_hint = "TG WS Proxy runtime is incomplete. Missing: " + ", ".join(missing_runtime)
+            state = ComponentState(component_id=component_id, status="error", last_error=error_hint)
+            self._states[component_id] = state
+            self._invalidate_state_cache()
+            self.logging.log("error", "TG WS Proxy runtime validation failed", error=error_hint)
+            return state
+
         # перезапуск без споров со старыми процессами
         self.stop_component(component_id)
 
@@ -2895,6 +3080,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 self._kill_image("TgWsProxy_windows.exe")
             except Exception:
                 pass
+            self._remove_tg_proxy_pid()
             state = ComponentState(
                 component_id=component_id,
                 status="error",
@@ -2904,6 +3090,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             self._invalidate_state_cache()
             self.logging.log("error", "TG WS Proxy worker failed to start", error=error_hint)
             return state
+        self._write_tg_proxy_pid(process.pid)
         state = ComponentState(component_id=component_id, status="running", pid=process.pid)
         self._processes[component_id] = process
         self._states[component_id] = state
@@ -2911,8 +3098,56 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         self._invalidate_state_cache()
         self.logging.log("info", "TG WS Proxy worker started", pid=process.pid)
         if not str(settings.tg_proxy_link_prompt_signature or "").strip():
-            self.prompt_telegram_proxy_link()
+            if sys.platform.startswith("linux") and not self._is_telegram_running():
+                self.logging.log(
+                    "info",
+                    "Telegram Desktop is not running; automatic proxy link was skipped",
+                    component_id="tg-ws-proxy",
+                )
+            else:
+                self.prompt_telegram_proxy_link()
         return state
+
+    def _tg_proxy_pidfile(self) -> Path:
+        return self.storage.paths.runtime_dir / "tg-ws-proxy" / ".service" / "tg-ws-proxy.pid"
+
+    def _read_tg_proxy_pid(self) -> int | None:
+        """Return only a PID that still belongs to Hub's TG worker."""
+        if not sys.platform.startswith("linux"):
+            return None
+        pidfile = self._tg_proxy_pidfile()
+        try:
+            pid = int(pidfile.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
+        if pid <= 0 or not self._pid_running(pid):
+            pidfile.unlink(missing_ok=True)
+            return None
+        try:
+            cmdline = (Path("/proc") / str(pid) / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", errors="replace"
+            )
+        except OSError:
+            return None
+        if "tg-ws-proxy" not in cmdline or "--worker" not in cmdline:
+            pidfile.unlink(missing_ok=True)
+            return None
+        return pid
+
+    def _write_tg_proxy_pid(self, pid: int) -> None:
+        if not sys.platform.startswith("linux"):
+            return
+        pidfile = self._tg_proxy_pidfile()
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(f"{int(pid)}\n", encoding="utf-8")
+
+    def _remove_tg_proxy_pid(self) -> None:
+        if not sys.platform.startswith("linux"):
+            return
+        try:
+            self._tg_proxy_pidfile().unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _build_worker_command(self, worker: str, **kwargs: Any) -> list[str]:
         cmd: list[str]
@@ -4480,6 +4715,13 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
     def ensure_pinned_zapret_runtime(self, *, force: bool = False) -> dict[str, str]:
         """Install Hub default Zapret only when runtime is missing (never overwrite user choice)."""
+        if self._linux_zapret2 is not None:
+            report = self._linux_zapret2.diagnose()
+            return {
+                "status": "external" if report.get("zapret2_root") else "missing",
+                "version": "system",
+                "path": str(report.get("zapret2_root") or ""),
+            }
         current = str(self.storage._detect_zapret_version() or "").strip()
         runtime_root = self.storage.paths.runtime_dir / "zapret-discord-youtube"
         has_bin = (runtime_root / "bin").exists()
@@ -5096,8 +5338,10 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             return {"status": "up-to-date", "version": current_version}
         source_url = str(release.get("source_url", "")).strip()
         exe_url = str(release.get("exe_url", "")).strip()
-        if not source_url or not exe_url:
-            return {"status": "error", "error": "No tg-ws-proxy source or Windows asset found"}
+        needs_windows_binary = sys.platform.startswith("win")
+        if not source_url or (needs_windows_binary and not exe_url):
+            missing = "source or Windows asset" if needs_windows_binary else "source archive"
+            return {"status": "error", "error": f"No tg-ws-proxy {missing} found"}
 
         runtime_root = self.storage.paths.runtime_dir / "tg-ws-proxy"
         was_running = False
@@ -5117,9 +5361,17 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             source_root = next((p for p in extract_root.iterdir() if p.is_dir() and (p / "proxy").exists()), None)
             if source_root is None:
                 return {"status": "error", "error": "Invalid tg-ws-proxy source archive"}
+            missing_source = _missing_tg_ws_proxy_files(source_root)
+            if missing_source:
+                return {
+                    "status": "error",
+                    "error": "Incomplete tg-ws-proxy source archive. Missing: " + ", ".join(missing_source),
+                }
 
-            windows_exe_path = temp_root / str(release.get("exe_name", "TgWsProxy_windows.exe"))
-            self._download_to_file(exe_url, windows_exe_path, timeout=75)
+            windows_exe_path: Path | None = None
+            if needs_windows_binary:
+                windows_exe_path = temp_root / str(release.get("exe_name", "TgWsProxy_windows.exe"))
+                self._download_to_file(exe_url, windows_exe_path, timeout=75)
 
             if was_running:
                 self.stop_component("tg-ws-proxy")
@@ -5127,8 +5379,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             backup = self.storage.create_backup(runtime_root, "pre-update-tg-ws-proxy")
             staging_root = temp_root / "runtime_new"
             shutil.copytree(source_root, staging_root, dirs_exist_ok=True)
-            (staging_root / "bin").mkdir(parents=True, exist_ok=True)
-            shutil.copy2(windows_exe_path, staging_root / "bin" / "TgWsProxy_windows.exe")
+            if windows_exe_path is not None:
+                (staging_root / "bin").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(windows_exe_path, staging_root / "bin" / "TgWsProxy_windows.exe")
 
             if runtime_root.exists():
                 shutil.rmtree(runtime_root, ignore_errors=True)
@@ -5478,6 +5731,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 return self._toolhelp_image_running(target)
             except Exception:
                 pass
+        else:
+            pgrep = shutil.which("pgrep")
+            if not pgrep:
+                return False
+            target = target.removesuffix(".exe")
+            if target == "winws2":
+                target = "nfqws2"
+            proc = self._run_quiet([pgrep, "-x", target])
+            return proc.returncode == 0
         proc = self._run_quiet(["tasklist", "/FI", f"IMAGENAME eq {image_name}"])
         output = (proc.stdout or "").lower()
         return target in output
@@ -5519,6 +5781,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
     def _kill_image(self, image_name: str) -> None:
         self._image_running_cache.pop(image_name, None)
+        if not sys.platform.startswith("win"):
+            self._image_running_cache[image_name] = (time.time(), False)
+            return
         self._run_quiet(["taskkill", "/IM", image_name, "/F", "/T"])
         self._image_running_cache[image_name] = (time.time(), False)
 
@@ -5545,6 +5810,20 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 
     def _list_image_pids(self, image_name: str) -> set[int]:
         pids: set[int] = set()
+        if not sys.platform.startswith("win"):
+            pgrep = shutil.which("pgrep")
+            if not pgrep:
+                return pids
+            target = image_name.lower().removesuffix(".exe")
+            if target == "winws2":
+                target = "nfqws2"
+            proc = self._run_quiet([pgrep, "-x", target])
+            for value in (proc.stdout or "").split():
+                try:
+                    pids.add(int(value))
+                except ValueError:
+                    pass
+            return pids
         try:
             proc = self._run_quiet(
                 ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"]
@@ -6115,14 +6394,17 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return runtime_text in raw
 
     def _run_quiet(self, command: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-            creationflags=self._creationflags,
-            startupinfo=self._startupinfo,
-        )
+        try:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=self._creationflags,
+                startupinfo=self._startupinfo,
+            )
+        except OSError as error:
+            return subprocess.CompletedProcess(command, 127, "", str(error))
 
     def _is_port_listening(self, host: str, port: int) -> bool:
         """Cheap listen probe. Old 0.8s timeout froze the GUI whenever TG was down."""
@@ -6203,6 +6485,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             pass
 
     def _is_telegram_running(self) -> bool:
+        if sys.platform.startswith("linux"):
+            pgrep = shutil.which("pgrep")
+            if pgrep:
+                for image_name in ("telegram-desktop", "telegram"):
+                    if self._run_quiet([pgrep, "-x", image_name]).returncode == 0:
+                        return True
+                if self._run_quiet([pgrep, "-f", r"(^|/)telegram-desktop(\s|$)"]).returncode == 0:
+                    return True
+            return False
         for image_name in ("Telegram.exe", "telegram.exe", "Telegram Desktop.exe"):
             if self._is_image_running(image_name):
                 return True
@@ -6252,6 +6543,13 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             kernel32.CloseHandle(snapshot)
 
     def _telegram_desktop_candidates(self) -> list[Path]:
+        if sys.platform.startswith("linux"):
+            candidates = []
+            for image_name in ("telegram-desktop", "telegram"):
+                resolved = shutil.which(image_name)
+                if resolved:
+                    candidates.append(Path(resolved))
+            return candidates
         candidates = [
             Path(os.environ.get("APPDATA", "")) / "Telegram Desktop" / "Telegram.exe",
             Path(os.environ.get("LOCALAPPDATA", "")) / "Telegram Desktop" / "Telegram.exe",

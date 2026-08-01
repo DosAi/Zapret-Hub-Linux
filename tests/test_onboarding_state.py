@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from zapret_hub.services.onboarding_state import onboarding_completed, onboarding_is_update, onboarding_marker
+from zapret_hub.services.linux_zapret2 import LinuxZapret2Service, LinuxZapretService
+import zapret_hub.services.settings as settings_module
 from zapret_hub.services.settings import SettingsManager
 
 
@@ -64,6 +66,7 @@ def test_current_theme_choice_is_preserved(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_new_client_defaults_youtube_discord_and_tg_proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_module.sys, "platform", "win32")
     storage = _Storage(tmp_path)
     storage.write_json(
         tmp_path / "components.json",
@@ -79,3 +82,74 @@ def test_new_client_defaults_youtube_discord_and_tg_proxy(tmp_path: Path, monkey
     assert "tg-ws-proxy" in settings.enabled_component_ids
     assert "youtube" in settings.selected_service_ids
     assert "discord" in settings.selected_service_ids
+
+
+def test_linux_prefers_installed_classic_zapret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = _Storage(tmp_path)
+    storage.write_json(
+        tmp_path / "settings.json",
+        {
+            "component_selection_initialized": True,
+            "enabled_component_ids": ["zapret2"],
+            "selected_runtime_mode": "zapret2",
+        },
+    )
+    (tmp_path / ".theme_defaults_v4").write_text("1", encoding="utf-8")
+    monkeypatch.setattr(settings_module.sys, "platform", "linux")
+    monkeypatch.setattr(LinuxZapretService, "find_nfqws", lambda _self, root=None: tmp_path / "nfqws")
+    monkeypatch.setattr(LinuxZapret2Service, "find_nfqws2", lambda _self, root=None: None)
+
+    settings = SettingsManager(storage).get()
+
+    assert settings.enabled_component_ids == ["zapret"]
+    assert settings.selected_runtime_mode == "zapret"
+
+
+def test_linux_keeps_selected_zapret2_when_both_backends_are_installed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _Storage(tmp_path)
+    storage.write_json(
+        tmp_path / "settings.json",
+        {
+            "component_selection_initialized": True,
+            "enabled_component_ids": ["zapret2"],
+            "selected_runtime_mode": "zapret2",
+        },
+    )
+    (tmp_path / ".theme_defaults_v4").write_text("1", encoding="utf-8")
+    monkeypatch.setattr(settings_module.sys, "platform", "linux")
+    monkeypatch.setattr(LinuxZapretService, "find_nfqws", lambda _self, root=None: tmp_path / "nfqws")
+    monkeypatch.setattr(LinuxZapret2Service, "find_nfqws2", lambda _self, root=None: tmp_path / "nfqws2")
+
+    settings = SettingsManager(storage).get()
+
+    assert settings.enabled_component_ids == ["zapret2"]
+    assert settings.selected_runtime_mode == "zapret2"
+
+
+def test_linux_preserves_tg_proxy_component_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _Storage(tmp_path)
+    storage.write_json(
+        tmp_path / "settings.json",
+        {
+            "component_selection_initialized": True,
+            "enabled_component_ids": ["zapret2", "tg-ws-proxy", "goshkow-vpn"],
+            "autostart_component_ids": ["tg-ws-proxy"],
+            "selected_runtime_mode": "zapret2",
+            "selected_service_ids": ["telegram-desktop", "youtube"],
+        },
+    )
+    (tmp_path / ".theme_defaults_v4").write_text("1", encoding="utf-8")
+    monkeypatch.setattr(settings_module.sys, "platform", "linux")
+    monkeypatch.setattr(LinuxZapretService, "find_nfqws", lambda _self, root=None: tmp_path / "nfqws")
+    monkeypatch.setattr(LinuxZapret2Service, "find_nfqws2", lambda _self, root=None: tmp_path / "nfqws2")
+
+    settings = SettingsManager(storage).get()
+
+    assert settings.enabled_component_ids == ["zapret2", "tg-ws-proxy"]
+    assert settings.autostart_component_ids == ["tg-ws-proxy"]

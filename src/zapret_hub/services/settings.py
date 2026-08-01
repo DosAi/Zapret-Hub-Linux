@@ -7,6 +7,7 @@ import threading
 from dataclasses import asdict
 
 from zapret_hub.domain import AppSettings
+from zapret_hub.services.linux_zapret2 import LinuxZapret2Service, LinuxZapretService
 from zapret_hub.services.service_catalog import SERVICE_PRESET_IDS
 from zapret_hub.services.storage import StorageManager
 
@@ -46,9 +47,9 @@ class SettingsManager:
                         autostart_defaults.append(cid)
                 settings.enabled_component_ids = enabled_defaults
                 settings.autostart_component_ids = autostart_defaults
-            # New clients: TG WS Proxy on; stock services selected (CF/Discord/YT/Gaming/Clouds).
+            # New clients: TG WS Proxy on for Windows; stock services selected.
             enabled = {str(item) for item in (settings.enabled_component_ids or [])}
-            if "tg-ws-proxy" not in enabled:
+            if sys.platform.startswith("win") and "tg-ws-proxy" not in enabled:
                 settings.enabled_component_ids = sorted([*enabled, "tg-ws-proxy"])
             if not settings.selected_service_ids:
                 from zapret_hub.services.service_rules import merge_auto_default_services
@@ -115,6 +116,36 @@ class SettingsManager:
         if raw.get("selected_runtime_mode") not in {"zapret", "zapret2", "goshkow-vpn", "none"}:
             settings.selected_runtime_mode = "zapret"
             changed = True
+        if sys.platform.startswith("linux"):
+            linux_zapret = LinuxZapretService()
+            linux_zapret2 = LinuxZapret2Service()
+            available_primary: list[str] = []
+            if linux_zapret.find_nfqws() is not None:
+                available_primary.append("zapret")
+            if linux_zapret2.find_nfqws2() is not None:
+                available_primary.append("zapret2")
+            # Keep Zapret2 visible as the installable fallback on a clean Linux
+            # machine, but prefer an already-installed classic service.
+            if not available_primary:
+                available_primary.append("zapret2")
+            # TG WS Proxy has a native Python worker on Linux and must survive
+            # the Windows-only component cleanup. Otherwise every Hub restart
+            # silently clears its "follow bypass power" toggle.
+            supported_components = {*available_primary, "tg-ws-proxy"}
+            filtered_components = [
+                component_id
+                for component_id in settings.enabled_component_ids
+                if component_id in supported_components
+            ]
+            preferred_runtime = available_primary[0]
+            if not filtered_components:
+                filtered_components.insert(0, preferred_runtime)
+            if filtered_components != settings.enabled_component_ids:
+                settings.enabled_component_ids = filtered_components
+                changed = True
+            if settings.selected_runtime_mode not in {*available_primary, "none"}:
+                settings.selected_runtime_mode = preferred_runtime
+                changed = True
 
         if raw.get("zapret_control_mode") not in {"manual", "auto"}:
             settings.zapret_control_mode = "manual"

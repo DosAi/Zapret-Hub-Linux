@@ -1024,7 +1024,7 @@ export function MarketplacePage({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => void bridge.call("marketplace.open-url", { url: "https://goshkow.com/zapret-hub/marketplace" })}
+                    onClick={() => void bridge.call("marketplace.open-url", { url: "https://github.com/DosAi/Zapret-Hub-Linux" })}
                     className="flex h-8 items-center gap-1.5 rounded-lg border border-line-1 bg-bg-1 px-2.5 text-[11px] text-fg-dim transition-colors hover:border-line-2 hover:bg-bg-3 hover:text-fg"
                   >
                     <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">

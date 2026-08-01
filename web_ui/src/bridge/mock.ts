@@ -51,12 +51,12 @@ const components: Record<ComponentId, import("./types").ComponentInfo> = {
   },
   "goshkow-vpn": {
     id: "goshkow-vpn",
-    name: "goshkow VPN",
+    name: "Legacy VPN",
     version: "0.9.3",
     status: "off",
     description: "WireGuard-based VPN",
     config: "Endpoint: nl-01 · MTU: 1420",
-    externalUrl: "https://goshkow.example",
+    externalUrl: "",
   },
   "tg-ws-proxy": {
     id: "tg-ws-proxy",
@@ -102,7 +102,7 @@ const initialMods: Mod[] = [
   {
     id: "m2",
     name: "Discord Voice Fix",
-    author: "goshkow",
+    author: "DosAi",
     description: "Фикс голосовых чатов Discord",
     enabled: false,
     compatibleFiles: ["ip-lists", "general"],
@@ -117,9 +117,9 @@ const mockMarketplace: MarketplaceProject[] = [
     slug: "youtube-flow",
     title: "YouTube Flow",
     summary: "YouTube без ограничений и лишних настроек.",
-    author: "goshkow",
+    author: "DosAi",
     iconUrl: "",
-    projectUrl: "https://goshkow.com/zapret-hub/marketplace/projects/youtube-flow",
+    projectUrl: "https://github.com/DosAi/Zapret-Hub-Linux",
     apiUrl: "",
     downloadUrl: "",
     compatibility: "zapret",
@@ -142,9 +142,9 @@ const mockMarketplace: MarketplaceProject[] = [
     slug: "discord-bridge",
     title: "Discord Bridge",
     summary: "Стабильный Discord голос и медиа.",
-    author: "goshkow",
+    author: "DosAi",
     iconUrl: "",
-    projectUrl: "https://goshkow.com/zapret-hub/marketplace/projects/discord-bridge",
+    projectUrl: "https://github.com/DosAi/Zapret-Hub-Linux",
     apiUrl: "",
     downloadUrl: "",
     compatibility: "zapret2",
@@ -252,7 +252,7 @@ const initialState: AppState = {
     zapretActive: true,
   },
   onboarding: { completed: false, isUpdate: false, forceOpen: false },
-  ui: { locale: "ru", theme: "night", hasValidVpnKey: false },
+  ui: { locale: "ru", theme: "night", hasValidVpnKey: false, platform: "windows" },
 };
 
 // -------- mock adapter --------
@@ -437,7 +437,8 @@ export function createMockBridge(): ZapretHubBridge {
       case "runtime.select": {
         const p = payload as Commands["runtime.select"]["in"];
         state.runtime.active = p.id;
-        applyMutex(p.id);
+        if (p.keepPower) state.runtime.status = "on";
+        if (state.runtime.status === "on") applyMutex(p.id);
         pushState();
         return undefined as Commands[K]["out"];
       }

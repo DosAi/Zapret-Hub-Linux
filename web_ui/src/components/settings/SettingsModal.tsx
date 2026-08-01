@@ -117,6 +117,7 @@ export function SettingsModal({
   if (!state) return null;
   const ru = locale === "ru";
   const settings = { ...state.settings, ...draft };
+  const isLinux = state.ui.platform === "linux";
   const displayModeOrder = draft.modeOrder ?? state.runtime.order;
   const patch = (value: Partial<Settings> & { locale?: "ru" | "en"; modeOrder?: RuntimeId[] }) =>
     setDraft((current) => ({ ...current, ...value }));
@@ -155,10 +156,11 @@ export function SettingsModal({
     { key: "app", label: t("settings.tab.app") },
     { key: "zapret", label: "Zapret" },
     { key: "zapret2", label: "Zapret 2" },
-    { key: "vpn", label: "goshkow VPN" },
+    // Reserved for a future Happ integration. The legacy subscription VPN is
+    // intentionally hidden in this Linux fork.
     { key: "tg", label: "TG WS Proxy" },
   ];
-  const modeLabels: Record<RuntimeId, string> = { zapret: "Zapret", "goshkow-vpn": "goshkow VPN", zapret2: "Zapret2", none: L("Без основного компонента", "No primary component") };
+  const modeLabels: Record<RuntimeId, string> = { zapret: "Zapret", "goshkow-vpn": "Legacy VPN", zapret2: "Zapret2", none: L("Без основного компонента", "No primary component") };
   const selectTab = (next: SettingsTab) => {
     const currentIndex = tabs.findIndex((item) => item.key === tab);
     const nextIndex = tabs.findIndex((item) => item.key === next);
@@ -290,16 +292,16 @@ export function SettingsModal({
             <button onClick={() => bridge.call("app.check-updates", undefined)} className="mb-2 w-full rounded-[11px] border border-line-2 bg-bg-3 px-3 py-2.5 text-left text-[12px] font-semibold text-fg transition-all duration-200 hover:brightness-110">{L("Проверить обновления", "Check for updates")}</button>
             <Row label={L("Проверять обновления автоматически", "Check updates automatically")}><IosToggle on={settings.checkUpdates} onChange={(value) => { void applyLive({ checkUpdates: value }, null); }} /></Row>
           </Section>
-          <Section title="Windows">
-            <Row label={L("Запускать вместе с Windows", "Start with Windows")}><IosToggle on={settings.autoStart} onChange={(value) => { void applyLive({ autoStart: value }, null); }} /></Row>
+          <Section title={isLinux ? L("Система", "System") : "Windows"}>
+            <Row label={isLinux ? L("Запускать при входе в систему", "Start on login") : L("Запускать вместе с Windows", "Start with Windows")}><IosToggle on={settings.autoStart} onChange={(value) => { void applyLive({ autoStart: value }, null); }} /></Row>
             <AnimatePresence initial={false}>
               {settings.autoStart && <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }} className="overflow-hidden pl-3">
-                <Row label={L("Стартовать в трее", "Start in tray")} hint={L("При автозапуске окно не открывается — только иконка в трее", "On Windows startup the window stays closed; only the tray icon appears")}><IosToggle on={settings.minimizeToTray} onChange={(value) => { void applyLive({ minimizeToTray: value }, null); }} /></Row>
+                <Row label={L("Стартовать в трее", "Start in tray")} hint={L("При автозапуске окно не открывается — только иконка в трее", "On startup the window stays closed; only the tray icon appears")}><IosToggle on={settings.minimizeToTray} onChange={(value) => { void applyLive({ minimizeToTray: value }, null); }} /></Row>
                 <Row label={L("Автозапуск компонентов", "Auto-start components")} hint={L("Включает кнопку питания с последним выбранным режимом и настройками", "Turns the power button on with your last selected mode and settings")}><IosToggle on={settings.autoRunComponents} onChange={(value) => { void applyLive({ autoRunComponents: value }, null); }} /></Row>
               </motion.div>}
             </AnimatePresence>
           </Section>
-          <Section title={L("Уведомления Windows", "Windows notifications")}>
+          {!isLinux && <Section title={L("Уведомления Windows", "Windows notifications")}>
             <Row label={L("Уведомления Windows", "Windows notifications")}><IosToggle on={settings.windowsNotifications} onChange={(value) => { void applyLive({ windowsNotifications: value }, null); }} /></Row>
             <AnimatePresence initial={false}>
               {settings.windowsNotifications && <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }} className="overflow-hidden pl-3">
@@ -307,13 +309,13 @@ export function SettingsModal({
                 <Row label={L("Уведомлять о скрытии в трей", "Notify when minimized to tray")}><IosToggle on={settings.trayNotification} onChange={(value) => { void applyLive({ trayNotification: value }, null); }} /></Row>
               </motion.div>}
             </AnimatePresence>
-          </Section>
+          </Section>}
           <Section title={L("Порядок сетевых компонентов", "Network component order")}>
             <Row
-              label={L("Переключение скроллом", "Scroll switching")}
+              label={L("Листание скроллом", "Scroll browsing")}
               hint={L(
-                "Позволяет переключать сетевые компоненты скроллом по странице быстрого доступа",
-                "Lets you switch network components by scrolling on the quick access page",
+                "Позволяет листать сетевые компоненты; выбранный включается только по кнопке питания",
+                "Lets you browse network components; the selected one starts only when you press the power button",
               )}
             >
               <IosToggle
@@ -508,9 +510,9 @@ export function SettingsModal({
           </Section>
         </>}
 
-        {tab === "vpn" && <Section title="goshkow VPN">
+        {tab === "vpn" && <Section title="Legacy VPN (disabled)">
           {!state.ui.hasValidVpnKey && <div className="mb-3 rounded-[12px] border border-line-1 bg-bg-2 p-3">
-            <div className="text-[12px] font-semibold text-fg">{L("goshkow VPN не подключён", "goshkow VPN is not connected")}</div>
+            <div className="text-[12px] font-semibold text-fg">{L("Компонент отключён в Linux-форке", "This component is disabled in the Linux fork")}</div>
             <div className="mt-1 text-[10px] text-fg-dim">{L("Вставьте ключ подписки или получите 10 дней бесплатно.", "Paste a subscription key or get 10 free days.")}</div>
             <button onClick={() => bridge.call("component.open-external", { id: "goshkow-vpn" })} className="mt-2 rounded-[9px] border border-line-1 px-3 py-1.5 text-[10px] text-fg hover:bg-bg-3">{L("Получить 10 дней бесплатно", "Get 10 days free")}</button>
           </div>}
@@ -566,7 +568,7 @@ export function SettingsModal({
 
   const footer = (
     <footer className="flex min-h-11 shrink-0 items-center justify-between gap-3 border-t border-line-1 px-4 py-2">
-      <div className="max-w-[470px] text-[9px] leading-relaxed text-fg-mute">{L("Благодарности: zapret и tg-ws-proxy от Flowseal; zapret2 от bol-van; оригинальный Zapret Hub от goshkow.", "Credits: zapret and tg-ws-proxy by Flowseal; zapret2 by bol-van; the original Zapret Hub by goshkow.")}</div>
+      <div className="max-w-[470px] text-[9px] leading-relaxed text-fg-mute">{L("Linux-форк: DosAi. Благодарности и ссылки на исходные проекты перечислены в README. Портирование выполнено при помощи ChatGPT.", "Linux fork by DosAi. Credits and upstream links are listed in the README. Ported with the help of ChatGPT.")}</div>
       <div className="flex items-center gap-2">
         {!embedded && <button onClick={onClose} className="rounded-[9px] border border-line-1 bg-bg-1 px-3 py-1.5 text-[11px] text-fg-dim hover:bg-bg-3 hover:text-fg">{t("settings.close")}</button>}
         <button
