@@ -62,3 +62,19 @@ def test_github_automation_is_linux_only() -> None:
     assert "frontend-build" in ci
     assert "windows-latest" not in ci
     assert not (PROJECT_ROOT / ".github/workflows/release.yml").exists()
+
+
+def test_legacy_marketplace_is_not_exposed_or_contacted_on_linux() -> None:
+    app = (PROJECT_ROOT / "web_ui/src/App.tsx").read_text(encoding="utf-8")
+    sidebar = (PROJECT_ROOT / "web_ui/src/components/shell/Sidebar.tsx").read_text(encoding="utf-8")
+    bridge = (PROJECT_ROOT / "src/zapret_hub/ui/web_window.py").read_text(encoding="utf-8")
+    marketplace = (PROJECT_ROOT / "src/zapret_hub/services/marketplace.py").read_text(encoding="utf-8")
+    updates = (PROJECT_ROOT / "src/zapret_hub/services/updates.py").read_text(encoding="utf-8")
+
+    nav_line = next(line for line in app.splitlines() if line.startswith("const NAV_KEYS:"))
+    assert '"marketplace"' not in nav_line
+    assert '{ key: "marketplace"' not in sidebar
+    assert 'href="https://github.com/DosAi/Zapret-Hub-Linux"' in sidebar
+    assert 'if sys.platform.startswith("linux"):' in bridge
+    assert "goshkow.com" not in marketplace
+    assert "goshkow.com" not in updates

@@ -506,6 +506,8 @@ class WebBridge(QObject):
         self._maybe_schedule_marketplace_update_check()
 
     def _maybe_schedule_marketplace_update_check(self) -> None:
+        if sys.platform.startswith("linux"):
+            return
         if self._marketplace_update_check_started or self.context is None:
             return
         self._marketplace_update_check_started = True
@@ -1816,6 +1818,8 @@ class WebBridge(QObject):
             self._start_app_update_apply(schedule_only=schedule_only)
             return None
         if command == "marketplace.list":
+            if sys.platform.startswith("linux"):
+                return {"projects": [], "page": 1, "pages": 1, "total": 0}
             data = dict(payload or {})
             lang = str(self.context.settings.get().language or "ru")
             return self.context.marketplace.list_projects(
@@ -1829,12 +1833,16 @@ class WebBridge(QObject):
                 refresh=bool(data.get("refresh")),
             )
         if command == "marketplace.get":
+            if sys.platform.startswith("linux"):
+                raise ValueError("Marketplace is not available in this Linux fork")
             slug = str((payload or {}).get("slug") or "")
             lang = str(self.context.settings.get().language or "ru")
             return self.context.marketplace.get_project(slug, lang=lang if lang in {"ru", "en"} else "ru")
         if command == "marketplace.image":
             return self.context.marketplace.load_image_data_url(str((payload or {}).get("url") or ""))
         if command == "marketplace.download":
+            if sys.platform.startswith("linux"):
+                raise ValueError("Marketplace is not available in this Linux fork")
             data = dict(payload or {})
             version_id = data.get("versionId")
             vid = int(version_id) if version_id not in (None, "", False) else None
@@ -1914,6 +1922,8 @@ class WebBridge(QObject):
             ordered = data.get("orderedSlugs") if isinstance(data.get("orderedSlugs"), list) else []
             return self.context.marketplace.reorder_queue([str(item) for item in ordered])
         if command == "marketplace.check-updates":
+            if sys.platform.startswith("linux"):
+                return {"ok": True, "updates": [], "notify": []}
             lang = str(self.context.settings.get().language or "ru")
             result = self.context.marketplace.check_updates(lang=lang if lang in {"ru", "en"} else "ru")
             self._schedule_on_gui(lambda: self.emit_state(force=True))
