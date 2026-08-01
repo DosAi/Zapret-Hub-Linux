@@ -33,13 +33,15 @@ def test_linux_release_contains_a_real_png_window_icon() -> None:
     assert payload.startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_legacy_vpn_is_not_exposed_in_linux_navigation() -> None:
+def test_happ_replaces_legacy_vpn_in_linux_navigation() -> None:
     components = (PROJECT_ROOT / "web_ui/src/pages/ComponentsPage.tsx").read_text(encoding="utf-8")
     onboarding = (PROJECT_ROOT / "web_ui/src/components/onboarding/OnboardingFlow.tsx").read_text(encoding="utf-8")
     settings = (PROJECT_ROOT / "web_ui/src/components/settings/SettingsModal.tsx").read_text(encoding="utf-8")
 
     order_line = next(line for line in components.splitlines() if line.startswith("const ORDER:"))
-    assert "goshkow-vpn" not in order_line
+    assert "goshkow-vpn" in order_line
+    assert "Happ" in components
+    assert "Legacy VPN" not in components
     assert '["goshkow-vpn", "goshkow VPN"' not in onboarding
     assert '{ key: "vpn"' not in settings
 

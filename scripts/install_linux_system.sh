@@ -47,6 +47,7 @@ done
 PROJECT_ROOT=$(CDPATH= cd -- "$PROJECT_ROOT" && pwd)
 ZAPRET_SOURCE="$PROJECT_ROOT/runtime/zapret2"
 CLASSIC_HELPER="$PROJECT_ROOT/scripts/install_linux_classic_zapret.sh"
+HAPP_HELPER="$PROJECT_ROOT/scripts/install_linux_happ.sh"
 POLKIT_SOURCE="$PROJECT_ROOT/packaging/polkit/49-zapret-hub.rules"
 HOSTLIST_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hosts-user.txt"
 
@@ -56,6 +57,7 @@ for required in \
     "$ZAPRET_SOURCE/init.d/sysv/zapret2" \
     "$ZAPRET_SOURCE/init.d/systemd/zapret2.service" \
     "$CLASSIC_HELPER" \
+    "$HAPP_HELPER" \
     "$POLKIT_SOURCE" \
     "$HOSTLIST_SOURCE"
 do
@@ -71,6 +73,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] apt-get update"
     echo "[dry-run] apt-get install -y $PACKAGES"
     /bin/sh "$CLASSIC_HELPER" --project-root "$PROJECT_ROOT" --dry-run
+    /bin/sh "$HAPP_HELPER" --dry-run
     echo "[dry-run] install bundled Zapret2 in /opt/zapret2 (preserve foreign installs)"
     echo "[dry-run] install zapret2.service without starting or restarting it"
     echo "[dry-run] install /etc/polkit-1/rules.d/49-zapret-hub.rules"
@@ -88,6 +91,7 @@ apt-get update
 apt-get install -y $PACKAGES
 
 /bin/sh "$CLASSIC_HELPER" --project-root "$PROJECT_ROOT"
+/bin/sh "$HAPP_HELPER"
 
 ZAPRET_TARGET=/opt/zapret2
 MANAGED_MARKER="$ZAPRET_TARGET/.zapret-hub-managed"

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from zapret_hub.services.onboarding_state import onboarding_completed, onboarding_is_update, onboarding_marker
+from zapret_hub.services.linux_happ import LinuxHappService
 from zapret_hub.services.linux_zapret2 import LinuxZapret2Service, LinuxZapretService
 import zapret_hub.services.settings as settings_module
 from zapret_hub.services.settings import SettingsManager
@@ -98,6 +99,7 @@ def test_linux_prefers_installed_classic_zapret(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(settings_module.sys, "platform", "linux")
     monkeypatch.setattr(LinuxZapretService, "find_nfqws", lambda _self, root=None: tmp_path / "nfqws")
     monkeypatch.setattr(LinuxZapret2Service, "find_nfqws2", lambda _self, root=None: None)
+    monkeypatch.setattr(LinuxHappService, "find_executable", lambda _self: None)
 
     settings = SettingsManager(storage).get()
 
@@ -122,6 +124,7 @@ def test_linux_keeps_selected_zapret2_when_both_backends_are_installed(
     monkeypatch.setattr(settings_module.sys, "platform", "linux")
     monkeypatch.setattr(LinuxZapretService, "find_nfqws", lambda _self, root=None: tmp_path / "nfqws")
     monkeypatch.setattr(LinuxZapret2Service, "find_nfqws2", lambda _self, root=None: tmp_path / "nfqws2")
+    monkeypatch.setattr(LinuxHappService, "find_executable", lambda _self: None)
 
     settings = SettingsManager(storage).get()
 
@@ -148,8 +151,34 @@ def test_linux_preserves_tg_proxy_component_selection(
     monkeypatch.setattr(settings_module.sys, "platform", "linux")
     monkeypatch.setattr(LinuxZapretService, "find_nfqws", lambda _self, root=None: tmp_path / "nfqws")
     monkeypatch.setattr(LinuxZapret2Service, "find_nfqws2", lambda _self, root=None: tmp_path / "nfqws2")
+    monkeypatch.setattr(LinuxHappService, "find_executable", lambda _self: None)
 
     settings = SettingsManager(storage).get()
 
     assert settings.enabled_component_ids == ["zapret2", "tg-ws-proxy"]
     assert settings.autostart_component_ids == ["tg-ws-proxy"]
+
+
+def test_linux_preserves_happ_as_selected_runtime_when_installed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _Storage(tmp_path)
+    storage.write_json(
+        tmp_path / "settings.json",
+        {
+            "component_selection_initialized": True,
+            "enabled_component_ids": ["goshkow-vpn"],
+            "selected_runtime_mode": "goshkow-vpn",
+        },
+    )
+    (tmp_path / ".theme_defaults_v4").write_text("1", encoding="utf-8")
+    monkeypatch.setattr(settings_module.sys, "platform", "linux")
+    monkeypatch.setattr(LinuxZapretService, "find_nfqws", lambda _self, root=None: tmp_path / "nfqws")
+    monkeypatch.setattr(LinuxZapret2Service, "find_nfqws2", lambda _self, root=None: tmp_path / "nfqws2")
+    monkeypatch.setattr(LinuxHappService, "find_executable", lambda _self: tmp_path / "happ")
+
+    settings = SettingsManager(storage).get()
+
+    assert settings.enabled_component_ids == ["goshkow-vpn"]
+    assert settings.selected_runtime_mode == "goshkow-vpn"

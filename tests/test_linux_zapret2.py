@@ -169,9 +169,11 @@ def test_shutdown_keeps_external_linux_services_running() -> None:
     manager = ProcessManager.__new__(ProcessManager)
     manager._linux_zapret = object()
     manager._linux_zapret2 = object()
+    manager._linux_happ = object()
     manager.list_components = lambda: [
         SimpleNamespace(id="zapret"),
         SimpleNamespace(id="zapret2"),
+        SimpleNamespace(id="goshkow-vpn"),
         SimpleNamespace(id="tg-ws-proxy"),
     ]
     stopped: list[str] = []

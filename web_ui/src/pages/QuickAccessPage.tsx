@@ -43,7 +43,7 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
   const { t, locale } = useLocale();
   const modeNames: Record<RuntimeId, string> = {
     zapret: "Zapret",
-    "goshkow-vpn": "Legacy VPN",
+    "goshkow-vpn": state?.ui.platform === "linux" ? "Happ" : "Legacy VPN",
     zapret2: "Zapret 2",
     none: locale === "ru" ? "Без основного компонента" : "No primary component",
   };
@@ -181,7 +181,7 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
     if (pendingMode || pendingPower || state.runtime.status === "starting" || state.runtime.status === "stopping") return;
     if (previewMode && previewMode !== state.runtime.active) {
       const target = previewMode;
-      if (target === "goshkow-vpn" && !state.ui.hasValidVpnKey) {
+      if (target === "goshkow-vpn" && state.ui.platform !== "linux" && !state.ui.hasValidVpnKey) {
         onConnectVpn?.();
         return;
       }
@@ -192,7 +192,7 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
       return;
     }
     const nextOn = status === "off" || status === "error";
-    if (nextOn && active === "goshkow-vpn" && !state.ui.hasValidVpnKey) {
+    if (nextOn && active === "goshkow-vpn" && state.ui.platform !== "linux" && !state.ui.hasValidVpnKey) {
       onConnectVpn?.();
       return;
     }
@@ -276,7 +276,9 @@ export function QuickAccessPage({ onOpenComponent, onConnectVpn }: {
             </motion.div>
           </AnimatePresence>
           <div className="mt-2">
-            {active === "goshkow-vpn" && state.ui.hasValidVpnKey && state.settings.vpn.servers.length > 0 ? (
+            {active === "goshkow-vpn" && state.ui.platform === "linux" ? (
+              <StatusPill label={modeSwitching ? (locale === "ru" ? "Переключение…" : "Switching…") : runtimeLabel(status)} tone={statusTone(status)} />
+            ) : active === "goshkow-vpn" && state.ui.hasValidVpnKey && state.settings.vpn.servers.length > 0 ? (
               <div ref={locationRef} className="relative inline-flex text-left">
                 <button
                   ref={locationButtonRef}

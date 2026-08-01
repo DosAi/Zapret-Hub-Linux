@@ -12,8 +12,8 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/install_linux.sh [--dry-run] [--no-launch] [--with-telegram]
 
-Installs Zapret Hub, classic Zapret for Linux, bundled Zapret2, and the
-bundled TG WS Proxy on Kali Linux.
+Installs Zapret Hub, classic Zapret for Linux, bundled Zapret2, the
+official Happ client, and the bundled TG WS Proxy on Kali Linux.
 Other Debian-based systems are accepted but have not been tested.
 Administrator authorization is requested once. Existing foreign Zapret
 installations and their configurations are preserved.
@@ -84,7 +84,7 @@ else
   exit 1
 fi
 
-echo "Administrator authorization is needed once for packages, Zapret, Zapret2, systemd, and PolicyKit."
+echo "Administrator authorization is needed once for packages, Zapret, Zapret2, Happ, systemd, and PolicyKit."
 "${elevate[@]}" /bin/sh "$SYSTEM_HELPER" "${helper_args[@]}"
 
 cd "$PROJECT_ROOT"
@@ -113,7 +113,7 @@ DESKTOP_FILE="$USER_APPS/zapret-hub.desktop"
   echo '[Desktop Entry]'
   echo 'Type=Application'
   echo 'Name=Zapret Hub'
-  echo 'Comment=Manage Zapret, Zapret2 and TG WS Proxy'
+  echo 'Comment=Manage Zapret, Zapret2, Happ and TG WS Proxy'
   printf 'Exec=%s/zapret-hub\n' "$USER_BIN"
   echo 'Icon=zapret-hub'
   echo 'Terminal=false'
@@ -124,7 +124,7 @@ chmod 0644 "$DESKTOP_FILE"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
 
 echo
-echo "Zapret Hub is installed. Zapret, Zapret2, and TG WS Proxy are ready; the installer did not change the current VPN or network session."
+echo "Zapret Hub is installed. Zapret, Zapret2, Happ, and TG WS Proxy are ready; the installer did not change the current VPN or network session."
 echo "Launch it later with: $USER_BIN/zapret-hub"
 
 if (( LAUNCH )); then

@@ -1165,7 +1165,7 @@ class WebBridge(QObject):
                 self._emit_runtime_status(self._peek_runtime_status())
                 return None
 
-            if runtime_id == "goshkow-vpn" and not self._vpn_is_configured():
+            if runtime_id == "goshkow-vpn" and not self._linux_happ_available() and not self._vpn_is_configured():
                 self._emit_toast(
                     "Сначала настройте VPN-подписку." if self._ru() else "Configure the VPN subscription first.",
                     kind="warn",
@@ -1317,7 +1317,7 @@ class WebBridge(QObject):
             if enabled:
                 self._onboarding_configuration_cancelled = True
             runtime_now = str(self.context.settings.get().selected_runtime_mode or "zapret")
-            if enabled and runtime_now == "goshkow-vpn" and not self._vpn_is_configured():
+            if enabled and runtime_now == "goshkow-vpn" and not self._linux_happ_available() and not self._vpn_is_configured():
                 self._emit_toast(
                     "Сначала настройте VPN-подписку." if self._ru() else "Configure the VPN subscription first.",
                     kind="warn",
@@ -1968,6 +1968,11 @@ class WebBridge(QObject):
             return None
         if command == "component.open-external":
             component_id = str((payload or {}).get("id", ""))
+            if component_id == "goshkow-vpn" and self._linux_happ_available():
+                result = self.context.processes._linux_happ.open()
+                if result.status == "error":
+                    raise RuntimeError(result.message)
+                return None
             definition = next((item for item in self.context.processes.list_components() if item.id == component_id), None)
             source = str(getattr(definition, "source", "") or "")
             if source.startswith(("http://", "https://")):
@@ -2623,6 +2628,12 @@ class WebBridge(QObject):
             )
         except Exception:
             return False
+
+    def _linux_happ_available(self) -> bool:
+        if not sys.platform.startswith("linux") or self.context is None:
+            return False
+        service = getattr(self.context.processes, "_linux_happ", None)
+        return bool(service is not None and service.available)
 
     def _emit_state_if_select_gen(self, gen: int) -> None:
         if gen != self._runtime_select_gen:
@@ -3698,6 +3709,9 @@ class WebBridge(QObject):
                 "Next-generation zapret powered by winws2 and Lua strategies.",
             ),
             "goshkow-vpn": (
+                "Официальный Linux-клиент Happ; сервер выбирается в приложении Happ.",
+                "Official Happ Linux client; select or import a server in the Happ application.",
+            ) if sys.platform.startswith("linux") else (
                 "VPN-подписка без ограничений по трафику и количеству устройств.",
                 "VPN subscription with unlimited traffic and devices.",
             ),
@@ -3737,7 +3751,7 @@ class WebBridge(QObject):
                         "config": str(getattr(settings, "dns_profile", "xbox") or "xbox").upper(),
                     }
                 )
-            if component_id in {"goshkow-vpn", "xbox-dns"}:
+            if component_id == "xbox-dns" or (component_id == "goshkow-vpn" and not sys.platform.startswith("linux")):
                 components[component_id]["version"] = ""
             elif component_id == "zapret2" and str(components[component_id]["version"]).lower() in {"", "master"}:
                 components[component_id]["version"] = "0.9.5.2"
@@ -3776,9 +3790,7 @@ class WebBridge(QObject):
             for item in self.context.notifications.list()
         ]
         runtime_order = list(settings.runtime_mode_order or ["zapret", "zapret2", "none"])
-        if sys.platform.startswith("linux"):
-            # Legacy VPN is not exposed by this fork. Happ may occupy this
-            # position after a native Linux integration is implemented.
+        if sys.platform.startswith("linux") and "goshkow-vpn" not in definitions:
             runtime_order = [mode for mode in runtime_order if mode != "goshkow-vpn"]
 
         return {

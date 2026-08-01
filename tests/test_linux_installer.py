@@ -9,6 +9,7 @@ import subprocess
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 USER_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux.sh"
 SYSTEM_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_system.sh"
+HAPP_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_happ.sh"
 
 
 def test_linux_installer_dry_run_is_complete_and_non_mutating() -> None:
@@ -33,6 +34,8 @@ def test_linux_installer_dry_run_is_complete_and_non_mutating() -> None:
     assert "verify classic Zapret source archive SHA-256" in output
     assert "install bundled Zapret2" in output
     assert "verify bundled TG WS Proxy" in output
+    assert "install official Happ 3.3.6" in output
+    assert "preserve an existing Happ installation and active tunnel" in output
     assert "without starting or restarting" in output
     assert "npm ci && npm run build" in output
 
@@ -57,6 +60,7 @@ def test_system_installer_never_changes_live_network_service_state() -> None:
     classic_helper = (
         PROJECT_ROOT / "scripts" / "install_linux_classic_zapret.sh"
     ).read_text(encoding="utf-8")
+    happ_helper = HAPP_INSTALLER.read_text(encoding="utf-8")
 
     assert re.search(r"^systemctl daemon-reload$", script, re.MULTILINE)
     assert not re.search(r"^systemctl (?:enable|disable)", script, re.MULTILINE)
@@ -66,6 +70,10 @@ def test_system_installer_never_changes_live_network_service_state() -> None:
     )
     assert not re.search(r"\b(?:nmcli|wg-quick|openvpn)\b", script)
     assert not re.search(r"\b(?:nmcli|wg-quick|openvpn)\b", classic_helper)
+    assert not re.search(
+        r"^systemctl (?:enable|disable|stop|restart)", happ_helper, re.MULTILINE
+    )
+    assert not re.search(r"\b(?:nmcli|wg-quick|openvpn)\b", happ_helper)
 
 
 def test_clean_checkout_contains_all_installer_payloads() -> None:
@@ -79,6 +87,7 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
         PROJECT_ROOT / "runtime" / "tg-ws-proxy" / "proxy" / "raw_websocket.py",
         PROJECT_ROOT / "runtime" / "tg-ws-proxy" / "proxy" / "stats.py",
         PROJECT_ROOT / "scripts" / "install_linux_classic_zapret.sh",
+        HAPP_INSTALLER,
         PROJECT_ROOT / "packaging" / "linux" / "zapret_discord_youtube.service.in",
         PROJECT_ROOT / "packaging" / "polkit" / "49-zapret-hub.rules",
         PROJECT_ROOT / "packaging" / "linux" / "zapret-hosts-user.txt",
@@ -89,6 +98,7 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
     assert all(path.is_file() for path in required)
     assert os.access(USER_INSTALLER, os.X_OK)
     assert os.access(SYSTEM_INSTALLER, os.X_OK)
+    assert os.access(HAPP_INSTALLER, os.X_OK)
 
 
 def test_classic_zapret_source_is_pinned_and_verified() -> None:
@@ -100,3 +110,13 @@ def test_classic_zapret_source_is_pinned_and_verified() -> None:
     assert "ADAPTER_SHA256=105c9088da598936593ff6a52cbf4759ccea15cfe149c4254f9cdece919365a7" in helper
     assert 'sha256sum -c -' in helper
     assert "/master" not in helper
+
+
+def test_happ_package_is_pinned_and_verified() -> None:
+    helper = HAPP_INSTALLER.read_text(encoding="utf-8")
+
+    assert "HAPP_VERSION=3.3.6" in helper
+    assert "a7dac51277387bfe1049b1ad40f40f2e74af233a5eab020b5be1a622effc46a4" in helper
+    assert "a4d3d6dcab1db61db23cdf0f86bce736014887262b570927befe48cb49f14aa6" in helper
+    assert "sha256sum -c -" in helper
+    assert "preserving it without restart or upgrade" in helper

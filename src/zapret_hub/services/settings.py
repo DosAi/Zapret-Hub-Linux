@@ -7,6 +7,7 @@ import threading
 from dataclasses import asdict
 
 from zapret_hub.domain import AppSettings
+from zapret_hub.services.linux_happ import LinuxHappService
 from zapret_hub.services.linux_zapret2 import LinuxZapret2Service, LinuxZapretService
 from zapret_hub.services.service_catalog import SERVICE_PRESET_IDS
 from zapret_hub.services.storage import StorageManager
@@ -124,6 +125,8 @@ class SettingsManager:
                 available_primary.append("zapret")
             if linux_zapret2.find_nfqws2() is not None:
                 available_primary.append("zapret2")
+            if LinuxHappService().available:
+                available_primary.append("goshkow-vpn")
             # Keep Zapret2 visible as the installable fallback on a clean Linux
             # machine, but prefer an already-installed classic service.
             if not available_primary:
