@@ -64,7 +64,10 @@ do
     [ -r "$required" ] || { echo "Required installation file is missing: $required" >&2; exit 1; }
 done
 
-PACKAGES="python3 python3-venv python3-pip nodejs npm policykit-1 nftables iproute2 ca-certificates desktop-file-utils curl git tar gzip"
+# Kali rolling no longer provides the old policykit-1 metapackage. Install the
+# two packages that replace it explicitly: polkitd supplies the daemon/rules
+# directories and pkexec supplies the desktop authorization helper.
+PACKAGES="python3 python3-venv python3-pip nodejs npm polkitd pkexec nftables iproute2 ca-certificates desktop-file-utils curl git tar gzip"
 if [ "$INSTALL_TELEGRAM" -eq 1 ]; then
     PACKAGES="$PACKAGES telegram-desktop"
 fi

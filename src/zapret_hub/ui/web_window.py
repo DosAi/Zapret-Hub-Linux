@@ -4274,7 +4274,7 @@ class WebMainWindow(QMainWindow):
 
         payload = {
             "currentVersion": str(__version__),
-            "latestVersion": "3.1.1",
+            "latestVersion": "3.1.2",
             "changelog": (
                 "• Автоустановка Zapret, Zapret 2, Happ и TG WS Proxy\n"
                 "• Нативные Kali Linux-бэкенды Zapret и Zapret 2\n"

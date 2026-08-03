@@ -11,7 +11,7 @@ def test_linux_fork_branding_and_credits_are_present() -> None:
     locale = (PROJECT_ROOT / "web_ui/src/locale/dict.ts").read_text(encoding="utf-8")
 
     assert "Zapret Hub Linux" in readme
-    assert "версию 3.1.1" in readme
+    assert "версию 3.1.2" in readme
     assert "./install.sh" in readme
     assert "только на Kali Linux" in readme
     assert "Windows не поддерживается" in readme

@@ -27,7 +27,8 @@ def test_linux_installer_dry_run_is_complete_and_non_mutating() -> None:
     output = result.stdout
     assert "python3-venv" in output
     assert "nodejs npm" in output
-    assert "policykit-1 nftables" in output
+    assert "polkitd pkexec nftables" in output
+    assert "policykit-1" not in output
     assert "curl git tar gzip" in output
     apt_line = next(line for line in output.splitlines() if "apt-get install" in line)
     assert "telegram-desktop" not in apt_line
