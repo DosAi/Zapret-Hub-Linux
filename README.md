@@ -2,7 +2,7 @@
 
 # Zapret Hub Linux
 
-Графическая панель для Zapret, Zapret2, Happ и TG WS Proxy на Kali Linux.
+Графическая панель для Zapret, Zapret2, Happ и TG WS Proxy на Linux.
 
 **Автор Linux-форка: [DosAi](https://github.com/DosAi)**<br>
 [Репозиторий](https://github.com/DosAi/Zapret-Hub-Linux) · [Telegram: @dosai_main](https://t.me/dosai_main)
@@ -10,9 +10,12 @@
 </div>
 
 > [!IMPORTANT]
-> Это Linux-only форк, разрабатываемый и тестируемый **только на Kali Linux**.
+> Это Linux-only форк. Полное функциональное тестирование выполняется на
+> **Kali Linux**; установщик дополнительно проходит CI-проверку в настоящих
+> контейнерах Debian, Fedora, Arch и openSUSE.
 > **Windows не поддерживается:** мы не выпускаем `.exe`, Windows-инсталляторы
-> или Windows-инструкции. Другие Linux-дистрибутивы пока не проверены.
+> или Windows-инструкции. Для управления компонентами требуется `systemd`.
+> Alpine/OpenRC пока намеренно не поддерживается.
 
 ## Что это
 
@@ -25,7 +28,7 @@ Zapret Hub Linux — отдельный экспериментальный фо�
 
 [English README](README_EN.md)
 
-## Что вошло в версию 3.1.2
+## Что вошло в версию 3.2.0
 
 - автоматическая установка Zapret, Zapret 2, Happ и TG WS Proxy из одного скрипта;
 - нативные Linux-бэкенды Zapret и Zapret 2 с `systemd` и `nftables`;
@@ -39,6 +42,10 @@ Zapret Hub Linux — отдельный экспериментальный фо�
 - очищенные Linux-only релизные архивы без legacy Windows-payload и VPN-конфигураций.
 - совместимые с актуальным Kali зависимости PolicyKit (`polkitd` и `pkexec`
   вместо удалённого метапакета `policykit-1`).
+- экспериментальный установщик для Debian/Ubuntu, Fedora, Arch и openSUSE;
+- официальные форматы Happ `.deb`, `.rpm` и `.pkg.tar.zst` с проверкой SHA-256;
+- реальный CI-smoke-test имён зависимостей в контейнерах поддерживаемых семейств;
+- исправленные Linux-команды `ping`, `/dev/null` и определение установленной версии Happ.
 
 ## Интерфейс
 
@@ -77,7 +84,16 @@ v2rayN, WinGet/Nuitka-инсталляторов и унаследованных
 Встроенный Zapret2 содержит только Linux-бинарники `x86_64` и
 `arm64`, а TG WS Proxy — только модули, нужные Zapret Hub.
 
-## Установка на Kali Linux
+## Установка на Linux с systemd
+
+Основная проверенная система — Kali Linux. Debian/Ubuntu, Fedora, Arch и
+openSUSE поддерживаются экспериментально: CI проверяет определение системы,
+пакетного менеджера и наличие всех имён зависимостей, но не проверяет работу
+обхода у конкретного провайдера.
+
+Zapret Hub Linux не распространяется через APT/DNF/AUR и не выпускается
+отдельными DEB/RPM-пакетами. Поддерживаемый способ установки — скачать исходники
+с GitHub и запустить корневой `install.sh`.
 
 Вставьте в терминал одну команду:
 
@@ -85,9 +101,10 @@ v2rayN, WinGet/Nuitka-инсталляторов и унаследованных
 git clone --depth 1 https://github.com/DosAi/Zapret-Hub-Linux.git && cd Zapret-Hub-Linux && ./install.sh
 ```
 
-Установщик подготовит зависимости, классический Zapret, Zapret2, Happ, TG WS Proxy,
-Python-окружение, Web UI, PolicyKit-правило и ярлык. После установки приложение доступно в меню
-Kali и автоматически запустится. Позже его можно открыть из меню или командой:
+Установщик сам определит `apt`, `dnf`, `pacman` или `zypper`, подготовит
+зависимости, классический Zapret, Zapret2, Happ, TG WS Proxy, Python-окружение,
+Web UI, PolicyKit-правило и ярлык. После установки приложение доступно в меню и
+автоматически запустится. Позже его можно открыть из меню или командой:
 
 ```bash
 ~/.local/bin/zapret-hub
@@ -137,7 +154,10 @@ deeplink-команды. Импорт
 
 ## Ограничения
 
-- реальное тестирование проводилось только на Kali Linux;
+- полное функциональное тестирование проводилось только на Kali Linux;
+- Debian/Ubuntu, Fedora, Arch и openSUSE пока имеют статус experimental;
+- Alpine/OpenRC не поддерживается: официальный Happ и готовые PySide6-сборки
+  требуют совместимого glibc/systemd-окружения;
 - форк не является VPN и не отправляет трафик на серверы DosAi;
 - результат обхода зависит от провайдера, региона и выбранной стратегии;
 - управление Happ проверено только с официальным Linux-клиентом 3.3.6.

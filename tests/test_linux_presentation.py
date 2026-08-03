@@ -11,10 +11,14 @@ def test_linux_fork_branding_and_credits_are_present() -> None:
     locale = (PROJECT_ROOT / "web_ui/src/locale/dict.ts").read_text(encoding="utf-8")
 
     assert "Zapret Hub Linux" in readme
-    assert "версию 3.1.2" in readme
+    assert "версию 3.2.0" in readme
     assert "./install.sh" in readme
-    assert "только на Kali Linux" in readme
+    assert "Kali Linux" in readme
+    assert "Debian/Ubuntu, Fedora, Arch и openSUSE" in readme
+    assert "Alpine/OpenRC" in readme
     assert "Windows не поддерживается" in readme
+    assert "не распространяется через APT/DNF/AUR" in readme
+    assert "git clone --depth 1" in readme
     assert "docs/screenshots/main.png" in readme
     assert "README_EN.md" in readme
     assert "https://github.com/DosAi/Zapret-Hub-Linux" in readme
@@ -67,7 +71,21 @@ def test_github_automation_is_linux_only() -> None:
     assert "python-tests" in ci
     assert "frontend-build" in ci
     assert "windows-latest" not in ci
+    assert "distro-installer-smoke" in ci
+    assert "kalilinux/kali-rolling" in ci
+    assert "Alpine OpenRC guard" in ci
+
     assert not (PROJECT_ROOT / ".github/workflows/release.yml").exists()
+
+
+def test_contributor_and_security_docs_describe_experimental_distros() -> None:
+    contributing = (PROJECT_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    security = (PROJECT_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+
+    for document in (contributing, security):
+        assert "Kali Linux" in document
+        assert "Debian/Ubuntu, Fedora, Arch and openSUSE" in document
+        assert "experimental" in document
 
 
 def test_legacy_marketplace_is_not_exposed_or_contacted_on_linux() -> None:

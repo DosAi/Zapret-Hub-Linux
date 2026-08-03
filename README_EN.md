@@ -2,7 +2,7 @@
 
 # Zapret Hub Linux
 
-A desktop control panel for Zapret, Zapret2, Happ and TG WS Proxy on Kali Linux.
+A desktop control panel for Zapret, Zapret2, Happ and TG WS Proxy on Linux.
 
 **Linux fork by [DosAi](https://github.com/DosAi)**<br>
 [Repository](https://github.com/DosAi/Zapret-Hub-Linux) · [Telegram: @dosai_main](https://t.me/dosai_main)
@@ -10,9 +10,12 @@ A desktop control panel for Zapret, Zapret2, Happ and TG WS Proxy on Kali Linux.
 </div>
 
 > [!IMPORTANT]
-> This is a **Linux-only** fork developed and tested only on **Kali Linux**.
+> This is a **Linux-only** fork. Full functional testing is performed on
+> **Kali Linux**; the installer is also smoke-tested in real Debian, Fedora,
+> Arch and openSUSE containers.
 > Windows is not supported: the repository does not ship `.exe` files, Windows
-> installers or Windows instructions. Other Linux distributions are untested.
+> installers or Windows instructions. Managed components require `systemd`;
+> Alpine/OpenRC is deliberately unsupported for now.
 
 [Русский README](README.md)
 
@@ -23,7 +26,7 @@ Zapret Hub Linux is an experimental fork with native Linux backends based on
 Zapret strategy and controlling optional components. Porting, debugging, the
 installer and tests were prepared by DosAi with help from **ChatGPT by OpenAI**.
 
-## Version 3.1.2
+## Version 3.2.0
 
 - one-command installation of Zapret, Zapret2, Happ and TG WS Proxy;
 - native Zapret and Zapret2 service control through `systemd` and `nftables`;
@@ -35,6 +38,10 @@ installer and tests were prepared by DosAi with help from **ChatGPT by OpenAI**.
 - Linux-only repository and release archives with legacy Windows payloads removed.
 - current Kali PolicyKit packages (`polkitd` and `pkexec`) instead of the removed
   `policykit-1` metapackage.
+- experimental Debian/Ubuntu, Fedora, Arch and openSUSE installer support;
+- verified official Happ packages in DEB, RPM and Arch formats;
+- distribution-container smoke tests for dependency names and installer detection;
+- corrected Linux `ping`, `/dev/null` and Happ version detection.
 
 ## Interface
 
@@ -52,7 +59,14 @@ installer and tests were prepared by DosAi with help from **ChatGPT by OpenAI**.
 The screenshots are generated from the development preview and contain no user
 configuration, subscriptions or credentials.
 
-## Install on Kali Linux
+## Install on systemd Linux
+
+Kali Linux remains the fully tested target. Debian/Ubuntu, Fedora, Arch and
+openSUSE support is experimental and covered by installer/container smoke tests.
+
+Zapret Hub Linux is not distributed through APT, DNF or AUR and does not ship
+separate DEB/RPM application packages. The supported installation method is to
+download the GitHub source tree and run the root `install.sh` script.
 
 ```bash
 git clone --depth 1 https://github.com/DosAi/Zapret-Hub-Linux.git && cd Zapret-Hub-Linux && ./install.sh
