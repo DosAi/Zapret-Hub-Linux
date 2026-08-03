@@ -152,7 +152,7 @@ class LinuxZapret2Service:
             if not pkexec:
                 return LinuxServiceResult(
                     "error",
-                    "pkexec was not found; install policykit-1 or run the command as root",
+                    "pkexec was not found; install the pkexec package or run the command as root",
                     self.service_name,
                     tuple(command),
                 )

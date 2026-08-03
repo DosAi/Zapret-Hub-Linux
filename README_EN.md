@@ -23,7 +23,7 @@ Zapret Hub Linux is an experimental fork with native Linux backends based on
 Zapret strategy and controlling optional components. Porting, debugging, the
 installer and tests were prepared by DosAi with help from **ChatGPT by OpenAI**.
 
-## Version 3.1.1
+## Version 3.1.2
 
 - one-command installation of Zapret, Zapret2, Happ and TG WS Proxy;
 - native Zapret and Zapret2 service control through `systemd` and `nftables`;
@@ -33,6 +33,8 @@ installer and tests were prepared by DosAi with help from **ChatGPT by OpenAI**.
 - local Telegram proxy plus a Telegram Desktop connection action;
 - narrowly scoped PolicyKit authorization installed once;
 - Linux-only repository and release archives with legacy Windows payloads removed.
+- current Kali PolicyKit packages (`polkitd` and `pkexec`) instead of the removed
+  `policykit-1` metapackage.
 
 ## Interface
 
