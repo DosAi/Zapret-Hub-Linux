@@ -43,7 +43,7 @@ case "$actual_family" in
     rhel)
         for package in "${deps[@]}"; do
             echo "Checking dependency: $package"
-            "$actual_manager" -q info "$package" >/dev/null
+            "$actual_manager" -q repoquery --whatprovides="$package" | grep -q .
         done
         ;;
     arch)
@@ -55,10 +55,8 @@ case "$actual_family" in
         ;;
     suse)
         zypper --non-interactive refresh
-        for package in "${deps[@]}"; do
-            echo "Checking dependency: $package"
-            zypper --non-interactive info "$package" >/dev/null
-        done
+        echo "Checking dependency transaction: ${deps[*]}"
+        zypper --non-interactive --no-refresh install --dry-run --no-recommends "${deps[@]}"
         ;;
 esac
 
