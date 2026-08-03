@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+DISTRO_LIB="$PROJECT_ROOT/scripts/lib/distro.sh"
 SYSTEM_HELPER="$PROJECT_ROOT/scripts/install_linux_system.sh"
 DRY_RUN=0
 LAUNCH=1
@@ -13,8 +14,11 @@ usage() {
 Usage: ./scripts/install_linux.sh [--dry-run] [--no-launch] [--with-telegram]
 
 Installs Zapret Hub, classic Zapret for Linux, bundled Zapret2, the
-official Happ client, and the bundled TG WS Proxy on Kali Linux.
-Other Debian-based systems are accepted but have not been tested.
+official Happ client, and the bundled TG WS Proxy on a supported Linux
+distribution (Kali/Debian/Ubuntu, Fedora, Arch and openSUSE families).
+The managed Zapret, Zapret2 and Happ services currently require systemd.
+Alpine/OpenRC is detected but deliberately rejected instead of leaving a
+partially working installation.
 Administrator authorization is requested once. Existing foreign Zapret
 installations and their configurations are preserved.
 EOF
@@ -36,19 +40,22 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 1
 fi
 
-if [[ ! -r /etc/os-release ]]; then
-  echo "Cannot identify this Linux distribution (/etc/os-release is missing)." >&2
+if [[ ! -r "$DISTRO_LIB" ]]; then
+  echo "The checkout is incomplete (scripts/lib/distro.sh is missing). Download or clone the complete fork instead of individual files." >&2
+  exit 1
+fi
+# shellcheck disable=SC1091
+. "$DISTRO_LIB"
+
+FAMILY="$(zh_distro_family)"
+if [[ "$FAMILY" == "unknown" ]]; then
+  echo "Cannot identify this Linux distribution (/etc/os-release is missing or not supported)." >&2
   exit 1
 fi
 
-# shellcheck disable=SC1091
-source /etc/os-release
-if [[ "${ID:-}" != "kali" && " ${ID_LIKE:-} " != *" debian "* && "${ID:-}" != "debian" ]]; then
-  echo "This automatic installer is intended for Kali/Debian Linux (found: ${ID:-unknown})." >&2
+if [[ "$FAMILY" == "alpine" ]]; then
+  echo "Alpine/OpenRC is not supported yet: the official Happ and PySide6 builds require a glibc/systemd-compatible environment." >&2
   exit 1
-fi
-if [[ "${ID:-}" != "kali" ]]; then
-  echo "WARNING: this fork has only been tested on Kali Linux; continuing in experimental mode." >&2
 fi
 
 if [[ ! -r "$SYSTEM_HELPER" || ! -r "$PROJECT_ROOT/runtime/zapret2/config.default" || ! -r "$PROJECT_ROOT/runtime/tg-ws-proxy/proxy/tg_ws_proxy.py" ]]; then
@@ -56,11 +63,23 @@ if [[ ! -r "$SYSTEM_HELPER" || ! -r "$PROJECT_ROOT/runtime/zapret2/config.defaul
   exit 1
 fi
 
+if ! zh_is_systemd; then
+  if (( DRY_RUN )); then
+    echo "WARNING: systemd is not active; this is only a package/distro preview." >&2
+  else
+    echo "systemd is required to manage Zapret, Zapret2 and Happ. Installation was not changed." >&2
+    exit 1
+  fi
+fi
+
 helper_args=(--project-root "$PROJECT_ROOT")
 (( INSTALL_TELEGRAM == 1 )) && helper_args+=(--with-telegram)
 
 if (( DRY_RUN )); then
   echo "Zapret Hub installation preview for: $PROJECT_ROOT"
+  echo "Distribution: $(zh_os_name)"
+  echo "Package family: $FAMILY"
+  echo "Package manager: $(zh_pkg_manager)"
   /bin/sh "$SYSTEM_HELPER" "${helper_args[@]}" --dry-run
   echo "[dry-run] create $PROJECT_ROOT/.venv and install the Python application"
   echo "[dry-run] verify bundled TG WS Proxy and its Python dependencies"
@@ -84,7 +103,7 @@ else
   exit 1
 fi
 
-echo "Administrator authorization is needed once for packages, Zapret, Zapret2, Happ, systemd, and PolicyKit."
+echo "Administrator authorization is needed once for packages, Zapret, Zapret2, Happ, and system integration."
 "${elevate[@]}" /bin/sh "$SYSTEM_HELPER" "${helper_args[@]}"
 
 cd "$PROJECT_ROOT"

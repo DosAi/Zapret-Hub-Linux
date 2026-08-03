@@ -1,7 +1,9 @@
 # Contributing to Zapret Hub Linux
 
-Thank you for helping improve the project. The fork is Linux-only and is currently
-tested only on Kali Linux.
+Thank you for helping improve the project. The fork is Linux-only. Full
+functional testing currently targets Kali Linux; installer support for
+Debian/Ubuntu, Fedora, Arch and openSUSE is experimental and covered by
+distribution-container smoke tests.
 
 ## Before opening a change
 
@@ -32,7 +34,9 @@ bash -n install.sh scripts/*.sh
 ```
 
 Do not start, stop or restart networking services as part of automated tests.
-Describe any manual Kali Linux verification in the pull request.
+Describe the distribution and version used for any manual verification. Testing
+on Kali Linux is especially valuable; reports from the experimental
+Debian/Ubuntu, Fedora, Arch and openSUSE paths are also welcome.
 
 ## Pull requests
 

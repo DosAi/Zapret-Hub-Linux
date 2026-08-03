@@ -11,6 +11,23 @@ ROOT_INSTALLER = PROJECT_ROOT / "install.sh"
 USER_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux.sh"
 SYSTEM_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_system.sh"
 HAPP_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_happ.sh"
+DISTRO_LIB = PROJECT_ROOT / "scripts" / "lib" / "distro.sh"
+
+
+def _sh(source: str) -> str:
+    result = subprocess.run(
+        ["sh", "-c", f". scripts/lib/distro.sh; {source}"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    )
+    return result.stdout.strip()
+
+
+def _detected_deps() -> list[str]:
+    return _sh("zh_deps").split()
 
 
 def test_linux_installer_dry_run_is_complete_and_non_mutating() -> None:
@@ -25,13 +42,12 @@ def test_linux_installer_dry_run_is_complete_and_non_mutating() -> None:
 
     assert result.returncode == 0, result.stderr
     output = result.stdout
-    assert "python3-venv" in output
-    assert "nodejs npm" in output
-    assert "polkitd pkexec nftables" in output
+    for dep in _detected_deps():
+        assert dep in output, f"missing package {dep!r} in dry-run output"
     assert "policykit-1" not in output
     assert "curl git tar gzip" in output
-    apt_line = next(line for line in output.splitlines() if "apt-get install" in line)
-    assert "telegram-desktop" not in apt_line
+    install_line = next(line for line in output.splitlines() if " install -y " in line)
+    assert "telegram-desktop" not in install_line
     assert "install classic Zapret for Linux release 0.5.0" in output
     assert "verify classic Zapret source archive SHA-256" in output
     assert "install bundled Zapret2" in output
@@ -53,8 +69,24 @@ def test_linux_installer_can_install_telegram_explicitly() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    apt_line = next(line for line in result.stdout.splitlines() if "apt-get install" in line)
-    assert "telegram-desktop" in apt_line
+    assert "telegram-desktop" in result.stdout
+
+
+def test_linux_installer_rejects_alpine_instead_of_partial_install(tmp_path: Path) -> None:
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=alpine\nPRETTY_NAME="Alpine test"\n', encoding="utf-8")
+    result = subprocess.run(
+        [str(USER_INSTALLER), "--dry-run", "--no-launch"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+        env={**os.environ, "ZH_OS_RELEASE": str(os_release)},
+    )
+
+    assert result.returncode != 0
+    assert "Alpine/OpenRC is not supported yet" in result.stderr
 
 
 def test_system_installer_never_changes_live_network_service_state() -> None:
@@ -64,16 +96,16 @@ def test_system_installer_never_changes_live_network_service_state() -> None:
     ).read_text(encoding="utf-8")
     happ_helper = HAPP_INSTALLER.read_text(encoding="utf-8")
 
-    assert re.search(r"^systemctl daemon-reload$", script, re.MULTILINE)
-    assert not re.search(r"^systemctl (?:enable|disable)", script, re.MULTILINE)
-    assert not re.search(r"^systemctl (?:start|stop|restart)", script, re.MULTILINE)
+    assert re.search(r"^\s*systemctl daemon-reload$", script, re.MULTILINE)
+    assert not re.search(r"^\s*systemctl (?:enable|disable)", script, re.MULTILINE)
+    assert not re.search(r"^\s*systemctl (?:start|stop|restart)", script, re.MULTILINE)
     assert not re.search(
-        r"^systemctl (?:enable|disable|start|stop|restart)", classic_helper, re.MULTILINE
+        r"^\s*systemctl (?:enable|disable|start|stop|restart)", classic_helper, re.MULTILINE
     )
     assert not re.search(r"\b(?:nmcli|wg-quick|openvpn)\b", script)
     assert not re.search(r"\b(?:nmcli|wg-quick|openvpn)\b", classic_helper)
     assert not re.search(
-        r"^systemctl (?:enable|disable|stop|restart)", happ_helper, re.MULTILINE
+        r"^\s*systemctl (?:enable|disable|stop|restart)", happ_helper, re.MULTILINE
     )
     assert not re.search(r"\b(?:nmcli|wg-quick|openvpn)\b", happ_helper)
 
@@ -91,6 +123,7 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
         PROJECT_ROOT / "runtime" / "tg-ws-proxy" / "proxy" / "stats.py",
         PROJECT_ROOT / "scripts" / "install_linux_classic_zapret.sh",
         HAPP_INSTALLER,
+        DISTRO_LIB,
         PROJECT_ROOT / "packaging" / "linux" / "zapret_discord_youtube.service.in",
         PROJECT_ROOT / "packaging" / "polkit" / "49-zapret-hub.rules",
         PROJECT_ROOT / "packaging" / "linux" / "zapret-hosts-user.txt",
@@ -151,5 +184,21 @@ def test_happ_package_is_pinned_and_verified() -> None:
     assert "HAPP_VERSION=3.3.6" in helper
     assert "a7dac51277387bfe1049b1ad40f40f2e74af233a5eab020b5be1a622effc46a4" in helper
     assert "a4d3d6dcab1db61db23cdf0f86bce736014887262b570927befe48cb49f14aa6" in helper
+    assert "bf7078723cd0761ea929edbc75fb6d10464920691f7cdcec47579254c3410d9b" in helper
+    assert "300c762a2e6d08773b6f4432f207f7dcb42ade8c2565738a06b4c18dfa2b3b94" in helper
+    assert "30eafd999ad5a99c7cb8ea780c4269f7fe6c4eedb1df50234e4fb44aa0c7d8a7" in helper
+    assert "25c8ea919902d6ed6deabf82b49184bbf5626fff88e4956cf65e5327388f28eb" in helper
     assert "sha256sum -c -" in helper
+    assert 'PACKAGE_SUFFIX=.deb' in helper
+    assert 'PACKAGE_SUFFIX=.rpm' in helper
+    assert 'PACKAGE_SUFFIX=.pkg.tar.zst' in helper
     assert "preserving it without restart or upgrade" in helper
+
+
+def test_network_probes_use_native_linux_arguments() -> None:
+    components = (PROJECT_ROOT / "src" / "zapret_hub" / "services" / "components.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'output_sink = "NUL" if sys.platform.startswith("win") else "/dev/null"' in components
+    assert '["ping", "-c", "1", "-W", "3", host]' in components

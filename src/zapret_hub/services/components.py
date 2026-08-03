@@ -5711,6 +5711,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         curl_path = shutil.which("curl.exe") or shutil.which("curl")
         if not curl_path:
             return False
+        output_sink = "NUL" if sys.platform.startswith("win") else "/dev/null"
         proc = self._run_quiet(
             [
                 curl_path,
@@ -5721,7 +5722,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "-m",
                 "3",
                 "-o",
-                "NUL",
+                output_sink,
                 "-w",
                 "%{http_code}",
                 "--show-error",
@@ -5735,7 +5736,10 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def _ping_target(self, host: str) -> bool:
         if not host:
             return False
-        proc = self._run_quiet(["ping", "-n", "1", "-w", "1200", host])
+        if sys.platform.startswith("win"):
+            proc = self._run_quiet(["ping", "-n", "1", "-w", "1200", host])
+        else:
+            proc = self._run_quiet(["ping", "-c", "1", "-W", "3", host])
         return proc.returncode == 0
 
     def _ensure_zapret_user_lists(self, lists_dir: Path) -> None:

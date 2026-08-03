@@ -46,7 +46,12 @@ class LinuxHappService:
         platform_name: str = sys.platform,
     ) -> None:
         self._executable_candidates = tuple(
-            executable_candidates or (Path("/usr/bin/happ"), Path("/opt/happ/bin/Happ"))
+            executable_candidates
+            or (
+                Path("/usr/bin/happ"),
+                Path("/usr/local/bin/happ"),
+                Path("/opt/happ/bin/Happ"),
+            )
         )
         self._runner = runner
         self._popen = popen
@@ -122,13 +127,22 @@ class LinuxHappService:
 
     def version(self) -> str:
         dpkg_query = self._which("dpkg-query")
-        if not dpkg_query:
-            return ""
-        result = self._run(
-            [dpkg_query, "-W", "-f=${Version}", "happ"],
-            timeout=5,
-        )
-        return (result.stdout or "").strip() if result.returncode == 0 else ""
+        if dpkg_query:
+            result = self._run([dpkg_query, "-W", "-f=${Version}", "happ"], timeout=5)
+            if result.returncode == 0:
+                return (result.stdout or "").strip()
+        rpm = self._which("rpm")
+        if rpm:
+            result = self._run([rpm, "-q", "--qf", "%{VERSION}-%{RELEASE}", "happ"], timeout=5)
+            if result.returncode == 0:
+                return (result.stdout or "").strip()
+        pacman = self._which("pacman")
+        if pacman:
+            result = self._run([pacman, "-Q", "happ"], timeout=5)
+            if result.returncode == 0:
+                fields = (result.stdout or "").strip().split()
+                return fields[-1] if fields else ""
+        return ""
 
     def diagnose(self) -> dict[str, object]:
         state = self.status()

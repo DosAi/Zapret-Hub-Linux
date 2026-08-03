@@ -1,10 +1,13 @@
 // Allow local administrators to control the two Zapret services and start
 // Happ's daemon when the user explicitly connects.
+// Both the Debian/Kali "sudo" group and the Fedora/RHEL/Arch "wheel" group are
+// recognized as administrator groups.
 // The command line check is intentionally exact: no other systemctl command
 // receives passwordless elevation through pkexec.
 polkit.addRule(function(action, subject) {
     if (action.id !== "org.freedesktop.policykit.exec" ||
-        !subject.local || !subject.active || !subject.isInGroup("sudo")) {
+        !subject.local || !subject.active ||
+        (!subject.isInGroup("sudo") && !subject.isInGroup("wheel"))) {
         return polkit.Result.NOT_HANDLED;
     }
 

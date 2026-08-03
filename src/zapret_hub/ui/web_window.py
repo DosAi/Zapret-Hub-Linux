@@ -4274,10 +4274,10 @@ class WebMainWindow(QMainWindow):
 
         payload = {
             "currentVersion": str(__version__),
-            "latestVersion": "3.1.2",
+            "latestVersion": "3.2.0",
             "changelog": (
                 "• Автоустановка Zapret, Zapret 2, Happ и TG WS Proxy\n"
-                "• Нативные Kali Linux-бэкенды Zapret и Zapret 2\n"
+                "• Установщик для systemd-дистрибутивов Linux\n"
                 "• Независимый Happ параллельно с Zapret/Zapret 2\n"
                 "• Локальный TG WS Proxy и отдельные тумблеры\n"
                 "• Одноразовая авторизация и безопасные PolicyKit-правила"

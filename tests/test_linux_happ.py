@@ -100,6 +100,30 @@ def test_open_uses_official_open_deeplink(tmp_path: Path) -> None:
     assert popen.commands == [[str(executable.resolve()), "happ://open"]]
 
 
+def test_version_falls_back_to_rpm() -> None:
+    def runner(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 0, "3.3.6-1\n", "")
+
+    service = LinuxHappService(
+        runner=runner,
+        which=lambda name: "/usr/bin/rpm" if name == "rpm" else None,
+    )
+
+    assert service.version() == "3.3.6-1"
+
+
+def test_version_falls_back_to_pacman() -> None:
+    def runner(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 0, "happ 3.3.6-1\n", "")
+
+    service = LinuxHappService(
+        runner=runner,
+        which=lambda name: "/usr/bin/pacman" if name == "pacman" else None,
+    )
+
+    assert service.version() == "3.3.6-1"
+
+
 def test_linux_happ_start_does_not_stop_zapret_services() -> None:
     manager = ProcessManager.__new__(ProcessManager)
     manager._linux_happ = SimpleNamespace(
