@@ -36,24 +36,28 @@ case "$actual_family" in
     debian)
         apt-get update -qq
         for package in "${deps[@]}"; do
+            echo "Checking dependency: $package"
             apt-cache show "$package" >/dev/null
         done
         ;;
     rhel)
         for package in "${deps[@]}"; do
+            echo "Checking dependency: $package"
             "$actual_manager" -q info "$package" >/dev/null
         done
         ;;
     arch)
         pacman -Sy --noconfirm >/dev/null
         for package in "${deps[@]}"; do
+            echo "Checking dependency: $package"
             pacman -Si "$package" >/dev/null
         done
         ;;
     suse)
-        zypper --non-interactive --quiet refresh
+        zypper --non-interactive refresh
         for package in "${deps[@]}"; do
-            zypper --non-interactive --quiet info "$package" >/dev/null
+            echo "Checking dependency: $package"
+            zypper --non-interactive info "$package" >/dev/null
         done
         ;;
 esac
