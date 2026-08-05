@@ -118,6 +118,55 @@ zh_pkg_manager() {
     esac
 }
 
+# Print the packages already requested (layered) in the booted rpm-ostree
+# deployment, one per line. rpm-ostree aborts with "Package ... is already
+# requested" when a previously layered package is requested again, which is
+# exactly what the second (post-reboot) installer run does on immutable
+# Fedora derivatives.
+_zh_atomic_requested() {
+    rpm-ostree status --json 2>/dev/null | awk '
+        /"requested-packages" : \[/ { capture = 1; next }
+        capture && /^      \],?$/ { exit }
+        capture && /^        ".*/ {
+            line = $0
+            sub(/^[[:space:]]*"/, "", line)
+            sub(/",?[[:space:]]*$/, "", line)
+            print line
+        }
+    '
+}
+
+# Print the locally requested (locally layered) packages of the booted
+# rpm-ostree deployment, one per line. These are versioned entries such as
+# happ-3.3.6-301.x86_64.
+_zh_atomic_requested_local() {
+    rpm-ostree status --json 2>/dev/null | awk '
+        /"requested-local-packages" : \[/ { capture = 1; next }
+        capture && /^      \],?$/ { exit }
+        capture && /^        ".*/ {
+            line = $0
+            sub(/^[[:space:]]*"/, "", line)
+            sub(/",?[[:space:]]*$/, "", line)
+            print line
+        }
+    '
+}
+
+# Echo the subset of "$@" that is not already requested in the booted
+# rpm-ostree deployment, space separated. Intentionally leaves the request
+# list untouched so that the post-reboot run of the installer layers nothing.
+_zh_atomic_remaining() {
+    requested=$(_zh_atomic_requested || true)
+    remaining=
+    for pkg in "$@"; do
+        if printf '%s\n' "$requested" | grep -Fxq -- "$pkg"; then
+            continue
+        fi
+        remaining="$remaining $pkg"
+    done
+    printf '%s\n' "$remaining"
+}
+
 # Refresh the package index. Run as root.
 zh_pkg_update() {
     case "$(zh_distro_family)" in
@@ -142,7 +191,11 @@ zh_pkg_install() {
         debian) apt-get install -y "$@" ;;
         rhel)
             if zh_is_atomic; then
-                rpm-ostree install "$@"
+                remaining=$(_zh_atomic_remaining "$@")
+                if [ -n "$remaining" ]; then
+                    # shellcheck disable=SC2086
+                    rpm-ostree install $remaining
+                fi
             else
                 $(_zh_rhel_manager) install -y "$@"
             fi
@@ -163,7 +216,14 @@ zh_pkg_install_local() {
         debian) apt-get install -y "$pkg_file" ;;
         rhel)
             if zh_is_atomic; then
-                rpm-ostree install "$pkg_file"
+                name=$(rpm -qp --qf '%{NAME}' "$pkg_file" 2>/dev/null || true)
+                if [ -n "$name" ] && zh_pkg_installed "$name"; then
+                    echo "Package $name is already layered and active; skipping $pkg_file."
+                elif [ -n "$name" ] && _zh_atomic_requested_local | grep -Fq -- "$name-"; then
+                    echo "Package $name is already requested for the next boot; skipping $pkg_file."
+                else
+                    rpm-ostree install "$pkg_file"
+                fi
             else
                 $(_zh_rhel_manager) install -y "$pkg_file"
             fi
@@ -182,7 +242,12 @@ zh_pkg_install_cmd() {
         debian) echo "apt-get install -y $*" ;;
         rhel)
             if zh_is_atomic; then
-                echo "rpm-ostree install $*"
+                remaining=$(_zh_atomic_remaining "$@")
+                if [ -n "$remaining" ]; then
+                    echo "rpm-ostree install$remaining"
+                else
+                    echo "rpm-ostree (all requested packages already layered)"
+                fi
             else
                 echo "$(_zh_rhel_manager) install -y $*"
             fi
