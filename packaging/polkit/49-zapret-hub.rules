@@ -33,18 +33,19 @@ polkit.addRule(function(action, subject) {
     // Strategy writes only for the Hub-managed install roots; the filename is
     // restricted to plain .bat names so the helper can never touch other files.
     if (action.lookup("program") === "/usr/local/sbin/zapret-hub-set-strategy") {
-        var strategyLine = action.lookup("command_line");
-        var strategyPrefixes = [
-            "/usr/local/sbin/zapret-hub-set-strategy /opt/zapret-discord-youtube-linux/conf.env ",
-            "/usr/local/sbin/zapret-hub-set-strategy /opt/zapret-hub/zapret-discord-youtube-linux/conf.env "
-        ];
-        for (var i = 0; i < strategyPrefixes.length; i++) {
-            if (strategyLine.indexOf(strategyPrefixes[i]) === 0) {
-                var strategyName = strategyLine.slice(strategyPrefixes[i].length);
-                if (/^[A-Za-z0-9_. ()-]+\.bat$/.test(strategyName)) {
-                    return polkit.Result.YES;
-                }
-            }
+        var strategyRe = /^\/usr\/local\/sbin\/zapret-hub-set-strategy \/(opt\/zapret-discord-youtube-linux|opt\/zapret-hub\/zapret-discord-youtube-linux|home\/[A-Za-z0-9_-]+\/zapret-discord-youtube-linux|home\/[A-Za-z0-9_-]+\/Apps\/zapret-discord-youtube-linux|var\/home\/[A-Za-z0-9_-]+\/zapret-discord-youtube-linux|var\/home\/[A-Za-z0-9_-]+\/Apps\/zapret-discord-youtube-linux)\/conf\.env ([A-Za-z0-9_. ()-]+\.bat)$/;
+        if (strategyRe.test(action.lookup("command_line"))) {
+            return polkit.Result.YES;
+        }
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    // Recreate the classic Zapret unit when the Power button finds it missing.
+    // The helper re-validates the root and only writes the fixed unit file.
+    if (action.lookup("program") === "/usr/local/sbin/zapret-hub-install-classic-unit") {
+        var unitRe = /^\/usr\/local\/sbin\/zapret-hub-install-classic-unit \/(opt\/zapret-discord-youtube-linux|opt\/zapret-hub\/zapret-discord-youtube-linux|opt\/zapret-discord-youtube|home\/[A-Za-z0-9_-]+\/zapret-discord-youtube-linux|home\/[A-Za-z0-9_-]+\/Apps\/zapret-discord-youtube-linux|var\/home\/[A-Za-z0-9_-]+\/zapret-discord-youtube-linux|var\/home\/[A-Za-z0-9_-]+\/Apps\/zapret-discord-youtube-linux)$/;
+        if (unitRe.test(action.lookup("command_line"))) {
+            return polkit.Result.YES;
         }
         return polkit.Result.NOT_HANDLED;
     }

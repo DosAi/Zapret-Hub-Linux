@@ -219,7 +219,8 @@ class LinuxZapretService(LinuxZapret2Service):
     """Control an existing zapret-discord-youtube-linux systemd install.
 
     The external project remains responsible for its strategy, lists and
-    nftables rules.  Zapret Hub only controls the already-installed unit.
+    nftables rules.  Zapret Hub controls the unit and (re)creates it through
+    the narrow ``zapret-hub-install-classic-unit`` helper when it is missing.
     """
 
     def __init__(
@@ -266,12 +267,17 @@ class LinuxZapretService(LinuxZapret2Service):
                 return resolved
         return first_readable
 
+    def _systemd_unit_paths(self) -> tuple[Path, ...]:
+        return (
+            Path("/etc/systemd/system") / self.service_name,
+            Path("/usr/lib/systemd/system") / self.service_name,
+        )
+
     def _unit_working_directory(self) -> Path | None:
         """Resolve the install root from the systemd unit Zapret Hub controls."""
         if not self.supported:
             return None
-        for unit_dir in (Path("/etc/systemd/system"), Path("/usr/lib/systemd/system")):
-            unit_file = unit_dir / self.service_name
+        for unit_file in self._systemd_unit_paths():
             try:
                 lines = unit_file.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
@@ -287,6 +293,71 @@ class LinuxZapretService(LinuxZapret2Service):
                 if path.is_dir():
                     return path.resolve()
         return None
+
+    def _find_helper(self, name: str) -> str | None:
+        """Locate a root-only helper, including sbin dirs missing from user PATH."""
+        found = self._which(name)
+        if found:
+            return found
+        for candidate in (Path("/usr/local/sbin") / name, Path("/usr/sbin") / name):
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def _ensure_unit_installed(self) -> LinuxServiceResult | None:
+        """Install the managed classic unit through the helper when missing.
+
+        Returns ``None`` when there is nothing to install (already present or
+        no usable install root discovered); otherwise the helper outcome.
+        """
+        if not self.supported:
+            return None
+        for unit_file in self._systemd_unit_paths():
+            if unit_file.exists():
+                return None
+        base = self.discover_root()
+        if base is None:
+            return None
+        helper = self._find_helper("zapret-hub-install-classic-unit")
+        if helper is None:
+            return LinuxServiceResult(
+                "error",
+                "zapret-hub-install-classic-unit helper is missing; run scripts/install_linux.sh",
+                self.service_name,
+            )
+        command = [helper, str(base)]
+        if not self._is_root():
+            pkexec = self._which("pkexec")
+            if pkexec is None:
+                return LinuxServiceResult(
+                    "error",
+                    "pkexec was not found; install the pkexec package or run the command as root",
+                    self.service_name,
+                )
+            command.insert(0, pkexec)
+        result = self._run(command, timeout=90)
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "unit install failed").strip()
+            return LinuxServiceResult(
+                "error", message, self.service_name, tuple(command), result.returncode
+            )
+        return LinuxServiceResult(
+            "ok", "unit installed", self.service_name, tuple(command), result.returncode
+        )
+
+    def start(self, *, dry_run: bool = False) -> LinuxServiceResult:
+        if not dry_run:
+            ensure = self._ensure_unit_installed()
+            if ensure is not None and ensure.status == "error":
+                return ensure
+        return super().start(dry_run=dry_run)
+
+    def restart(self, *, dry_run: bool = False) -> LinuxServiceResult:
+        if not dry_run:
+            ensure = self._ensure_unit_installed()
+            if ensure is not None and ensure.status == "error":
+                return ensure
+        return super().restart(dry_run=dry_run)
 
     def strategy_files(self, root: Path | None = None) -> list[Path]:
         """Resolved paths of available strategy scripts, custom strategies win.

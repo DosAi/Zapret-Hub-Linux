@@ -58,6 +58,7 @@ CLASSIC_HELPER="$PROJECT_ROOT/scripts/install_linux_classic_zapret.sh"
 HAPP_HELPER="$PROJECT_ROOT/scripts/install_linux_happ.sh"
 POLKIT_SOURCE="$PROJECT_ROOT/packaging/polkit/49-zapret-hub.rules"
 STRATEGY_HELPER_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hub-set-strategy.sh"
+UNIT_HELPER_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hub-install-classic-unit.sh"
 HOSTLIST_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hosts-user.txt"
 
 for required in \
@@ -69,6 +70,7 @@ for required in \
     "$HAPP_HELPER" \
     "$POLKIT_SOURCE" \
     "$STRATEGY_HELPER_SOURCE" \
+    "$UNIT_HELPER_SOURCE" \
     "$HOSTLIST_SOURCE"
 do
     [ -r "$required" ] || { echo "Required installation file is missing: $required" >&2; exit 1; }
@@ -104,6 +106,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     if zh_is_systemd; then
         echo "[dry-run] install zapret2.service without starting or restarting it"
         echo "[dry-run] install /usr/local/sbin/zapret-hub-set-strategy (root-only strategy helper)"
+        echo "[dry-run] install /usr/local/sbin/zapret-hub-install-classic-unit (root-only unit helper)"
         echo "[dry-run] install /etc/polkit-1/rules.d/49-zapret-hub.rules"
     else
         echo "[dry-run] systemd not found; skip service units and the PolicyKit rule"
@@ -211,6 +214,9 @@ if zh_is_systemd; then
     install -o root -g root -m 0755 \
         "$STRATEGY_HELPER_SOURCE" \
         /usr/local/sbin/zapret-hub-set-strategy
+    install -o root -g root -m 0755 \
+        "$UNIT_HELPER_SOURCE" \
+        /usr/local/sbin/zapret-hub-install-classic-unit
 
     systemctl daemon-reload
     echo "System integration (systemd and PolicyKit) is ready. No network service was started, stopped, restarted, enabled, or disabled."

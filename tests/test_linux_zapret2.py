@@ -269,6 +269,13 @@ def _classic_service(tmp_path: Path, runner=None) -> LinuxZapretService:
     )
 
 
+def _present_unit(tmp_path: Path) -> Path:
+    unit_file = tmp_path / "unit" / "zapret_discord_youtube.service"
+    unit_file.parent.mkdir(parents=True)
+    unit_file.write_text("[Unit]\n", encoding="utf-8")
+    return unit_file
+
+
 def test_classic_zapret_lists_strategies_in_upstream_order(tmp_path: Path) -> None:
     service = _classic_service(tmp_path)
 
@@ -368,7 +375,9 @@ def test_classic_zapret_apply_strategy_elevates_via_helper_for_root_owned_file(
     ]
 
 
-def test_classic_zapret_restart_maps_to_running(tmp_path: Path) -> None:
+def test_classic_zapret_restart_maps_to_running(tmp_path: Path, monkeypatch) -> None:
+    unit_file = _present_unit(tmp_path)
+    monkeypatch.setattr(LinuxZapretService, "_systemd_unit_paths", lambda self: (unit_file,))
     runner = FakeRunner([(0, "", ""), (0, "active\n", "")])
     service = _classic_service(tmp_path, runner=runner)
 
@@ -451,8 +460,12 @@ def test_process_manager_linux_general_diagnostics_keeps_current_when_stopped(tm
     assert service_current_strategy(manager) == "general_alt2.bat"
 
 
-def test_process_manager_linux_general_diagnostics_live_test_keeps_winner(tmp_path: Path) -> None:
+def test_process_manager_linux_general_diagnostics_live_test_keeps_winner(
+    tmp_path: Path, monkeypatch
+) -> None:
     root = _classic_root(tmp_path)
+    unit_file = _present_unit(tmp_path)
+    monkeypatch.setattr(LinuxZapretService, "_systemd_unit_paths", lambda self: (unit_file,))
     runner = FakeRunner(
         [
             (0, "active\n", ""),  # initial status
@@ -486,3 +499,88 @@ def test_process_manager_linux_general_diagnostics_live_test_keeps_winner(tmp_pa
 
 def service_current_strategy(manager: ProcessManager) -> str:
     return str(manager._linux_zapret.current_strategy())
+
+
+def _which_with_unit_helper(name: str) -> str | None:
+    paths = {
+        "systemctl": "/usr/bin/systemctl",
+        "pkexec": "/usr/bin/pkexec",
+        "pgrep": "/usr/bin/pgrep",
+        "nft": "/usr/sbin/nft",
+        "zapret-hub-install-classic-unit": "/usr/local/sbin/zapret-hub-install-classic-unit",
+    }
+    return paths.get(name)
+
+
+def test_classic_zapret_start_installs_missing_unit(tmp_path: Path, monkeypatch) -> None:
+    root = _classic_root(tmp_path)
+    unit_file = tmp_path / "unit" / "zapret_discord_youtube.service"
+    unit_file.parent.mkdir(parents=True)
+    monkeypatch.setattr(LinuxZapretService, "_systemd_unit_paths", lambda self: (unit_file,))
+    runner = FakeRunner(
+        [
+            (0, "", ""),  # helper install
+            (0, "", ""),  # systemctl start
+            (0, "active\n", ""),  # status verification
+        ]
+    )
+    service = LinuxZapretService(
+        root_candidates=(root,),
+        runner=runner,
+        which=_which_with_unit_helper,
+        geteuid=lambda: 1000,
+        platform_name="linux",
+    )
+
+    result = service.start()
+
+    assert result.status == "running"
+    assert runner.commands == [
+        ["/usr/bin/pkexec", "/usr/local/sbin/zapret-hub-install-classic-unit", str(root)],
+        ["/usr/bin/pkexec", "/usr/bin/systemctl", "start", "zapret_discord_youtube.service"],
+        ["/usr/bin/systemctl", "is-active", "zapret_discord_youtube.service"],
+    ]
+
+
+def test_classic_zapret_start_skips_install_when_unit_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _classic_root(tmp_path)
+    unit_file = tmp_path / "unit" / "zapret_discord_youtube.service"
+    unit_file.parent.mkdir(parents=True)
+    unit_file.write_text("[Unit]\n", encoding="utf-8")
+    monkeypatch.setattr(LinuxZapretService, "_systemd_unit_paths", lambda self: (unit_file,))
+    runner = FakeRunner([(0, "", ""), (0, "active\n", "")])
+    service = LinuxZapretService(
+        root_candidates=(root,),
+        runner=runner,
+        which=_which_with_unit_helper,
+        geteuid=lambda: 1000,
+        platform_name="linux",
+    )
+
+    result = service.start()
+
+    assert result.status == "running"
+    assert runner.commands == [
+        ["/usr/bin/pkexec", "/usr/bin/systemctl", "start", "zapret_discord_youtube.service"],
+        ["/usr/bin/systemctl", "is-active", "zapret_discord_youtube.service"],
+    ]
+
+
+def test_classic_zapret_start_reports_missing_unit_helper(tmp_path: Path) -> None:
+    root = _classic_root(tmp_path)
+    runner = FakeRunner([])
+    service = LinuxZapretService(
+        root_candidates=(root,),
+        runner=runner,
+        which=_which,
+        geteuid=lambda: 1000,
+        platform_name="linux",
+    )
+
+    result = service.start()
+
+    assert result.status == "error"
+    assert "zapret-hub-install-classic-unit" in result.message
+    assert runner.commands == []
