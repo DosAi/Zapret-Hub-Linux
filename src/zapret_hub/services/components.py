@@ -350,7 +350,7 @@ class ProcessManager:
 
     def list_zapret_generals(self) -> list[dict[str, str]]:
         if self._linux_zapret2 is not None:
-            return []
+            return self._list_linux_zapret_generals()
         options: list[dict[str, str]] = []
         bundles = self._get_zapret_bundles(enabled_only=True, include_hidden_generals=True)
         selected_services = {str(item) for item in list(self.settings.get().selected_service_ids or [])}
@@ -375,6 +375,64 @@ class ProcessManager:
                     }
                 )
         return sorted(options, key=self._general_option_sort_key)
+
+    def _list_linux_zapret_generals(self) -> list[dict[str, str]]:
+        if self._linux_zapret is None:
+            return []
+        try:
+            names = self._linux_zapret.list_strategies()
+        except Exception:
+            return []
+        options: list[dict[str, str]] = []
+        for name in names:
+            path = self._linux_zapret.strategy_path(name)
+            options.append(
+                {
+                    "id": f"classic|{name}",
+                    "name": name,
+                    "bundle": "Classic Zapret",
+                    "bundle_id": "classic",
+                    "path": str(path) if path else "",
+                }
+            )
+        return sorted(options, key=self._general_option_sort_key)
+
+    def current_zapret_general(self) -> str:
+        """Id of the strategy currently active in the managed classic install."""
+        if self._linux_zapret is None:
+            return ""
+        try:
+            current = self._linux_zapret.current_strategy()
+        except Exception:
+            return ""
+        return f"classic|{current}" if current else ""
+
+    def apply_zapret_general(self, general_id: str) -> bool:
+        """Persist the chosen strategy into the managed classic install's conf.env."""
+        if self._linux_zapret is None:
+            return True
+        options = {str(item.get("id", "")): item for item in self.list_zapret_generals()}
+        option = options.get(str(general_id or ""))
+        if option is None:
+            return False
+        result = None
+        try:
+            result = self._linux_zapret.apply_strategy(str(option.get("name", "")))
+            ok = result.status == "ok"
+        except Exception:
+            ok = False
+        self.logging.log(
+            "info" if ok else "error",
+            "Classic Zapret strategy apply",
+            strategy=str(option.get("name", "")),
+            status=str(result.status) if result is not None else "error",
+            message=str(result.message) if result is not None else "apply failed",
+        )
+        return ok
+
+    @property
+    def linux_backend_available(self) -> bool:
+        return self._linux_zapret is not None
 
     def prompt_telegram_proxy_link(self) -> None:
         settings = self.settings.get()
@@ -2050,7 +2108,12 @@ foreach ($adapter in @($payload.adapters)) {
     def _start_linux_zapret(self, component_id: str) -> ComponentState:
         if self._linux_zapret is None:
             return ComponentState(component_id=component_id, status="error", last_error="Linux backend is unavailable")
-        result = self._linux_zapret.start()
+        # A running systemd service ignores plain "start"; restart it so freshly
+        # written conf.env strategy/interface options actually take effect.
+        if self._linux_zapret.status().status == "running":
+            result = self._linux_zapret.restart()
+        else:
+            result = self._linux_zapret.start()
         state = ComponentState(
             component_id=component_id,
             status=result.status if result.status in {"running", "stopped"} else "error",
@@ -3426,6 +3489,10 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             self.settings.update(goshkow_vpn_pending_start=False)
         except Exception:
             pass
+        if self._linux_zapret is not None:
+            # Linux classic Zapret is a systemd unit; restart it so a freshly
+            # written conf.env strategy is picked up.
+            return self._start_linux_zapret("zapret")
         slot_b = self.stage_zapret_candidate_runtime()
         return self._cutover_to_zapret_runtime(slot_b)
 
@@ -4226,6 +4293,13 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         progress_callback: callable | None = None,
         stop_callback: callable | None = None,
     ) -> dict[str, object]:
+        if self._linux_zapret2 is not None:
+            return {
+                "status": "error",
+                "error": "Диагностика стратегий доступна только в Windows-версии Zapret Hub.",
+                "passed_targets": 0,
+                "total_targets": 0,
+            }
         options = {item["id"]: item for item in self.list_zapret_generals()}
         option = options.get(general_id)
         if option is None:
@@ -4268,6 +4342,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         progress_callback: callable | None = None,
         stop_callback: callable | None = None,
     ) -> list[dict[str, str]]:
+        if self._linux_zapret2 is not None:
+            return []
         options = self.list_zapret_generals()
         options = prioritize_generals_for_services(options, self.settings.get().selected_service_ids)
         if not options:

@@ -199,3 +199,190 @@ def test_storage_reads_version_from_installed_linux_zapret2(
     storage = StorageManager(SimpleNamespace(runtime_dir=tmp_path / "runtime"))
 
     assert storage._detect_zapret2_version() == "2026-07-31 (569297c)"
+
+
+def _classic_root(tmp_path: Path) -> Path:
+    root = tmp_path / "classic"
+    repo = root / "zapret-latest"
+    custom = root / "custom-strategies"
+    repo.mkdir(parents=True)
+    custom.mkdir(parents=True)
+    (root / "nfqws").write_text("binary", encoding="utf-8")
+    (repo / "general.bat").write_text("", encoding="utf-8")
+    (repo / "general_alt2.bat").write_text("", encoding="utf-8")
+    (repo / "service.bat").write_text("", encoding="utf-8")
+    (custom / "minecraft.bat").write_text("", encoding="utf-8")
+    (root / "conf.env").write_text(
+        "interface=any\ngamefiltertcp=false\nstrategy=general_alt2.bat\nfirewall_backend=auto\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def _classic_service(tmp_path: Path, runner=None) -> LinuxZapretService:
+    return LinuxZapretService(
+        root_candidates=(_classic_root(tmp_path),),
+        runner=runner or FakeRunner([]),
+        which=_which,
+        geteuid=lambda: 1000,
+        platform_name="linux",
+    )
+
+
+def test_classic_zapret_lists_strategies_in_upstream_order(tmp_path: Path) -> None:
+    service = _classic_service(tmp_path)
+
+    assert service.list_strategies() == ["minecraft.bat", "general.bat", "general_alt2.bat"]
+
+
+def test_classic_zapret_strategy_path_prefers_custom_copy(tmp_path: Path) -> None:
+    service = _classic_service(tmp_path)
+    root = service.discover_root()
+
+    assert service.strategy_path("general_alt2.bat") == (root / "zapret-latest" / "general_alt2.bat").resolve()
+    assert service.strategy_path("minecraft.bat") == (root / "custom-strategies" / "minecraft.bat").resolve()
+
+
+def test_classic_zapret_reads_current_strategy_from_conf_env(tmp_path: Path) -> None:
+    service = _classic_service(tmp_path)
+
+    assert service.current_strategy() == "general_alt2.bat"
+
+
+def test_classic_zapret_apply_strategy_rewrites_only_strategy_line(tmp_path: Path) -> None:
+    service = _classic_service(tmp_path)
+
+    result = service.apply_strategy("minecraft.bat")
+
+    assert result.status == "ok"
+    root = service.discover_root()
+    assert (root / "conf.env").read_text(encoding="utf-8") == (
+        "interface=any\ngamefiltertcp=false\nstrategy=minecraft.bat\nfirewall_backend=auto\n"
+    )
+    assert service.current_strategy() == "minecraft.bat"
+
+
+def test_classic_zapret_apply_strategy_appends_when_missing(tmp_path: Path) -> None:
+    root = tmp_path / "classic"
+    repo = root / "zapret-latest"
+    repo.mkdir(parents=True)
+    (root / "nfqws").write_text("binary", encoding="utf-8")
+    (repo / "general.bat").write_text("", encoding="utf-8")
+    (root / "conf.env").write_text("interface=any\n", encoding="utf-8")
+    service = LinuxZapretService(
+        root_candidates=(root,),
+        runner=FakeRunner([]),
+        which=_which,
+        geteuid=lambda: 1000,
+        platform_name="linux",
+    )
+
+    result = service.apply_strategy("general.bat")
+
+    assert result.status == "ok"
+    assert (root / "conf.env").read_text(encoding="utf-8") == "interface=any\nstrategy=general.bat\n"
+
+
+def test_classic_zapret_apply_strategy_rejects_unknown_and_unsafe_names(tmp_path: Path) -> None:
+    service = _classic_service(tmp_path)
+
+    assert service.apply_strategy("missing.bat").status == "error"
+    assert service.apply_strategy("../../etc/passwd").status == "error"
+    assert service.apply_strategy("general.bat; rm -rf /").status == "error"
+
+
+def test_classic_zapret_apply_strategy_is_noop_when_already_active(tmp_path: Path) -> None:
+    service = _classic_service(tmp_path)
+
+    result = service.apply_strategy("general_alt2.bat")
+
+    assert result.status == "ok"
+    root = service.discover_root()
+    assert (root / "conf.env").read_text(encoding="utf-8") == (
+        "interface=any\ngamefiltertcp=false\nstrategy=general_alt2.bat\nfirewall_backend=auto\n"
+    )
+
+
+def test_classic_zapret_apply_strategy_elevates_via_helper_for_root_owned_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    helper = tmp_path / "zapret-hub-set-strategy"
+    helper.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("ZAPRET_HUB_ZAPRET_STRATEGY_HELPER", str(helper))
+    monkeypatch.setattr("zapret_hub.services.linux_zapret2.os.access", lambda *_: False)
+    runner = FakeRunner([(0, "", "")])
+    service = _classic_service(tmp_path, runner=runner)
+
+    result = service.apply_strategy("minecraft.bat")
+
+    assert result.status == "ok"
+    assert runner.commands == [
+        ["/usr/bin/pkexec", str(helper), str(service.discover_root() / "conf.env"), "minecraft.bat"]
+    ]
+
+
+def test_classic_zapret_restart_maps_to_running(tmp_path: Path) -> None:
+    runner = FakeRunner([(0, "", ""), (0, "active\n", "")])
+    service = _classic_service(tmp_path, runner=runner)
+
+    result = service.restart()
+
+    assert result.status == "running"
+    assert runner.commands[0] == [
+        "/usr/bin/pkexec",
+        "/usr/bin/systemctl",
+        "restart",
+        "zapret_discord_youtube.service",
+    ]
+
+
+def test_process_manager_lists_linux_zapret_generals(tmp_path: Path) -> None:
+    manager = ProcessManager.__new__(ProcessManager)
+    manager._linux_zapret = _classic_service(tmp_path)
+    manager._linux_zapret2 = object()
+    manager.settings = SimpleNamespace(selected_service_ids=[])
+    manager._general_option_sort_key = ProcessManager._general_option_sort_key.__get__(manager)
+
+    options = manager.list_zapret_generals()
+
+    assert [item["id"] for item in options] == [
+        "classic|general_alt2.bat",
+        "classic|general.bat",
+        "classic|minecraft.bat",
+    ]
+    assert all(item["bundle_id"] == "classic" for item in options)
+
+
+def test_process_manager_current_zapret_general_matches_conf_env(tmp_path: Path) -> None:
+    manager = ProcessManager.__new__(ProcessManager)
+    manager._linux_zapret = _classic_service(tmp_path)
+    manager._linux_zapret2 = object()
+    manager._general_option_sort_key = ProcessManager._general_option_sort_key.__get__(manager)
+
+    assert manager.current_zapret_general() == "classic|general_alt2.bat"
+
+
+def test_process_manager_apply_zapret_general_writes_conf_env(tmp_path: Path) -> None:
+    manager = ProcessManager.__new__(ProcessManager)
+    service = _classic_service(tmp_path)
+    manager._linux_zapret = service
+    manager._linux_zapret2 = object()
+    manager.settings = SimpleNamespace(selected_service_ids=[])
+    manager._general_option_sort_key = ProcessManager._general_option_sort_key.__get__(manager)
+    manager.logging = SimpleNamespace(log=lambda *_, **__: None)
+
+    assert manager.apply_zapret_general("classic|minecraft.bat") is True
+    assert service.current_strategy() == "minecraft.bat"
+    assert manager.apply_zapret_general("classic|missing.bat") is False
+
+
+def test_process_manager_linux_generals_diagnostics_are_stubbed(tmp_path: Path) -> None:
+    manager = ProcessManager.__new__(ProcessManager)
+    manager._linux_zapret = _classic_service(tmp_path)
+    manager._linux_zapret2 = object()
+    manager.settings = SimpleNamespace(selected_service_ids=[])
+
+    assert manager.run_general_diagnostics() == []
+    single = manager.run_single_general_diagnostic("classic|general.bat")
+    assert single["status"] == "error"
+    assert single["passed_targets"] == 0

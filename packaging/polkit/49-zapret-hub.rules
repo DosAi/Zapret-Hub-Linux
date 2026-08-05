@@ -1,9 +1,10 @@
-// Allow local administrators to control the two Zapret services and start
-// Happ's daemon when the user explicitly connects.
+// Allow local administrators to control the two Zapret services, start Happ's
+// daemon when the user explicitly connects, and persist a strategy into the
+// root-owned classic Zapret conf.env through the narrow helper script.
 // Both the Debian/Kali "sudo" group and the Fedora/RHEL/Arch "wheel" group are
 // recognized as administrator groups.
 // The command line check is intentionally exact: no other systemctl command
-// receives passwordless elevation through pkexec.
+// or pkexec invocation receives passwordless elevation.
 polkit.addRule(function(action, subject) {
     if (action.id !== "org.freedesktop.policykit.exec" ||
         !subject.local || !subject.active ||
@@ -11,23 +12,42 @@ polkit.addRule(function(action, subject) {
         return polkit.Result.NOT_HANDLED;
     }
 
-    if (action.lookup("program") !== "/usr/bin/systemctl") {
+    if (action.lookup("program") === "/usr/bin/systemctl") {
+        var commandLine = action.lookup("command_line");
+        var allowedCommands = [
+            "/usr/bin/systemctl start zapret2.service",
+            "/usr/bin/systemctl stop zapret2.service",
+            "/usr/bin/systemctl restart zapret2.service",
+            "/usr/bin/systemctl start zapret_discord_youtube.service",
+            "/usr/bin/systemctl stop zapret_discord_youtube.service",
+            "/usr/bin/systemctl restart zapret_discord_youtube.service",
+            "/usr/bin/systemctl start happd.service"
+        ];
+
+        if (allowedCommands.indexOf(commandLine) !== -1) {
+            return polkit.Result.YES;
+        }
         return polkit.Result.NOT_HANDLED;
     }
 
-    var commandLine = action.lookup("command_line");
-    var allowedCommands = [
-        "/usr/bin/systemctl start zapret2.service",
-        "/usr/bin/systemctl stop zapret2.service",
-        "/usr/bin/systemctl restart zapret2.service",
-        "/usr/bin/systemctl start zapret_discord_youtube.service",
-        "/usr/bin/systemctl stop zapret_discord_youtube.service",
-        "/usr/bin/systemctl restart zapret_discord_youtube.service",
-        "/usr/bin/systemctl start happd.service"
-    ];
-
-    if (allowedCommands.indexOf(commandLine) !== -1) {
-        return polkit.Result.YES;
+    // Strategy writes only for the Hub-managed install roots; the filename is
+    // restricted to plain .bat names so the helper can never touch other files.
+    if (action.lookup("program") === "/usr/local/sbin/zapret-hub-set-strategy") {
+        var strategyLine = action.lookup("command_line");
+        var strategyPrefixes = [
+            "/usr/local/sbin/zapret-hub-set-strategy /opt/zapret-discord-youtube-linux/conf.env ",
+            "/usr/local/sbin/zapret-hub-set-strategy /opt/zapret-hub/zapret-discord-youtube-linux/conf.env "
+        ];
+        for (var i = 0; i < strategyPrefixes.length; i++) {
+            if (strategyLine.indexOf(strategyPrefixes[i]) === 0) {
+                var strategyName = strategyLine.slice(strategyPrefixes[i].length);
+                if (/^[A-Za-z0-9_. ()-]+\.bat$/.test(strategyName)) {
+                    return polkit.Result.YES;
+                }
+            }
+        }
+        return polkit.Result.NOT_HANDLED;
     }
+
     return polkit.Result.NOT_HANDLED;
 });

@@ -315,6 +315,8 @@ def test_service_change_restarts_running_zapret() -> None:
             cls.running.add("zapret")
             return SimpleNamespace(status="running", component_id="zapret")
 
+        linux_backend_available = False
+
     bridge = WebBridge.__new__(WebBridge)
     bridge.context = SimpleNamespace(
         settings=Settings(),
