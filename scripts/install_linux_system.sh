@@ -57,6 +57,8 @@ ZAPRET_SOURCE="$PROJECT_ROOT/runtime/zapret2"
 CLASSIC_HELPER="$PROJECT_ROOT/scripts/install_linux_classic_zapret.sh"
 HAPP_HELPER="$PROJECT_ROOT/scripts/install_linux_happ.sh"
 POLKIT_SOURCE="$PROJECT_ROOT/packaging/polkit/49-zapret-hub.rules"
+STRATEGY_HELPER_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hub-set-strategy.sh"
+UNIT_HELPER_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hub-install-classic-unit.sh"
 HOSTLIST_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hosts-user.txt"
 
 for required in \
@@ -67,6 +69,8 @@ for required in \
     "$CLASSIC_HELPER" \
     "$HAPP_HELPER" \
     "$POLKIT_SOURCE" \
+    "$STRATEGY_HELPER_SOURCE" \
+    "$UNIT_HELPER_SOURCE" \
     "$HOSTLIST_SOURCE"
 do
     [ -r "$required" ] || { echo "Required installation file is missing: $required" >&2; exit 1; }
@@ -92,15 +96,17 @@ PACKAGES=$(zh_deps)
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] distribution family: $FAMILY"
     echo "[dry-run] $(zh_pkg_manager) update"
-    echo "[dry-run] $(zh_pkg_manager) install -y $PACKAGES"
+    echo "[dry-run] $(zh_pkg_install_cmd $PACKAGES)"
     if [ "$INSTALL_TELEGRAM" -eq 1 ]; then
-        echo "[dry-run] $(zh_pkg_manager) install -y telegram-desktop"
+        echo "[dry-run] $(zh_pkg_install_cmd telegram-desktop)"
     fi
     /bin/sh "$CLASSIC_HELPER" --project-root "$PROJECT_ROOT" --dry-run
     /bin/sh "$HAPP_HELPER" --dry-run
     echo "[dry-run] install bundled Zapret2 in /opt/zapret2 (preserve foreign installs)"
     if zh_is_systemd; then
         echo "[dry-run] install zapret2.service without starting or restarting it"
+        echo "[dry-run] install /usr/local/sbin/zapret-hub-set-strategy (root-only strategy helper)"
+        echo "[dry-run] install /usr/local/sbin/zapret-hub-install-classic-unit (root-only unit helper)"
         echo "[dry-run] install /etc/polkit-1/rules.d/49-zapret-hub.rules"
     else
         echo "[dry-run] systemd not found; skip service units and the PolicyKit rule"
@@ -117,6 +123,10 @@ export DEBIAN_FRONTEND=noninteractive
 zh_pkg_update
 # shellcheck disable=SC2086
 zh_pkg_install $PACKAGES
+
+if zh_is_atomic; then
+    echo "NOTE: this is an immutable (rpm-ostree) system; the packages above were layered for the next boot. Anything that depends on them becomes available after a reboot."
+fi
 
 if [ "$INSTALL_TELEGRAM" -eq 1 ]; then
     if ! zh_pkg_install telegram-desktop; then
@@ -201,6 +211,12 @@ if zh_is_systemd; then
     install -o root -g root -m 0644 \
         "$POLKIT_SOURCE" \
         /etc/polkit-1/rules.d/49-zapret-hub.rules
+    install -o root -g root -m 0755 \
+        "$STRATEGY_HELPER_SOURCE" \
+        /usr/local/sbin/zapret-hub-set-strategy
+    install -o root -g root -m 0755 \
+        "$UNIT_HELPER_SOURCE" \
+        /usr/local/sbin/zapret-hub-install-classic-unit
 
     systemctl daemon-reload
     echo "System integration (systemd and PolicyKit) is ready. No network service was started, stopped, restarted, enabled, or disabled."

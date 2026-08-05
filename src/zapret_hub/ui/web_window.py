@@ -2267,14 +2267,23 @@ class WebBridge(QObject):
                         if not do_restart:
                             continue
                         if component_id == "zapret":
-                            try:
-                                state = self.context.processes.seamless_restart_zapret()
-                                ok = str(getattr(state, "status", "") or "") == "running"
-                            except Exception:
+                            if self.context.processes.linux_backend_available:
+                                # Linux classic Zapret is a systemd unit: stop→start
+                                # through the Hub so the fresh conf.env strategy is
+                                # picked up (seamless winws cutover is Windows-only).
                                 ok = self._start_component_with_retry(
                                     component_id,
                                     show_transition_on_retry=want_power,
                                 )
+                            else:
+                                try:
+                                    state = self.context.processes.seamless_restart_zapret()
+                                    ok = str(getattr(state, "status", "") or "") == "running"
+                                except Exception:
+                                    ok = self._start_component_with_retry(
+                                        component_id,
+                                        show_transition_on_retry=want_power,
+                                    )
                         elif component_id == "zapret2":
                             force_z2 = bool((force_process_restart or {}).get("zapret2"))
                             if force_z2:
@@ -3319,6 +3328,24 @@ class WebBridge(QObject):
             if "ui_scale" in changes and str(changes.get("ui_scale") or "") not in {"0.75", "1", "1.25"}:
                 changes["ui_scale"] = "1"
             self.context.settings.update(**changes)
+        if "selected_zapret_general" in changes:
+            # On Linux the classic install is a systemd unit; persist the chosen
+            # strategy into its conf.env before any restart applies it.
+            if not self.context.processes.apply_zapret_general(str(changes.get("selected_zapret_general") or "")):
+                self.context.settings.update(selected_zapret_general=before.selected_zapret_general)
+                try:
+                    self.context.logging.log(
+                        "warning",
+                        "Could not apply Zapret strategy; selection reverted",
+                        strategy=str(changes.get("selected_zapret_general") or ""),
+                    )
+                except Exception:
+                    pass
+                self._emit_toast(
+                    "Не удалось сохранить стратегию Zapret (конфигурация недоступна для записи).",
+                    kind="error",
+                    toast_id="zapret-strategy-apply-failed",
+                )
         if "autoStart" in patch:
             self.context.autostart.set_enabled(bool(patch["autoStart"]))
         if isinstance(vpn, dict):

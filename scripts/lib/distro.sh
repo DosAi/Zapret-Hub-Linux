@@ -13,8 +13,12 @@
 # Override the os-release source with ZH_OS_RELEASE (path to a file) to test
 # family detection without touching /etc/os-release.
 #
-# For the rhel family, pin the manager with ZH_RHEL_MANAGER=dnf|yum; useful in
-# environments (such as CI) that do not have dnf installed.
+# Immutable, image-based Fedora derivatives (Silverblue/Kinoite, Bazzite,
+# Universal Blue, ...) are detected via /run/ostree-booted and use rpm-ostree
+# instead of dnf. Pin that detection with ZH_ATOMIC=1 in non-atomic CI.
+#
+# For a non-atomic rhel family, pin the manager with ZH_RHEL_MANAGER=dnf|yum;
+# useful in environments (such as CI) that do not have dnf installed.
 
 if [ "${ZH_DISTRO_LOADED:-}" = "1" ]; then
     return 0 2>/dev/null || true
@@ -68,9 +72,27 @@ zh_os_name() {
     echo "${PRETTY_NAME:-${NAME:-${ID:-unknown}}}"
 }
 
-# Echo "dnf" or "yum" for the rhel family. ZH_RHEL_MANAGER pins the choice in
-# environments where neither tool is installed (e.g. CI).
+# True (0) if the running system is immutable and image-based (rpm-ostree):
+# Fedora Atomic/Silverblue/Kinoite, Bazzite, Universal Blue and other ostree
+# images. Such systems cannot use dnf/yum against the live root and must layer
+# packages with rpm-ostree instead. ZH_ATOMIC=1 forces atomic detection and
+# ZH_ATOMIC=0 forces the non-atomic dnf/yum path (both useful for CI).
+zh_is_atomic() {
+    case "${ZH_ATOMIC:-}" in
+        1) return 0 ;;
+        0) return 1 ;;
+    esac
+    [ -f /run/ostree-booted ] && command -v rpm-ostree >/dev/null 2>&1
+}
+
+# Echo "rpm-ostree" for the atomic rhel family, otherwise "dnf" or "yum".
+# ZH_RHEL_MANAGER pins the dnf/yum choice in environments where neither tool
+# is installed (e.g. CI).
 _zh_rhel_manager() {
+    if zh_is_atomic; then
+        echo rpm-ostree
+        return 0
+    fi
     case "${ZH_RHEL_MANAGER:-}" in
         dnf) echo dnf ;;
         yum) echo yum ;;
@@ -96,11 +118,66 @@ zh_pkg_manager() {
     esac
 }
 
+# Print the packages already requested (layered) in the booted rpm-ostree
+# deployment, one per line. rpm-ostree aborts with "Package ... is already
+# requested" when a previously layered package is requested again, which is
+# exactly what the second (post-reboot) installer run does on immutable
+# Fedora derivatives.
+_zh_atomic_requested() {
+    rpm-ostree status --json 2>/dev/null | awk '
+        /"requested-packages" : \[/ { capture = 1; next }
+        capture && /^      \],?$/ { exit }
+        capture && /^        ".*/ {
+            line = $0
+            sub(/^[[:space:]]*"/, "", line)
+            sub(/",?[[:space:]]*$/, "", line)
+            print line
+        }
+    '
+}
+
+# Print the locally requested (locally layered) packages of the booted
+# rpm-ostree deployment, one per line. These are versioned entries such as
+# happ-3.3.6-301.x86_64.
+_zh_atomic_requested_local() {
+    rpm-ostree status --json 2>/dev/null | awk '
+        /"requested-local-packages" : \[/ { capture = 1; next }
+        capture && /^      \],?$/ { exit }
+        capture && /^        ".*/ {
+            line = $0
+            sub(/^[[:space:]]*"/, "", line)
+            sub(/",?[[:space:]]*$/, "", line)
+            print line
+        }
+    '
+}
+
+# Echo the subset of "$@" that is not already requested in the booted
+# rpm-ostree deployment, space separated. Intentionally leaves the request
+# list untouched so that the post-reboot run of the installer layers nothing.
+_zh_atomic_remaining() {
+    requested=$(_zh_atomic_requested || true)
+    remaining=
+    for pkg in "$@"; do
+        if printf '%s\n' "$requested" | grep -Fxq -- "$pkg"; then
+            continue
+        fi
+        remaining="$remaining $pkg"
+    done
+    printf '%s\n' "$remaining"
+}
+
 # Refresh the package index. Run as root.
 zh_pkg_update() {
     case "$(zh_distro_family)" in
         debian) apt-get update ;;
-        rhel) $(_zh_rhel_manager) makecache ;;
+        rhel)
+            if zh_is_atomic; then
+                rpm-ostree refresh-md
+            else
+                $(_zh_rhel_manager) makecache
+            fi
+            ;;
         suse) zypper --non-interactive refresh ;;
         arch) pacman -Sy ;;
         alpine) apk update ;;
@@ -112,7 +189,17 @@ zh_pkg_update() {
 zh_pkg_install() {
     case "$(zh_distro_family)" in
         debian) apt-get install -y "$@" ;;
-        rhel) $(_zh_rhel_manager) install -y "$@" ;;
+        rhel)
+            if zh_is_atomic; then
+                remaining=$(_zh_atomic_remaining "$@")
+                if [ -n "$remaining" ]; then
+                    # shellcheck disable=SC2086
+                    rpm-ostree install $remaining
+                fi
+            else
+                $(_zh_rhel_manager) install -y "$@"
+            fi
+            ;;
         suse) zypper --non-interactive install "$@" ;;
         arch) pacman -S --noconfirm --needed "$@" ;;
         alpine) apk add --no-cache "$@" ;;
@@ -127,10 +214,48 @@ zh_pkg_install_local() {
     [ -f "$pkg_file" ] || { echo "Package file not found: $pkg_file" >&2; return 1; }
     case "$(zh_distro_family)" in
         debian) apt-get install -y "$pkg_file" ;;
-        rhel) $(_zh_rhel_manager) install -y "$pkg_file" ;;
+        rhel)
+            if zh_is_atomic; then
+                name=$(rpm -qp --qf '%{NAME}' "$pkg_file" 2>/dev/null || true)
+                if [ -n "$name" ] && zh_pkg_installed "$name"; then
+                    echo "Package $name is already layered and active; skipping $pkg_file."
+                elif [ -n "$name" ] && _zh_atomic_requested_local | grep -Fq -- "$name-"; then
+                    echo "Package $name is already requested for the next boot; skipping $pkg_file."
+                else
+                    rpm-ostree install "$pkg_file"
+                fi
+            else
+                $(_zh_rhel_manager) install -y "$pkg_file"
+            fi
+            ;;
         suse) zypper --non-interactive install "$pkg_file" ;;
         arch) pacman -U --noconfirm "$pkg_file" ;;
         *) return 1 ;;
+    esac
+}
+
+# Echo the exact install command (without executing it) for the current
+# family. Used for dry-run previews so the preview matches what a real run
+# executes on the same machine.
+zh_pkg_install_cmd() {
+    case "$(zh_distro_family)" in
+        debian) echo "apt-get install -y $*" ;;
+        rhel)
+            if zh_is_atomic; then
+                remaining=$(_zh_atomic_remaining "$@")
+                if [ -n "$remaining" ]; then
+                    echo "rpm-ostree install$remaining"
+                else
+                    echo "rpm-ostree (all requested packages already layered)"
+                fi
+            else
+                echo "$(_zh_rhel_manager) install -y $*"
+            fi
+            ;;
+        suse) echo "zypper --non-interactive install $*" ;;
+        arch) echo "pacman -S --noconfirm --needed $*" ;;
+        alpine) echo "apk add --no-cache $*" ;;
+        *) echo unknown ;;
     esac
 }
 

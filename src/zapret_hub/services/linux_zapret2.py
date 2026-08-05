@@ -57,10 +57,24 @@ class LinuxZapret2Service:
     def supported(self) -> bool:
         return self._platform_name.startswith("linux")
 
+    @staticmethod
+    def _is_readable_dir(path: Path) -> bool:
+        """True when the path is a directory the current user can list.
+
+        ``is_dir()`` still resolves a directory the current user cannot
+        traverse; a 0700 root-owned install must not shadow a usable one.
+        """
+        try:
+            if not path.is_dir():
+                return False
+            return os.access(path, os.R_OK)
+        except OSError:
+            return False
+
     def discover_root(self) -> Path | None:
         for candidate in self._root_candidates:
             path = Path(candidate).expanduser()
-            if path.is_dir():
+            if self._is_readable_dir(path):
                 return path.resolve()
         return None
 
@@ -110,6 +124,9 @@ class LinuxZapret2Service:
 
     def stop(self, *, dry_run: bool = False) -> LinuxServiceResult:
         return self._control("stop", dry_run=dry_run)
+
+    def restart(self, *, dry_run: bool = False) -> LinuxServiceResult:
+        return self._control("restart", dry_run=dry_run)
 
     def diagnose(self) -> dict[str, Any]:
         root = self.discover_root()
@@ -163,7 +180,7 @@ class LinuxZapret2Service:
         if result.returncode != 0:
             message = (result.stderr or result.stdout or f"systemctl {action} failed").strip()
             return LinuxServiceResult("error", message, self.service_name, tuple(command), result.returncode)
-        expected = "running" if action == "start" else "stopped"
+        expected = "running" if action in {"start", "restart"} else "stopped"
         observed = self.status()
         if observed.status != expected:
             return LinuxServiceResult(
@@ -202,7 +219,8 @@ class LinuxZapretService(LinuxZapret2Service):
     """Control an existing zapret-discord-youtube-linux systemd install.
 
     The external project remains responsible for its strategy, lists and
-    nftables rules.  Zapret Hub only controls the already-installed unit.
+    nftables rules.  Zapret Hub controls the unit and (re)creates it through
+    the narrow ``zapret-hub-install-classic-unit`` helper when it is missing.
     """
 
     def __init__(
@@ -219,6 +237,7 @@ class LinuxZapretService(LinuxZapret2Service):
             service_name
             or os.environ.get("ZAPRET_HUB_ZAPRET_SERVICE", "zapret_discord_youtube.service")
         ).strip()
+        self._use_unit_directory = root_candidates is None
         super().__init__(
             service_name=configured_service,
             root_candidates=root_candidates or self._default_roots(),
@@ -229,19 +248,240 @@ class LinuxZapretService(LinuxZapret2Service):
         )
 
     def discover_root(self) -> Path | None:
-        # A preserved foreign directory may be incomplete. Continue to the
-        # Hub-managed fallback instead of treating the first directory as a
-        # usable classic Zapret installation.
-        first_directory: Path | None = None
-        for candidate in self._root_candidates:
+        # A preserved foreign directory may be incomplete or unreadable.
+        # Continue to the Hub-managed fallback instead of treating the first
+        # directory as a usable classic Zapret installation.
+        candidates = list(self._root_candidates)
+        if self._use_unit_directory:
+            unit_directory = self._unit_working_directory()
+            if unit_directory is not None:
+                candidates.insert(0, unit_directory)
+        first_readable: Path | None = None
+        for candidate in candidates:
             path = Path(candidate).expanduser()
-            if not path.is_dir():
+            if not self._is_readable_dir(path):
                 continue
             resolved = path.resolve()
-            first_directory = first_directory or resolved
+            first_readable = first_readable or resolved
             if self.find_nfqws(resolved) is not None:
                 return resolved
-        return first_directory
+        return first_readable
+
+    def _systemd_unit_paths(self) -> tuple[Path, ...]:
+        return (
+            Path("/etc/systemd/system") / self.service_name,
+            Path("/usr/lib/systemd/system") / self.service_name,
+        )
+
+    def _unit_working_directory(self) -> Path | None:
+        """Resolve the install root from the systemd unit Zapret Hub controls."""
+        if not self.supported:
+            return None
+        for unit_file in self._systemd_unit_paths():
+            try:
+                lines = unit_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key, _, value = stripped.partition("=")
+                if key.strip() != "WorkingDirectory":
+                    continue
+                path = Path(value.strip().strip('"'))
+                if path.is_dir():
+                    return path.resolve()
+        return None
+
+    def _find_helper(self, name: str) -> str | None:
+        """Locate a root-only helper, including sbin dirs missing from user PATH."""
+        found = self._which(name)
+        if found:
+            return found
+        for candidate in (Path("/usr/local/sbin") / name, Path("/usr/sbin") / name):
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def _ensure_unit_installed(self) -> LinuxServiceResult | None:
+        """Install the managed classic unit through the helper when missing.
+
+        Returns ``None`` when there is nothing to install (already present or
+        no usable install root discovered); otherwise the helper outcome.
+        """
+        if not self.supported:
+            return None
+        for unit_file in self._systemd_unit_paths():
+            if unit_file.exists():
+                return None
+        base = self.discover_root()
+        if base is None:
+            return None
+        helper = self._find_helper("zapret-hub-install-classic-unit")
+        if helper is None:
+            return LinuxServiceResult(
+                "error",
+                "zapret-hub-install-classic-unit helper is missing; run scripts/install_linux.sh",
+                self.service_name,
+            )
+        command = [helper, str(base)]
+        if not self._is_root():
+            pkexec = self._which("pkexec")
+            if pkexec is None:
+                return LinuxServiceResult(
+                    "error",
+                    "pkexec was not found; install the pkexec package or run the command as root",
+                    self.service_name,
+                )
+            command.insert(0, pkexec)
+        result = self._run(command, timeout=90)
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "unit install failed").strip()
+            return LinuxServiceResult(
+                "error", message, self.service_name, tuple(command), result.returncode
+            )
+        return LinuxServiceResult(
+            "ok", "unit installed", self.service_name, tuple(command), result.returncode
+        )
+
+    def start(self, *, dry_run: bool = False) -> LinuxServiceResult:
+        if not dry_run:
+            ensure = self._ensure_unit_installed()
+            if ensure is not None and ensure.status == "error":
+                return ensure
+        return super().start(dry_run=dry_run)
+
+    def restart(self, *, dry_run: bool = False) -> LinuxServiceResult:
+        if not dry_run:
+            ensure = self._ensure_unit_installed()
+            if ensure is not None and ensure.status == "error":
+                return ensure
+        return super().restart(dry_run=dry_run)
+
+    def strategy_files(self, root: Path | None = None) -> list[Path]:
+        """Resolved paths of available strategy scripts, custom strategies win.
+
+        Mirrors the upstream project's ``get_strategies``: everything in
+        ``custom-strategies`` plus ``general*.bat``/``discord*.bat`` in
+        ``zapret-latest``. A custom file that shadows a repo name keeps its
+        place (the external project prefers the custom copy).
+        """
+        base = root or self.discover_root()
+        if base is None:
+            return []
+        seen: set[str] = set()
+        paths: list[Path] = []
+        for directory in (base / "custom-strategies", base / "zapret-latest"):
+            if not self._is_readable_dir(directory):
+                continue
+            patterns = ("*.bat",) if directory.name == "custom-strategies" else ("general*.bat", "discord*.bat")
+            for pattern in patterns:
+                for item in sorted(directory.glob(pattern)):
+                    if item.name in seen:
+                        continue
+                    seen.add(item.name)
+                    paths.append(item)
+        return paths
+
+    def list_strategies(self, root: Path | None = None) -> list[str]:
+        return [item.name for item in self.strategy_files(root)]
+
+    def strategy_path(self, strategy: str, root: Path | None = None) -> Path | None:
+        """Resolve a strategy filename like the project's ``get_strategy_path``."""
+        base = root or self.discover_root()
+        if base is None:
+            return None
+        for directory in (base / "custom-strategies", base / "zapret-latest"):
+            candidate = directory / strategy
+            if candidate.is_file():
+                return candidate.resolve()
+        return None
+
+    def current_strategy(self, root: Path | None = None) -> str | None:
+        """Active strategy from conf.env, e.g. ``general_alt9.bat``."""
+        base = root or self.discover_root()
+        if base is None:
+            return None
+        conf_env = base / "conf.env"
+        try:
+            for line in conf_env.read_text(encoding="utf-8", errors="replace").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("strategy="):
+                    value = stripped[len("strategy="):].strip().strip('"').strip()
+                    return value or None
+        except OSError:
+            return None
+        return None
+
+    def apply_strategy(self, strategy: str, root: Path | None = None) -> LinuxServiceResult:
+        """Persist ``strategy=<name>`` in conf.env without touching other keys.
+
+        Writes directly when the file is writable; otherwise elevates through
+        the narrow ``zapret-hub-set-strategy`` pkexec helper. The strategy is
+        picked up by the running unit on the next systemctl restart.
+        """
+        if not self.supported:
+            return LinuxServiceResult("unsupported", "Linux backend is only available on Linux", self.service_name)
+        if not re.fullmatch(r"[A-Za-z0-9_. ()-]+\.bat", strategy):
+            return LinuxServiceResult("error", "Invalid strategy file name", self.service_name)
+        if strategy not in self.list_strategies(root):
+            return LinuxServiceResult(
+                "error", "Strategy is not available in the install", self.service_name
+            )
+        base = root or self.discover_root()
+        if base is None:
+            return LinuxServiceResult(
+                "error", "Classic Zapret install root was not found", self.service_name
+            )
+        conf_env = (base / "conf.env").resolve()
+        if not conf_env.is_file():
+            return LinuxServiceResult(
+                "error", "conf.env was not found in the install root", self.service_name
+            )
+        if self.current_strategy(base) == strategy:
+            return LinuxServiceResult("ok", "strategy is already active", self.service_name)
+        if self._is_root() or os.access(conf_env, os.W_OK):
+            try:
+                text = conf_env.read_text(encoding="utf-8", errors="replace")
+            except OSError as error:
+                return LinuxServiceResult("error", str(error), self.service_name)
+            lines = text.splitlines()
+            replaced = False
+            for index, line in enumerate(lines):
+                if line.strip().startswith("strategy="):
+                    lines[index] = f"strategy={strategy}"
+                    replaced = True
+            if not replaced:
+                lines.append(f"strategy={strategy}")
+            updated = "\n".join(lines)
+            if not updated.endswith("\n"):
+                updated += "\n"
+            try:
+                conf_env.write_text(updated, encoding="utf-8")
+            except OSError as error:
+                return LinuxServiceResult("error", str(error), self.service_name)
+            return LinuxServiceResult("ok", f"strategy={strategy}", self.service_name)
+        helper = Path(
+            os.environ.get("ZAPRET_HUB_ZAPRET_STRATEGY_HELPER", "/usr/local/sbin/zapret-hub-set-strategy")
+        )
+        pkexec = self._which("pkexec")
+        if not pkexec or not helper.is_file():
+            return LinuxServiceResult(
+                "error",
+                "conf.env is not writable and the Zapret Hub strategy helper is not installed",
+                self.service_name,
+            )
+        command = [pkexec, str(helper), str(conf_env), strategy]
+        result = self._run(command, timeout=60)
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "strategy write failed").strip()
+            return LinuxServiceResult(
+                "error", message, self.service_name, tuple(command), result.returncode
+            )
+        return LinuxServiceResult(
+            "ok", f"strategy={strategy}", self.service_name, tuple(command), result.returncode
+        )
 
     def find_nfqws(self, root: Path | None = None) -> Path | None:
         base = root or self.discover_root()
@@ -317,6 +557,7 @@ class LinuxZapretService(LinuxZapret2Service):
         roots.extend(
             (
                 Path.home() / "zapret-discord-youtube-linux",
+                Path.home() / "Apps" / "zapret-discord-youtube-linux",
                 Path("/opt/zapret-discord-youtube-linux"),
                 Path("/opt/zapret-hub/zapret-discord-youtube-linux"),
                 Path("/opt/zapret-discord-youtube"),

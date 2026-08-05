@@ -16,6 +16,8 @@ Usage: ./scripts/install_linux.sh [--dry-run] [--no-launch] [--with-telegram]
 Installs Zapret Hub, classic Zapret for Linux, bundled Zapret2, the
 official Happ client, and the bundled TG WS Proxy on a supported Linux
 distribution (Kali/Debian/Ubuntu, Fedora, Arch and openSUSE families).
+Immutable Fedora-based systems (Bazzite, Silverblue/Kinoite, Universal
+Blue) are detected and use rpm-ostree package layering.
 The managed Zapret, Zapret2 and Happ services currently require systemd.
 Alpine/OpenRC is detected but deliberately rejected instead of leaving a
 partially working installation.
@@ -105,6 +107,13 @@ fi
 
 echo "Administrator authorization is needed once for packages, Zapret, Zapret2, Happ, and system integration."
 "${elevate[@]}" /bin/sh "$SYSTEM_HELPER" "${helper_args[@]}"
+
+if zh_is_atomic && { ! command -v python3 >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; }; then
+    echo
+    echo "This is an immutable (rpm-ostree) system. The packages were layered with rpm-ostree and become available only after a reboot."
+    echo "The system parts (Zapret, Zapret2, Happ, services) are installed; reboot and then run './install.sh' again to finish the web UI build, the launcher and the first start."
+    exit 0
+fi
 
 cd "$PROJECT_ROOT"
 python3 -m venv .venv

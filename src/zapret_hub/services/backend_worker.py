@@ -717,9 +717,12 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         _sync_telegram_component_from_services(context)
         current = context.settings.get()
         if not str(current.selected_zapret_general or "").strip():
-            options = context.processes.list_zapret_generals()
-            if options:
-                context.settings.update(selected_zapret_general=str(options[0]["id"]))
+            selected = context.processes.current_zapret_general()
+            if not selected:
+                options = context.processes.list_zapret_generals()
+                selected = str(options[0]["id"]) if options else ""
+            if selected:
+                context.settings.update(selected_zapret_general=selected)
         try:
             vpn_state = context.vpn.state()
             if str(vpn_state.get("subscription_state", "") or "") == "valid" and str(vpn_state.get("subscription_url", "") or ""):
@@ -741,8 +744,12 @@ def _run_action(context, action: str, payload: dict[str, Any], emit_progress: ca
         _sync_telegram_component_from_services(context)
         current = context.settings.get()
         options = context.processes.list_zapret_generals()
-        if not str(current.selected_zapret_general or "").strip() and options:
-            context.settings.update(selected_zapret_general=str(options[0]["id"]))
+        if not str(current.selected_zapret_general or "").strip():
+            selected = context.processes.current_zapret_general()
+            if not selected:
+                selected = str(options[0]["id"]) if options else ""
+            if selected:
+                context.settings.update(selected_zapret_general=selected)
         result = _snapshot(context)
         result["general_options"] = options
         return result

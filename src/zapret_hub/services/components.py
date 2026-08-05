@@ -350,7 +350,7 @@ class ProcessManager:
 
     def list_zapret_generals(self) -> list[dict[str, str]]:
         if self._linux_zapret2 is not None:
-            return []
+            return self._list_linux_zapret_generals()
         options: list[dict[str, str]] = []
         bundles = self._get_zapret_bundles(enabled_only=True, include_hidden_generals=True)
         selected_services = {str(item) for item in list(self.settings.get().selected_service_ids or [])}
@@ -375,6 +375,64 @@ class ProcessManager:
                     }
                 )
         return sorted(options, key=self._general_option_sort_key)
+
+    def _list_linux_zapret_generals(self) -> list[dict[str, str]]:
+        if self._linux_zapret is None:
+            return []
+        try:
+            names = self._linux_zapret.list_strategies()
+        except Exception:
+            return []
+        options: list[dict[str, str]] = []
+        for name in names:
+            path = self._linux_zapret.strategy_path(name)
+            options.append(
+                {
+                    "id": f"classic|{name}",
+                    "name": name,
+                    "bundle": "Classic Zapret",
+                    "bundle_id": "classic",
+                    "path": str(path) if path else "",
+                }
+            )
+        return sorted(options, key=self._general_option_sort_key)
+
+    def current_zapret_general(self) -> str:
+        """Id of the strategy currently active in the managed classic install."""
+        if self._linux_zapret is None:
+            return ""
+        try:
+            current = self._linux_zapret.current_strategy()
+        except Exception:
+            return ""
+        return f"classic|{current}" if current else ""
+
+    def apply_zapret_general(self, general_id: str) -> bool:
+        """Persist the chosen strategy into the managed classic install's conf.env."""
+        if self._linux_zapret is None:
+            return True
+        options = {str(item.get("id", "")): item for item in self.list_zapret_generals()}
+        option = options.get(str(general_id or ""))
+        if option is None:
+            return False
+        result = None
+        try:
+            result = self._linux_zapret.apply_strategy(str(option.get("name", "")))
+            ok = result.status == "ok"
+        except Exception:
+            ok = False
+        self.logging.log(
+            "info" if ok else "error",
+            "Classic Zapret strategy apply",
+            strategy=str(option.get("name", "")),
+            status=str(result.status) if result is not None else "error",
+            message=str(result.message) if result is not None else "apply failed",
+        )
+        return ok
+
+    @property
+    def linux_backend_available(self) -> bool:
+        return self._linux_zapret is not None
 
     def prompt_telegram_proxy_link(self) -> None:
         settings = self.settings.get()
@@ -2050,7 +2108,12 @@ foreach ($adapter in @($payload.adapters)) {
     def _start_linux_zapret(self, component_id: str) -> ComponentState:
         if self._linux_zapret is None:
             return ComponentState(component_id=component_id, status="error", last_error="Linux backend is unavailable")
-        result = self._linux_zapret.start()
+        # A running systemd service ignores plain "start"; restart it so freshly
+        # written conf.env strategy/interface options actually take effect.
+        if self._linux_zapret.status().status == "running":
+            result = self._linux_zapret.restart()
+        else:
+            result = self._linux_zapret.start()
         state = ComponentState(
             component_id=component_id,
             status=result.status if result.status in {"running", "stopped"} else "error",
@@ -3426,6 +3489,10 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             self.settings.update(goshkow_vpn_pending_start=False)
         except Exception:
             pass
+        if self._linux_zapret is not None:
+            # Linux classic Zapret is a systemd unit; restart it so a freshly
+            # written conf.env strategy is picked up.
+            return self._start_linux_zapret("zapret")
         slot_b = self.stage_zapret_candidate_runtime()
         return self._cutover_to_zapret_runtime(slot_b)
 
@@ -4226,6 +4293,13 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         progress_callback: callable | None = None,
         stop_callback: callable | None = None,
     ) -> dict[str, object]:
+        if self._linux_zapret2 is not None:
+            return {
+                "status": "error",
+                "error": "Диагностика стратегий доступна только в Windows-версии Zapret Hub.",
+                "passed_targets": 0,
+                "total_targets": 0,
+            }
         options = {item["id"]: item for item in self.list_zapret_generals()}
         option = options.get(general_id)
         if option is None:
@@ -4268,6 +4342,11 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         progress_callback: callable | None = None,
         stop_callback: callable | None = None,
     ) -> list[dict[str, str]]:
+        if self._linux_zapret2 is not None:
+            return self._run_linux_general_diagnostics(
+                progress_callback=progress_callback,
+                stop_callback=stop_callback,
+            )
         options = self.list_zapret_generals()
         options = prioritize_generals_for_services(options, self.settings.get().selected_service_ids)
         if not options:
@@ -4373,6 +4452,241 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             self._invalidate_state_cache()
 
         return results
+
+    def _run_linux_general_diagnostics(
+        self,
+        progress_callback: callable | None = None,
+        stop_callback: callable | None = None,
+    ) -> list[dict[str, str]]:
+        """Pick a working strategy for the managed classic Zapret install.
+
+        Every candidate is written into conf.env and, when the systemd unit is
+        up, live-tested through it with real connectivity checks.  The first
+        passing strategy stays applied; on total failure the previous strategy
+        is restored.  Without a running unit the current conf.env strategy is
+        kept (live probing is impossible), so onboarding never hard-fails on a
+        host where the external service is simply stopped.
+        """
+        linux = self._linux_zapret
+        if linux is None:
+            return []
+        options = self.list_zapret_generals()
+        options = prioritize_generals_for_services(options, self.settings.get().selected_service_ids)
+        if not options:
+            return []
+        original_running = linux.status().status == "running"
+        if not original_running:
+            return self._linux_degraded_diagnostics(linux, options)
+        return self._linux_live_diagnostics(
+            linux,
+            options,
+            progress_callback=progress_callback,
+            stop_callback=stop_callback,
+        )
+
+    def _linux_degraded_diagnostics(
+        self, linux: LinuxZapretService, options: list[dict[str, str]]
+    ) -> list[dict[str, str]]:
+        """Service is not running: adopt the current strategy without probing."""
+        current = linux.current_strategy()
+        chosen = next((option for option in options if option.get("name") == current), None)
+        if chosen is None:
+            chosen = options[0]
+            if linux.apply_strategy(str(chosen.get("name", ""))).status != "ok":
+                return []
+        return [
+            {
+                "id": str(chosen.get("id", "")),
+                "name": str(chosen.get("name", "")),
+                "bundle": str(chosen.get("bundle", "")),
+                "status": "ok",
+                "error": "service is not running; kept the conf.env strategy",
+                "passed_targets": "0",
+                "total_targets": "0",
+                "failed_targets": [],
+                "ipset_mode": "loaded",
+                "game_mode": "tcpudp",
+            }
+        ]
+
+    def _linux_live_diagnostics(
+        self,
+        linux: LinuxZapretService,
+        options: list[dict[str, str]],
+        *,
+        progress_callback: callable | None = None,
+        stop_callback: callable | None = None,
+    ) -> list[dict[str, str]]:
+        original = linux.current_strategy()
+        results: list[dict[str, str]] = []
+        chosen_name: str | None = None
+        targets = self._load_standard_test_targets()
+        per_general_steps = max(2, len(targets) + 1)
+        total_steps = len(options) * per_general_steps
+        try:
+            for index, option in enumerate(options, start=1):
+                if stop_callback is not None and stop_callback():
+                    break
+                name = str(option.get("name", ""))
+                base_step = (index - 1) * per_general_steps
+                if progress_callback is not None:
+                    progress_callback(base_step + 1, total_steps, name)
+                applied = linux.apply_strategy(name)
+                if applied.status != "ok":
+                    results.append(
+                        {
+                            "id": str(option.get("id", "")),
+                            "name": name,
+                            "bundle": str(option.get("bundle", "")),
+                            "status": "error",
+                            "error": applied.message,
+                            "passed_targets": "0",
+                            "total_targets": "0",
+                            "failed_targets": [],
+                            "ipset_mode": "loaded",
+                            "game_mode": "tcpudp",
+                        }
+                    )
+                    continue
+                state = linux.restart()
+                if state.status != "running":
+                    results.append(
+                        {
+                            "id": str(option.get("id", "")),
+                            "name": name,
+                            "bundle": str(option.get("bundle", "")),
+                            "status": "error",
+                            "error": state.message or "service did not start",
+                            "passed_targets": "0",
+                            "total_targets": "0",
+                            "failed_targets": [],
+                            "ipset_mode": "loaded",
+                            "game_mode": "tcpudp",
+                        }
+                    )
+                    continue
+                outcome = self._run_linux_connectivity_check(
+                    targets=targets,
+                    stop_callback=stop_callback,
+                    progress_callback=(
+                        lambda completed, total, target_name, *, _base=base_step, _steps=per_general_steps, _option=option: (
+                            progress_callback(
+                                min(_base + 1 + completed, _base + _steps),
+                                total_steps,
+                                f"{_option.get('name', '')} - {target_name} ({completed}/{total})",
+                            )
+                            if progress_callback is not None
+                            else None
+                        )
+                    ),
+                )
+                if progress_callback is not None:
+                    progress_callback(base_step + per_general_steps, total_steps, name)
+                results.append(
+                    {
+                        "id": str(option.get("id", "")),
+                        "name": name,
+                        "bundle": str(option.get("bundle", "")),
+                        "status": str(outcome["status"]),
+                        "error": str(outcome.get("error", "")),
+                        "passed_targets": str(outcome.get("passed_targets", 0)),
+                        "total_targets": str(outcome.get("total_targets", 0)),
+                        "failed_targets": list(outcome.get("failed_targets", []) or []),
+                        "ipset_mode": "loaded",
+                        "game_mode": "tcpudp",
+                    }
+                )
+                if str(outcome.get("status") or "") == "ok":
+                    chosen_name = name
+                    break
+                if stop_callback is not None and stop_callback():
+                    break
+        finally:
+            if chosen_name is None:
+                if original and linux.current_strategy() != original:
+                    try:
+                        linux.apply_strategy(original)
+                    except Exception:
+                        pass
+                if linux.status().status != "running":
+                    try:
+                        linux.restart()
+                    except Exception:
+                        pass
+            elif linux.status().status != "running":
+                try:
+                    linux.restart()
+                except Exception:
+                    pass
+        return results
+
+    def _run_linux_connectivity_check(
+        self,
+        *,
+        targets: list[dict[str, str]] | None = None,
+        progress_callback: callable | None = None,
+        stop_callback: callable | None = None,
+    ) -> dict[str, object]:
+        """Reachability check against the currently running classic service."""
+        if stop_callback is not None and stop_callback():
+            return {
+                "status": "cancelled",
+                "error": "cancelled",
+                "passed_targets": 0,
+                "total_targets": 0,
+                "failed_targets": [],
+            }
+        targets = list(targets or self._load_standard_test_targets())
+        if not targets:
+            return {
+                "status": "ok",
+                "error": "",
+                "passed_targets": 0,
+                "total_targets": 0,
+                "failed_targets": [],
+            }
+        passed_targets = 0
+        failed_names: list[str] = []
+        completed_targets = 0
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(targets)))) as executor:
+            future_map = {executor.submit(self._target_is_reachable, target): target for target in targets}
+            for future in as_completed(future_map):
+                if stop_callback is not None and stop_callback():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    return {
+                        "status": "cancelled",
+                        "error": "cancelled",
+                        "passed_targets": passed_targets,
+                        "total_targets": len(targets),
+                        "failed_targets": failed_names,
+                    }
+                target = future_map[future]
+                try:
+                    ok = future.result()
+                except Exception:
+                    ok = False
+                if ok:
+                    passed_targets += 1
+                else:
+                    failed_names.append(str(target["name"]))
+                completed_targets += 1
+                if progress_callback is not None:
+                    progress_callback(completed_targets, len(targets), str(target.get("name", "")))
+        if failed_names:
+            return {
+                "status": "error",
+                "error": f"failed targets: {', '.join(failed_names[:6])}",
+                "passed_targets": passed_targets,
+                "total_targets": len(targets),
+                "failed_targets": failed_names,
+            }
+        return {
+            "status": "ok",
+            "error": "",
+            "passed_targets": passed_targets,
+            "total_targets": len(targets),
+            "failed_targets": [],
+        }
 
     def run_settings_diagnostics(
         self,
