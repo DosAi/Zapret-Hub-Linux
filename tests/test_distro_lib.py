@@ -85,12 +85,43 @@ def test_zh_deps_are_family_specific_and_cover_runtime_tools() -> None:
 
 
 def test_zh_pkg_manager_matches_family() -> None:
+    non_atomic = {"ZH_ATOMIC": "0"}
     assert _run("zh_pkg_manager", _os_release("debian")) == "apt-get"
-    assert _run("zh_pkg_manager", _os_release("fedora"), {"ZH_RHEL_MANAGER": "dnf"}) == "dnf"
-    assert _run("zh_pkg_manager", _os_release("fedora"), {"ZH_RHEL_MANAGER": "yum"}) == "yum"
+    assert (
+        _run("zh_pkg_manager", _os_release("fedora"), {**non_atomic, "ZH_RHEL_MANAGER": "dnf"})
+        == "dnf"
+    )
+    assert (
+        _run("zh_pkg_manager", _os_release("fedora"), {**non_atomic, "ZH_RHEL_MANAGER": "yum"})
+        == "yum"
+    )
     assert _run("zh_pkg_manager", _os_release("opensuse-leap")) == "zypper"
     assert _run("zh_pkg_manager", _os_release("arch")) == "pacman"
     assert _run("zh_pkg_manager", _os_release("alpine")) == "apk"
+
+
+def test_atomic_rhel_uses_rpm_ostree_instead_of_dnf() -> None:
+    atomic = {"ZH_ATOMIC": "1"}
+    assert _run("zh_is_atomic && echo yes || echo no", _os_release("fedora"), atomic) == "yes"
+    assert _run("zh_pkg_manager", _os_release("bazzite", "fedora"), atomic) == "rpm-ostree"
+    install_cmd = _run("zh_pkg_install_cmd foo bar", _os_release("fedora"), atomic)
+    assert install_cmd == "rpm-ostree install foo bar"
+    local_cmd = _run("zh_pkg_install_cmd ./happ.rpm", _os_release("fedora"), atomic)
+    assert local_cmd == "rpm-ostree install ./happ.rpm"
+    assert _run("zh_pkg_manager", _os_release("bazzite", "fedora")) in ("rpm-ostree", "dnf")
+
+
+def test_non_atomic_install_cmd_matches_manager() -> None:
+    non_atomic = {"ZH_ATOMIC": "0"}
+    assert (
+        _run(
+            "zh_pkg_install_cmd foo bar",
+            _os_release("fedora"),
+            {**non_atomic, "ZH_RHEL_MANAGER": "dnf"},
+        )
+        == "dnf install -y foo bar"
+    )
+    assert _run("zh_pkg_install_cmd foo bar", _os_release("debian")) == "apt-get install -y foo bar"
 
 
 def test_zh_arch_returns_non_empty() -> None:

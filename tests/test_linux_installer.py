@@ -46,8 +46,13 @@ def test_linux_installer_dry_run_is_complete_and_non_mutating() -> None:
         assert dep in output, f"missing package {dep!r} in dry-run output"
     assert "policykit-1" not in output
     assert "curl git tar gzip" in output
-    install_line = next(line for line in output.splitlines() if " install -y " in line)
-    assert "telegram-desktop" not in install_line
+    install_line = next(
+        line
+        for line in output.splitlines()
+        if "telegram-desktop" not in line
+        and all(dep in line for dep in ("curl", "git", "tar", "gzip"))
+    )
+    assert install_line.startswith("[dry-run] ")
     assert "install classic Zapret for Linux release 0.5.0" in output
     assert "verify classic Zapret source archive SHA-256" in output
     assert "install bundled Zapret2" in output

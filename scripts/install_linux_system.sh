@@ -92,9 +92,9 @@ PACKAGES=$(zh_deps)
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] distribution family: $FAMILY"
     echo "[dry-run] $(zh_pkg_manager) update"
-    echo "[dry-run] $(zh_pkg_manager) install -y $PACKAGES"
+    echo "[dry-run] $(zh_pkg_install_cmd $PACKAGES)"
     if [ "$INSTALL_TELEGRAM" -eq 1 ]; then
-        echo "[dry-run] $(zh_pkg_manager) install -y telegram-desktop"
+        echo "[dry-run] $(zh_pkg_install_cmd telegram-desktop)"
     fi
     /bin/sh "$CLASSIC_HELPER" --project-root "$PROJECT_ROOT" --dry-run
     /bin/sh "$HAPP_HELPER" --dry-run
@@ -117,6 +117,10 @@ export DEBIAN_FRONTEND=noninteractive
 zh_pkg_update
 # shellcheck disable=SC2086
 zh_pkg_install $PACKAGES
+
+if zh_is_atomic; then
+    echo "NOTE: this is an immutable (rpm-ostree) system; the packages above were layered for the next boot. Anything that depends on them becomes available after a reboot."
+fi
 
 if [ "$INSTALL_TELEGRAM" -eq 1 ]; then
     if ! zh_pkg_install telegram-desktop; then
