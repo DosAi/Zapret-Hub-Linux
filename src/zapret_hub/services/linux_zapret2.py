@@ -57,10 +57,24 @@ class LinuxZapret2Service:
     def supported(self) -> bool:
         return self._platform_name.startswith("linux")
 
+    @staticmethod
+    def _is_readable_dir(path: Path) -> bool:
+        """True when the path is a directory the current user can list.
+
+        ``is_dir()`` still resolves a directory the current user cannot
+        traverse; a 0700 root-owned install must not shadow a usable one.
+        """
+        try:
+            if not path.is_dir():
+                return False
+            return os.access(path, os.R_OK)
+        except OSError:
+            return False
+
     def discover_root(self) -> Path | None:
         for candidate in self._root_candidates:
             path = Path(candidate).expanduser()
-            if path.is_dir():
+            if self._is_readable_dir(path):
                 return path.resolve()
         return None
 
@@ -233,24 +247,24 @@ class LinuxZapretService(LinuxZapret2Service):
         )
 
     def discover_root(self) -> Path | None:
-        # A preserved foreign directory may be incomplete. Continue to the
-        # Hub-managed fallback instead of treating the first directory as a
-        # usable classic Zapret installation.
+        # A preserved foreign directory may be incomplete or unreadable.
+        # Continue to the Hub-managed fallback instead of treating the first
+        # directory as a usable classic Zapret installation.
         candidates = list(self._root_candidates)
         if self._use_unit_directory:
             unit_directory = self._unit_working_directory()
             if unit_directory is not None:
                 candidates.insert(0, unit_directory)
-        first_directory: Path | None = None
+        first_readable: Path | None = None
         for candidate in candidates:
             path = Path(candidate).expanduser()
-            if not path.is_dir():
+            if not self._is_readable_dir(path):
                 continue
             resolved = path.resolve()
-            first_directory = first_directory or resolved
+            first_readable = first_readable or resolved
             if self.find_nfqws(resolved) is not None:
                 return resolved
-        return first_directory
+        return first_readable
 
     def _unit_working_directory(self) -> Path | None:
         """Resolve the install root from the systemd unit Zapret Hub controls."""
@@ -288,7 +302,7 @@ class LinuxZapretService(LinuxZapret2Service):
         seen: set[str] = set()
         paths: list[Path] = []
         for directory in (base / "custom-strategies", base / "zapret-latest"):
-            if not directory.is_dir():
+            if not self._is_readable_dir(directory):
                 continue
             patterns = ("*.bat",) if directory.name == "custom-strategies" else ("general*.bat", "discord*.bat")
             for pattern in patterns:
@@ -472,6 +486,7 @@ class LinuxZapretService(LinuxZapret2Service):
         roots.extend(
             (
                 Path.home() / "zapret-discord-youtube-linux",
+                Path.home() / "Apps" / "zapret-discord-youtube-linux",
                 Path("/opt/zapret-discord-youtube-linux"),
                 Path("/opt/zapret-hub/zapret-discord-youtube-linux"),
                 Path("/opt/zapret-discord-youtube"),

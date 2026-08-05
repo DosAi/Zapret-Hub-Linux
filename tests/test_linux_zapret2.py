@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import subprocess
 from types import SimpleNamespace
 
+import zapret_hub.services.linux_zapret2 as lz
 from zapret_hub.services.components import ProcessManager
 from zapret_hub.services.linux_zapret2 import LinuxZapret2Service, LinuxZapretService
 from zapret_hub.services.storage import StorageManager
@@ -142,6 +144,44 @@ def test_classic_zapret_discovery_skips_incomplete_foreign_root(tmp_path: Path) 
 
     assert service.discover_root() == fallback
     assert service.find_nfqws() == binary
+
+
+def test_classic_zapret_discovery_skips_unreadable_foreign_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    unreadable = tmp_path / "foreign"
+    fallback = tmp_path / "managed"
+    unreadable.mkdir()
+    fallback.mkdir()
+    binary = fallback / "nfqws"
+    binary.write_text("binary", encoding="utf-8")
+    real_access = os.access
+
+    def fake_access(path, mode, **kwargs):
+        if str(path) == str(unreadable) and mode == os.R_OK:
+            return False
+        return real_access(path, mode, **kwargs)
+
+    monkeypatch.setattr(lz.os, "access", fake_access)
+    service = LinuxZapretService(
+        root_candidates=(unreadable, fallback),
+        runner=FakeRunner([]),
+        which=_which,
+        geteuid=lambda: 1000,
+        platform_name="linux",
+    )
+
+    assert service.discover_root() == fallback
+
+
+def test_classic_zapret_default_roots_include_apps_install(monkeypatch) -> None:
+    monkeypatch.delenv("ZAPRET_HUB_ZAPRET_ROOT", raising=False)
+    monkeypatch.setenv("HOME", "/home/tester")
+
+    roots = LinuxZapretService._default_roots()
+
+    assert Path("/home/tester/Apps/zapret-discord-youtube-linux") in roots
+    assert Path("/opt/zapret-discord-youtube-linux") in roots
 
 
 def test_classic_zapret_dry_run_uses_pkexec() -> None:
@@ -309,7 +349,14 @@ def test_classic_zapret_apply_strategy_elevates_via_helper_for_root_owned_file(
     helper = tmp_path / "zapret-hub-set-strategy"
     helper.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setenv("ZAPRET_HUB_ZAPRET_STRATEGY_HELPER", str(helper))
-    monkeypatch.setattr("zapret_hub.services.linux_zapret2.os.access", lambda *_: False)
+    real_access = os.access
+
+    def _deny_write_only(path, mode, **kwargs):
+        if mode == os.W_OK:
+            return False
+        return real_access(path, mode, **kwargs)
+
+    monkeypatch.setattr("zapret_hub.services.linux_zapret2.os.access", _deny_write_only)
     runner = FakeRunner([(0, "", "")])
     service = _classic_service(tmp_path, runner=runner)
 
@@ -376,13 +423,66 @@ def test_process_manager_apply_zapret_general_writes_conf_env(tmp_path: Path) ->
     assert manager.apply_zapret_general("classic|missing.bat") is False
 
 
-def test_process_manager_linux_generals_diagnostics_are_stubbed(tmp_path: Path) -> None:
+def test_process_manager_linux_general_diagnostics_keeps_current_when_stopped(tmp_path: Path) -> None:
+    runner = FakeRunner([(3, "inactive\n", "")])
     manager = ProcessManager.__new__(ProcessManager)
-    manager._linux_zapret = _classic_service(tmp_path)
+    manager._linux_zapret = _classic_service(tmp_path, runner=runner)
     manager._linux_zapret2 = object()
-    manager.settings = SimpleNamespace(selected_service_ids=[])
+    manager.settings = SimpleNamespace(get=lambda: SimpleNamespace(selected_service_ids=[]))
+    manager.storage = SimpleNamespace(paths=SimpleNamespace(runtime_dir=tmp_path / "runtime"))
+    manager._general_option_sort_key = ProcessManager._general_option_sort_key.__get__(manager)
 
-    assert manager.run_general_diagnostics() == []
-    single = manager.run_single_general_diagnostic("classic|general.bat")
-    assert single["status"] == "error"
-    assert single["passed_targets"] == 0
+    results = manager.run_general_diagnostics()
+
+    assert results == [
+        {
+            "id": "classic|general_alt2.bat",
+            "name": "general_alt2.bat",
+            "bundle": "Classic Zapret",
+            "status": "ok",
+            "error": "service is not running; kept the conf.env strategy",
+            "passed_targets": "0",
+            "total_targets": "0",
+            "failed_targets": [],
+            "ipset_mode": "loaded",
+            "game_mode": "tcpudp",
+        }
+    ]
+    assert service_current_strategy(manager) == "general_alt2.bat"
+
+
+def test_process_manager_linux_general_diagnostics_live_test_keeps_winner(tmp_path: Path) -> None:
+    root = _classic_root(tmp_path)
+    runner = FakeRunner(
+        [
+            (0, "active\n", ""),  # initial status
+            (0, "", ""),  # restart minecraft.bat
+            (0, "active\n", ""),  # status after restart
+            (0, "active\n", ""),  # final status in finally
+        ]
+    )
+    manager = ProcessManager.__new__(ProcessManager)
+    manager._linux_zapret = LinuxZapretService(
+        root_candidates=(root,),
+        runner=runner,
+        which=_which,
+        geteuid=lambda: 1000,
+        platform_name="linux",
+    )
+    manager._linux_zapret2 = object()
+    manager.settings = SimpleNamespace(get=lambda: SimpleNamespace(selected_service_ids=[]))
+    manager.storage = SimpleNamespace(paths=SimpleNamespace(runtime_dir=tmp_path / "runtime"))
+    manager._general_option_sort_key = ProcessManager._general_option_sort_key.__get__(manager)
+    manager._target_is_reachable = lambda target: True
+    manager._run_quiet = lambda *_, **__: subprocess.CompletedProcess([], 0, "200", "")
+
+    results = manager.run_general_diagnostics()
+
+    assert results and results[0]["status"] == "ok"
+    assert results[0]["passed_targets"] == "1"
+    assert "strategy=" in (root / "conf.env").read_text(encoding="utf-8")
+    assert len(results) == 1
+
+
+def service_current_strategy(manager: ProcessManager) -> str:
+    return str(manager._linux_zapret.current_strategy())
