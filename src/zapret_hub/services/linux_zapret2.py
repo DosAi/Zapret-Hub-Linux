@@ -6,6 +6,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 from typing import Any, Callable, Iterable
@@ -21,6 +22,17 @@ class LinuxServiceResult:
     service: str = "zapret2.service"
     command: tuple[str, ...] = ()
     returncode: int | None = None
+
+
+def check_dns_health(target_domain: str = "youtube.com", timeout: float = 2.0) -> str:
+    """Check if system DNS resolves blocked domains or is poisoned by ISP."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        socket.gethostbyname(target_domain)
+        return "ok"
+    except Exception:
+        return "warning (ISP DNS poisoning detected; run ./scripts/setup_browser.sh or enable DoH)"
 
 
 class LinuxZapret2Service:
@@ -118,6 +130,7 @@ class LinuxZapret2Service:
         firewall = self._which("nft") or self._which("iptables")
         elevation = "root" if self._is_root() else (self._which("pkexec") or "")
         state = self.status()
+        dns_status = check_dns_health()
         result = {
             "platform": self._platform_name,
             "supported": self.supported,
@@ -129,6 +142,7 @@ class LinuxZapret2Service:
             "nfqws2": str(nfqws2) if nfqws2 else "",
             "firewall_backend": firewall or "",
             "elevation": elevation,
+            "dns_health": dns_status,
         }
         result["ready"] = bool(
             result["supported"]
@@ -288,6 +302,7 @@ class LinuxZapretService(LinuxZapret2Service):
         firewall = self._which("nft") or self._which("iptables")
         elevation = "root" if self._is_root() else (self._which("pkexec") or "")
         state = self.status()
+        dns_status = check_dns_health()
         result = {
             "platform": self._platform_name,
             "supported": self.supported,
@@ -299,6 +314,7 @@ class LinuxZapretService(LinuxZapret2Service):
             "nfqws": str(nfqws) if nfqws else "",
             "firewall_backend": firewall or "",
             "elevation": elevation,
+            "dns_health": dns_status,
         }
         result["ready"] = bool(
             result["supported"]

@@ -64,6 +64,27 @@ Telegram Desktop по умолчанию **не устанавливается**
 .venv/bin/zapret-hub-linux start --dry-run
 ```
 
+## Настройка браузера (DoH и обход блокировок DNS в РФ)
+
+В РФ оборудование ТСПУ подменяет незашифрованные DNS-запросы на 53 порту (возвращает `NXDOMAIN` для YouTube и Discord) и блокирует протокол QUIC (UDP 443). Для корректной работы Zapret без VPN необходимо:
+
+1. **Автоматическая настройка (Zen Browser, Firefox, LibreWolf, Floorp):**
+   ```bash
+   ./scripts/setup_browser.sh
+   # или через CLI:
+   .venv/bin/zapret-hub-linux setup-browser
+   ```
+   Скрипт находит активные профили браузеров и прописывает в `user.js`:
+   - прямое подключение без прокси (`network.proxy.type = 0`);
+   - DNS-over-HTTPS через Cloudflare с защитой от спуфинга;
+   - шифрование SNI (ECH);
+   - отключение HTTP/3 (QUIC) для стабильной буферизации видео в 4K.
+
+2. **Ручная настройка (Chromium / Chrome / Brave / Edge):**
+   - В настройках браузера включите **«Безопасный DNS» (Secure DNS)** и выберите Cloudflare (`1.1.1.1`) или Google (`8.8.8.8`).
+   - Убедитесь, что прокси в браузере отключен (прямое подключение).
+   - В `chrome://flags` отключите **Experimental QUIC protocol**.
+
 ## Поддержка
 
 Telegram: [@dosai_main](https://t.me/dosai_main)
