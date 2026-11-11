@@ -29,6 +29,12 @@ grep -q "Package manager: $EXPECTED_MANAGER" <<<"$preview"
 grep -q "install bundled Zapret2" <<<"$preview"
 grep -q "install official Happ" <<<"$preview"
 
+uninstall_preview=$("$PROJECT_ROOT/uninstall.sh" --dry-run 2>&1)
+grep -q ".zapret-hub-managed" <<<"$uninstall_preview"
+grep -q "Preserving Happ" <<<"$uninstall_preview"
+remove_happ_preview=$("$PROJECT_ROOT/uninstall.sh" --dry-run --remove-happ 2>&1)
+grep -q "$EXPECTED_MANAGER.*remove the happ package" <<<"$remove_happ_preview"
+
 # Validate package names against the actual repositories of the container,
 # without installing packages or touching services/network configuration.
 read -r -a deps <<<"$(zh_deps)"

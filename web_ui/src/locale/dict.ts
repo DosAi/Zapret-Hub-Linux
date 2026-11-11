@@ -38,6 +38,10 @@ const ru = {
 
   "components.title": "Компоненты",
   "components.desc": "Управление модулями и их состоянием",
+  "components.strategyGuide.title": "Как подобрать стратегию?",
+  "components.strategyGuide.body": "Выберите «Автоматический» — Hub проверит доступность и подберёт стратегию сам. Для собственного выбора переключите карточку на «Вручную» и откройте настройки.",
+  "components.strategyGuide.zapretAuto": "Автоподбор для Zapret",
+  "components.strategyGuide.zapret2Auto": "Автоподбор для Zapret 2",
   "component.enable": "Включить",
   "component.disable": "Выключить",
   "component.update": "Сменить версию",
@@ -234,6 +238,10 @@ const en: Record<keyof typeof ru, string> = {
 
   "components.title": "Components",
   "components.desc": "Manage modules and their state",
+  "components.strategyGuide.title": "How do I choose a strategy?",
+  "components.strategyGuide.body": "Choose Automatic and Hub will test connectivity and select a strategy. To choose one yourself, switch the card to Manual and open its settings.",
+  "components.strategyGuide.zapretAuto": "Auto-tune Zapret",
+  "components.strategyGuide.zapret2Auto": "Auto-tune Zapret 2",
   "component.enable": "Enable",
   "component.disable": "Disable",
   "component.update": "Change version",

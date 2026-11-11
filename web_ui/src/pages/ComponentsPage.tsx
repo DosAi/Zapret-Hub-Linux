@@ -229,6 +229,17 @@ export function ComponentsPage({ onConfigure, onReconfigure, onConnectVpn, focus
     <div className="relative h-full overflow-hidden">
       <div ref={scrollerRef} className="scroll-area glass-page-scroll h-full overflow-auto">
       <div className="scroll-content px-7 pb-7 pt-[86px]">
+        <div className="mb-4 flex items-center gap-4 rounded-[16px] border border-[color-mix(in_srgb,var(--accent)_28%,var(--line-1))] bg-[color-mix(in_srgb,var(--accent)_7%,var(--bg-2))] px-4 py-3">
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-[11px] border border-line-2 bg-bg-1 text-[17px] text-accent" aria-hidden="true">⌁</div>
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-semibold text-fg">{t("components.strategyGuide.title")}</div>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-fg-dim">{t("components.strategyGuide.body")}</p>
+          </div>
+          <div className="flex shrink-0 flex-col gap-1.5">
+            <button onClick={() => setControlMode("zapret", "auto")} className="rounded-[9px] border border-line-1 bg-bg-1 px-3 py-1.5 text-[10px] text-fg-dim hover:border-line-2 hover:bg-bg-3 hover:text-fg">{t("components.strategyGuide.zapretAuto")}</button>
+            <button onClick={() => setControlMode("zapret2", "auto")} className="rounded-[9px] border border-line-1 bg-bg-1 px-3 py-1.5 text-[10px] text-fg-dim hover:border-line-2 hover:bg-bg-3 hover:text-fg">{t("components.strategyGuide.zapret2Auto")}</button>
+          </div>
+        </div>
         <div className="grid grid-cols-2 gap-4">
           {ORDER.map((id) => {
             const c = state.components[id];

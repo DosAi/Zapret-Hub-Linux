@@ -8,7 +8,7 @@ export default defineConfig(({ command }) => ({
   publicDir: command === "serve" ? "../ui_assets" : false,
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: { "@": path.resolve(__dirname, "src") },
+    alias: { "@": path.resolve(import.meta.dirname, "src") },
   },
   build: {
     outDir: "dist",

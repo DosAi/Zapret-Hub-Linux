@@ -225,6 +225,14 @@ export interface AppState {
   ui: { locale: Locale; theme: string; hasValidVpnKey: boolean; platform: "windows" | "linux" };
 }
 
+export interface UninstallState {
+  status: "ready" | "running" | "done" | "error";
+  message?: string;
+  output?: string;
+  projectRoot?: string;
+  appRunning?: boolean;
+}
+
 // ---------- Commands (typed IN → OUT) ----------
 export type Commands = {
   "ui.ready": { in: void; out: void };
@@ -233,6 +241,9 @@ export type Commands = {
   "window.startDrag": { in: void; out: void };
   "window.edit": { in: { action: "cut" | "copy" | "paste" | "select-all" }; out: void };
   "window.close": { in: void; out: void };
+  "uninstall.preview": { in: void; out: UninstallState };
+  "uninstall.status": { in: void; out: UninstallState };
+  "uninstall.run": { in: { removeHapp: boolean; purgeData: boolean }; out: UninstallState };
   "onboarding.open": { in: { mode: RuntimeId }; out: void };
   "runtime.select": { in: { id: RuntimeId; keepPower?: boolean }; out: void };
   "runtime.power": { in: { on: boolean }; out: void };

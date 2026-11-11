@@ -123,9 +123,12 @@ echo "Bundled TG WS Proxy is ready."
 USER_BIN="${HOME}/.local/bin"
 USER_APPS="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
 USER_ICONS="${XDG_DATA_HOME:-${HOME}/.local/share}/icons/hicolor/scalable/apps"
-mkdir -p "$USER_BIN" "$USER_APPS" "$USER_ICONS"
+USER_STATE="${XDG_DATA_HOME:-${HOME}/.local/share}/zapret-hub"
+mkdir -p "$USER_BIN" "$USER_APPS" "$USER_ICONS" "$USER_STATE"
 ln -sfn "$PROJECT_ROOT/scripts/run_linux.sh" "$USER_BIN/zapret-hub"
+ln -sfn "$PROJECT_ROOT/uninstall.sh" "$USER_BIN/zapret-hub-uninstall"
 install -m 0644 "$PROJECT_ROOT/ui_assets/icons/app.svg" "$USER_ICONS/zapret-hub.svg"
+printf '%s\n' "$PROJECT_ROOT" > "$USER_STATE/install-root"
 
 DESKTOP_FILE="$USER_APPS/zapret-hub.desktop"
 {
@@ -140,6 +143,21 @@ DESKTOP_FILE="$USER_APPS/zapret-hub.desktop"
   echo 'StartupNotify=true'
 } > "$DESKTOP_FILE"
 chmod 0644 "$DESKTOP_FILE"
+
+UNINSTALL_DESKTOP_FILE="$USER_APPS/zapret-hub-uninstall.desktop"
+{
+  echo '[Desktop Entry]'
+  echo 'Type=Application'
+  echo 'Name=Uninstall Zapret Hub'
+  echo 'Name[ru]=Удалить Zapret Hub'
+  echo 'Comment=Remove Zapret Hub Linux and its managed components'
+  printf 'Exec=%s/zapret-hub-uninstall\n' "$USER_BIN"
+  echo 'Icon=zapret-hub'
+  echo 'Terminal=false'
+  echo 'Categories=Network;Utility;'
+  echo 'NoDisplay=false'
+} > "$UNINSTALL_DESKTOP_FILE"
+chmod 0644 "$UNINSTALL_DESKTOP_FILE"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
 
 echo
