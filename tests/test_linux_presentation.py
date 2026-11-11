@@ -31,6 +31,9 @@ def test_linux_fork_branding_and_credits_are_present() -> None:
     assert "stargazers" not in readme
     assert "goshkow.com" not in readme
     assert '"app.by": "by DosAi"' in locale
+    settings = (PROJECT_ROOT / "web_ui/src/components/settings/SettingsModal.tsx").read_text(encoding="utf-8")
+    assert "Создатель оригинального проекта и интерфейса" in settings
+    assert "https://github.com/goshkow/Zapret-Hub" in settings
     assert "./uninstall.sh" in readme
     assert "Как подобрать стратегию" in readme
     assert "графический деинсталлятор" in readme

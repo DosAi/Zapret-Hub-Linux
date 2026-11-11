@@ -290,6 +290,9 @@ export function SettingsModal({
           <Section title="Zapret Hub">
             <button onClick={() => bridge.call("app.check-updates", undefined)} className="mb-2 w-full rounded-[11px] border border-line-2 bg-bg-3 px-3 py-2.5 text-left text-[12px] font-semibold text-fg transition-all duration-200 hover:brightness-110">{L("Проверить обновления", "Check for updates")}</button>
             <Row label={L("Проверять обновления автоматически", "Check updates automatically")}><IosToggle on={settings.checkUpdates} onChange={(value) => { void applyLive({ checkUpdates: value }, null); }} /></Row>
+            <Row label={L("Оригинальный Zapret Hub", "Original Zapret Hub")} hint={L("Создатель оригинального проекта и интерфейса", "Creator of the original project and UI")}>
+              <button type="button" onClick={() => bridge.call("marketplace.open-url", { url: "https://github.com/goshkow/Zapret-Hub" })} className="rounded-[9px] border border-line-1 bg-bg-2 px-3 py-1.5 text-[11px] text-fg-dim hover:border-line-2 hover:bg-bg-3 hover:text-fg">goshkow ↗</button>
+            </Row>
           </Section>
           <Section title={isLinux ? L("Система", "System") : "Windows"}>
             <Row label={isLinux ? L("Запускать при входе в систему", "Start on login") : L("Запускать вместе с Windows", "Start with Windows")}><IosToggle on={settings.autoStart} onChange={(value) => { void applyLive({ autoStart: value }, null); }} /></Row>
