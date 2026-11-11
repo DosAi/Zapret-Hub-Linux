@@ -134,6 +134,18 @@ zh_pkg_install_local() {
     esac
 }
 
+# Remove one or more explicitly requested packages. This is intentionally not
+# used for shared installer dependencies, which may belong to other software.
+zh_pkg_remove() {
+    case "$(zh_distro_family)" in
+        debian) apt-get remove -y "$@" ;;
+        rhel) $(_zh_rhel_manager) remove -y "$@" ;;
+        suse) zypper --non-interactive remove "$@" ;;
+        arch) pacman -R --noconfirm "$@" ;;
+        *) return 1 ;;
+    esac
+}
+
 # True (0) if the package is installed, false (1) otherwise.
 zh_pkg_installed() {
     pkg=$1

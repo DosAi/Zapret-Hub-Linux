@@ -31,6 +31,9 @@ def test_linux_fork_branding_and_credits_are_present() -> None:
     assert "stargazers" not in readme
     assert "goshkow.com" not in readme
     assert '"app.by": "by DosAi"' in locale
+    assert "./uninstall.sh" in readme
+    assert "Как подобрать стратегию" in readme
+    assert "графический деинсталлятор" in readme
 
 
 def test_linux_release_contains_a_real_png_window_icon() -> None:
@@ -64,8 +67,19 @@ def test_quick_cards_are_equal_and_window_has_room_for_statuses() -> None:
     assert "_WINDOW_HEIGHT = 550" in window
 
 
+def test_components_page_explains_strategy_modes() -> None:
+    components = (PROJECT_ROOT / "web_ui/src/pages/ComponentsPage.tsx").read_text(encoding="utf-8")
+    locale = (PROJECT_ROOT / "web_ui/src/locale/dict.ts").read_text(encoding="utf-8")
+
+    assert "components.strategyGuide.title" in components
+    assert 'setControlMode("zapret", "auto")' in components
+    assert 'setControlMode("zapret2", "auto")' in components
+    assert "Как подобрать стратегию?" in locale
+
+
 def test_github_automation_is_linux_only() -> None:
     ci = (PROJECT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    release = (PROJECT_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 
     assert "Linux CI" in ci
     assert "python-tests" in ci
@@ -75,7 +89,12 @@ def test_github_automation_is_linux_only() -> None:
     assert "kalilinux/kali-rolling" in ci
     assert "Alpine OpenRC guard" in ci
 
-    assert not (PROJECT_ROOT / ".github/workflows/release.yml").exists()
+    assert "Europe/Moscow" in release
+    assert "Calendar release" in release
+    assert "contents: write" in release
+    assert "BREAKING" in release
+    assert "FEATURE" in release
+    assert "FIX" in release
 
 
 def test_contributor_and_security_docs_describe_experimental_distros() -> None:

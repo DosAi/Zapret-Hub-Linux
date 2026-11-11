@@ -1,0 +1,89 @@
+name: Calendar release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate calendar tag and prepare notes
+        id: notes
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v([0-9]{4})\.([0-9]{2})\.([0-9]{2})(\.([2-9][0-9]*))?$ ]]; then
+            echo "Invalid release tag: $TAG" >&2
+            exit 1
+          fi
+
+          year="${BASH_REMATCH[1]}"
+          month="${BASH_REMATCH[2]}"
+          day="${BASH_REMATCH[3]}"
+          repeat_number="${BASH_REMATCH[5]:-}"
+          release_date="$year.$month.$day"
+          expected_date="$(TZ=Europe/Moscow date +%Y.%m.%d)"
+          if [[ "$release_date" != "$expected_date" ]]; then
+            echo "Tag date $release_date does not match Europe/Moscow date $expected_date" >&2
+            exit 1
+          fi
+
+          release_name="Релиз от $day.$month.$year"
+          if [[ -n "$repeat_number" ]]; then
+            release_name+=" №$repeat_number"
+          fi
+          echo "name=$release_name" >> "$GITHUB_OUTPUT"
+
+          previous_tag="$(git tag --sort=-version:refname | grep -Fxv "$TAG" | head -n 1 || true)"
+          range="$TAG"
+          [[ -n "$previous_tag" ]] && range="$previous_tag..$TAG"
+
+          breaking=()
+          features=()
+          fixes=()
+          other=()
+          while IFS= read -r subject; do
+            [[ -n "$subject" ]] || continue
+            case "$subject" in
+              BREAKING:*) breaking+=("${subject#BREAKING: }") ;;
+              FEATURE:*) features+=("${subject#FEATURE: }") ;;
+              FIX:*) fixes+=("${subject#FIX: }") ;;
+              *) other+=("$subject") ;;
+            esac
+          done < <(git log --format='%s' "$range")
+
+          notes="$RUNNER_TEMP/release-notes.md"
+          : > "$notes"
+          write_section() {
+            local title=$1
+            shift
+            (($#)) || return 0
+            printf '## %s\n\n' "$title" >> "$notes"
+            printf -- '- %s\n' "$@" >> "$notes"
+            printf '\n' >> "$notes"
+          }
+          write_section BREAKING "${breaking[@]}"
+          write_section FEATURE "${features[@]}"
+          write_section FIX "${fixes[@]}"
+          write_section "Прочее" "${other[@]}"
+          echo "notes=$notes" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_NAME: ${{ steps.notes.outputs.name }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes }}
+        run: gh release create "$TAG" --verify-tag --title "$RELEASE_NAME" --notes-file "$NOTES_FILE"

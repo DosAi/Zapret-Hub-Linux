@@ -89,13 +89,49 @@ Preview the installation without changing the system:
 The installer does not start, stop or restart existing networking services.
 Existing Happ and third-party Zapret installations are preserved.
 
+## Choosing a strategy
+
+Open **Components** and use the control mode in the Zapret or Zapret 2 card:
+
+- **Automatic** tests YouTube and Discord connectivity and selects a strategy;
+- **Manual** lets you choose the strategy in that component's settings.
+
+A prominent guide above the component cards also provides one-click Auto tuning.
+Browsing the cards on the main screen alone does not start strategy selection.
+
+## Uninstall
+
+Run the uninstaller before deleting the cloned source directory:
+
+```bash
+./uninstall.sh
+```
+
+The graphical uninstaller uses the same Zapret Hub UI. It removes launchers,
+the PolicyKit rule, Hub-owned services, and only Zapret/Zapret2 directories with
+the `.zapret-hub-managed` ownership marker. Third-party installations and shared
+distribution packages are preserved. Settings/logs and Happ are separate,
+explicit choices.
+
+New installations also expose **Uninstall Zapret Hub** in the desktop
+application menu, so the normal removal flow does not require a terminal.
+
+Terminal fallback:
+
+```bash
+./uninstall.sh --cli
+```
+
+The same uninstaller detects APT, DNF, Pacman or Zypper and supports
+Kali/Debian/Ubuntu, Fedora/RHEL, Arch and openSUSE.
+
 ## Components
 
 - [zapret](https://github.com/bol-van/zapret) and [zapret2](https://github.com/bol-van/zapret2)
 - [zapret-discord-youtube-linux](https://github.com/Sergeydigl3/zapret-discord-youtube-linux)
 - [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy)
 - [Happ Desktop](https://github.com/Happ-proxy/happ-desktop)
-- [Zapret Hub upstream](https://github.com/goshkow/Zapret-Hub)
+- [Zapret Hub — original project and UI by goshkow](https://github.com/goshkow/Zapret-Hub)
 
 The upstream link is retained for attribution. This fork is not an official
 upstream release. Bundled projects retain their own licenses and notices.

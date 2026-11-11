@@ -95,3 +95,15 @@ def test_zh_pkg_manager_matches_family() -> None:
 
 def test_zh_arch_returns_non_empty() -> None:
     assert _run("zh_arch", _os_release("debian"))
+
+
+def test_package_removal_is_supported_for_every_installable_family() -> None:
+    library = (PROJECT_ROOT / "scripts/lib/distro.sh").read_text(encoding="utf-8")
+    assert "zh_pkg_remove()" in library
+    for command in (
+        "apt-get remove -y",
+        "remove -y",
+        "zypper --non-interactive remove",
+        "pacman -R --noconfirm",
+    ):
+        assert command in library

@@ -12,6 +12,9 @@ USER_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux.sh"
 SYSTEM_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_system.sh"
 HAPP_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_happ.sh"
 DISTRO_LIB = PROJECT_ROOT / "scripts" / "lib" / "distro.sh"
+ROOT_UNINSTALLER = PROJECT_ROOT / "uninstall.sh"
+USER_UNINSTALLER = PROJECT_ROOT / "scripts" / "uninstall_linux.sh"
+SYSTEM_UNINSTALLER = PROJECT_ROOT / "scripts" / "uninstall_linux_system.sh"
 
 
 def _sh(source: str) -> str:
@@ -129,6 +132,11 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
         PROJECT_ROOT / "packaging" / "linux" / "zapret-hosts-user.txt",
         PROJECT_ROOT / "web_ui" / "package-lock.json",
         PROJECT_ROOT / "ui_assets" / "icons" / "app.png",
+        ROOT_UNINSTALLER,
+        USER_UNINSTALLER,
+        SYSTEM_UNINSTALLER,
+        PROJECT_ROOT / "src" / "zapret_hub" / "uninstaller.py",
+        PROJECT_ROOT / "web_ui" / "src" / "pages" / "UninstallPage.tsx",
     )
 
     assert all(path.is_file() for path in required)
@@ -136,6 +144,44 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
     assert os.access(ROOT_INSTALLER, os.X_OK)
     assert os.access(SYSTEM_INSTALLER, os.X_OK)
     assert os.access(HAPP_INSTALLER, os.X_OK)
+    assert os.access(ROOT_UNINSTALLER, os.X_OK)
+    assert os.access(USER_UNINSTALLER, os.X_OK)
+    assert os.access(SYSTEM_UNINSTALLER, os.X_OK)
+
+
+def test_linux_uninstaller_dry_run_is_safe_and_cross_distro() -> None:
+    result = subprocess.run(
+        [str(ROOT_UNINSTALLER), "--dry-run"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = result.stdout
+    assert ".zapret-hub-managed" in output
+    assert "Preserving Happ" in output
+    assert str(PROJECT_ROOT) in output
+
+
+def test_linux_uninstaller_preserves_unmanaged_components_and_dependencies() -> None:
+    user_script = USER_UNINSTALLER.read_text(encoding="utf-8")
+    system_script = SYSTEM_UNINSTALLER.read_text(encoding="utf-8")
+
+    assert "--cli" in user_script
+    assert "zapret_hub.uninstaller" in user_script
+    assert "--remove-happ" in user_script
+    assert "--purge-data" in user_script
+    assert ".zapret-hub-managed" in system_script
+    assert "managed by Zapret Hub" in system_script
+    assert "Preserving unmanaged" in system_script
+    assert "zh_pkg_remove happ" in system_script
+    assert "zh_deps" not in system_script
+    installer = USER_INSTALLER.read_text(encoding="utf-8")
+    assert "zapret-hub-uninstall.desktop" in installer
+    assert "Name[ru]=Удалить Zapret Hub" in installer
 
 
 def test_repository_contains_only_linux_runtime_payloads() -> None:

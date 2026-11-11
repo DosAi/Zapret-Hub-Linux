@@ -23,6 +23,7 @@ import { getBridge } from "@/bridge";
 import { uiAssetUrl } from "@/lib/assets";
 import { serviceIconUrl } from "@/lib/serviceAssets";
 import { TextContextMenu } from "@/components/shell/TextContextMenu";
+import { UninstallPage } from "@/pages/UninstallPage";
 
 const NAV_KEYS: NavKey[] = ["quick", "components", "installed", "mods", "files", "logs", "settings"];
 const PRELOAD_ORDER: NavKey[] = ["components", "installed", "settings", "mods", "files", "logs"];
@@ -69,6 +70,9 @@ function waitFrames(count = 2) {
 }
 
 export default function App() {
+  if (new URLSearchParams(window.location.search).has("uninstall")) {
+    return <UninstallPage />;
+  }
   return (
     <div className="grid h-full w-full place-items-center bg-transparent p-[6px]">
       <div className="app-window relative h-full w-full overflow-hidden rounded-[18px] border border-line-1">

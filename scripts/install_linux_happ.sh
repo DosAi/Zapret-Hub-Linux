@@ -125,4 +125,8 @@ curl -fL --retry 3 --connect-timeout 20 "$URL" -o "$PACKAGE"
 printf '%s  %s\n' "$SHA256" "$PACKAGE" | sha256sum -c -
 
 zh_pkg_install_local "$PACKAGE"
+install -d -o root -g root -m 0755 /var/lib/zapret-hub
+touch /var/lib/zapret-hub/happ-installed-by-hub
+chown root:root /var/lib/zapret-hub/happ-installed-by-hub
+chmod 0644 /var/lib/zapret-hub/happ-installed-by-hub
 echo "Installed official Happ $HAPP_VERSION. No VPN connection was selected or started by Zapret Hub."
