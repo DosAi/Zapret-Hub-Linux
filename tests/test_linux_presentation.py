@@ -91,6 +91,7 @@ def test_github_automation_is_linux_only() -> None:
     assert "distro-installer-smoke" in ci
     assert "kalilinux/kali-rolling" in ci
     assert "Alpine OpenRC guard" in ci
+    assert '"agent/**"' not in ci
 
     assert "Europe/Moscow" in release
     assert "Calendar release" in release
