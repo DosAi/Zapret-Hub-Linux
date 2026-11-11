@@ -199,3 +199,17 @@ def test_storage_reads_version_from_installed_linux_zapret2(
     storage = StorageManager(SimpleNamespace(runtime_dir=tmp_path / "runtime"))
 
     assert storage._detect_zapret2_version() == "2026-07-31 (569297c)"
+
+
+def test_diagnose_includes_dns_health() -> None:
+    service = LinuxZapret2Service(
+        root_candidates=(),
+        runner=FakeRunner([]),
+        which=lambda _: None,
+        geteuid=lambda: 1000,
+        platform_name="linux",
+    )
+    report = service.diagnose()
+    assert "dns_health" in report
+    assert report["dns_health"] in ("ok", "warning (ISP DNS poisoning detected; run ./scripts/setup_browser.sh or enable DoH)")
+

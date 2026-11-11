@@ -17,7 +17,12 @@ def _print_human(payload: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Zapret Hub Linux backend diagnostics and service control")
-    parser.add_argument("command", choices=("diagnose", "status", "start", "stop"), nargs="?", default="diagnose")
+    parser.add_argument(
+        "command",
+        choices=("diagnose", "status", "start", "stop", "setup-browser"),
+        nargs="?",
+        default="diagnose",
+    )
     parser.add_argument(
         "--backend",
         choices=("auto", "zapret", "zapret2"),
@@ -25,8 +30,36 @@ def main(argv: list[str] | None = None) -> int:
         help="Linux service backend (default: detect an installed backend)",
     )
     parser.add_argument("--dry-run", action="store_true", help="show the privileged command without executing it")
+    parser.add_argument("--revert", action="store_true", help="revert browser DoH configuration")
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
     args = parser.parse_args(argv)
+
+    if args.command == "setup-browser":
+        from zapret_hub.services.browser_config import (
+            discover_gecko_profiles,
+            setup_all_gecko_browsers,
+        )
+
+        if args.dry_run:
+            profiles = discover_gecko_profiles()
+            payload = {
+                "command": "setup-browser",
+                "action": "preview",
+                "profiles": [str(p / "user.js") for p in profiles],
+            }
+        else:
+            modified = setup_all_gecko_browsers(revert=args.revert)
+            action = "reverted" if args.revert else "configured"
+            payload = {
+                "command": "setup-browser",
+                "action": action,
+                "profiles": [str(p) for p in modified],
+            }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_human(payload)
+        return 0
 
     classic_service = LinuxZapretService()
     if args.backend == "zapret":
