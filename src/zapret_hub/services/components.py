@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import ipaddress
 import json
 import os
@@ -41,6 +42,8 @@ from zapret_hub.services.storage import StorageManager
 # Hub ships / prefers the latest Flowseal Zapret release as the default binary.
 PINNED_ZAPRET_VERSION = "1.10.0"
 PINNED_ZAPRET_TAG = "1.10.0"
+PINNED_ZAPRET2_VERSION = "1.0.7"
+PINNED_ZAPRET2_DIGEST = "35e14e4e1f345b870c3b87269fa45353efd597241a25304d38375c46b9fd2967"
 PINNED_ZAPRET_ZIP_URL = (
     "https://github.com/Flowseal/zapret-discord-youtube/releases/download/"
     f"{PINNED_ZAPRET_TAG}/zapret-discord-youtube-{PINNED_ZAPRET_VERSION}.zip"
@@ -4929,16 +4932,18 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "tag": str(item.get("tag") or ""),
                 "asset_url": str(item.get("asset_url") or ""),
                 "asset_name": str(item.get("asset_name") or ""),
+                "asset_digest": str(item.get("asset_digest") or ""),
                 "zipball_url": str(item.get("zipball_url") or ""),
             }
         # Offline fallback: still try the tagged zipball naming for a known pin.
         return {
-            "latest_version": "1.0.3",
-            "tag": "v1.0.3",
-            "source_url": "https://github.com/bol-van/zapret2/releases/download/v1.0.3/zapret2-v1.0.3.zip",
-            "asset_url": "https://github.com/bol-van/zapret2/releases/download/v1.0.3/zapret2-v1.0.3.zip",
-            "asset_name": "zapret2-v1.0.3.zip",
-            "zipball_url": "https://codeload.github.com/bol-van/zapret2/zip/refs/tags/v1.0.3",
+            "latest_version": PINNED_ZAPRET2_VERSION,
+            "tag": f"v{PINNED_ZAPRET2_VERSION}",
+            "source_url": f"https://github.com/bol-van/zapret2/releases/download/v{PINNED_ZAPRET2_VERSION}/zapret2-v{PINNED_ZAPRET2_VERSION}.zip",
+            "asset_url": f"https://github.com/bol-van/zapret2/releases/download/v{PINNED_ZAPRET2_VERSION}/zapret2-v{PINNED_ZAPRET2_VERSION}.zip",
+            "asset_name": f"zapret2-v{PINNED_ZAPRET2_VERSION}.zip",
+            "asset_digest": f"sha256:{PINNED_ZAPRET2_DIGEST}",
+            "zipball_url": f"https://codeload.github.com/bol-van/zapret2/zip/refs/tags/v{PINNED_ZAPRET2_VERSION}",
         }
 
     def list_zapret2_releases(self, *, limit: int = 25) -> list[dict[str, str]]:
@@ -5022,6 +5027,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 )
             asset_url = str((zip_asset or {}).get("browser_download_url") or "").strip()
             asset_name = str((zip_asset or {}).get("name") or "").strip() or f"zapret2-v{version}.zip"
+            asset_digest = str((zip_asset or {}).get("digest") or "").strip()
             if not asset_url:
                 asset_url = (
                     f"https://github.com/{repository}/releases/download/"
@@ -5036,6 +5042,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     "tag": tag or f"v{version}",
                     "asset_url": asset_url,
                     "asset_name": asset_name,
+                    "asset_digest": asset_digest,
                     "source_url": asset_url or zipball,
                     "zipball_url": zipball,
                     "published_at": str(item.get("published_at") or item.get("created_at") or ""),
@@ -5080,6 +5087,12 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 "zipball_url": f"https://codeload.github.com/bol-van/zapret2/zip/refs/tags/{urllib.parse.quote(tag)}",
             }
 
+        # Linux runs the system-managed copy from /opt/zapret2. Installing the
+        # archive into the per-user Windows runtime leaves systemd on the old
+        # version, which was the root cause of issue #14.
+        if getattr(self, "_linux_zapret2", None) is not None:
+            return self._install_linux_zapret2_release(release, wanted)
+
         candidates = [
             str(release.get("asset_url") or "").strip(),
             str(release.get("source_url") or "").strip(),
@@ -5112,6 +5125,146 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         if was_running:
             self.start_component("zapret2")
         return {"status": "updated", "version": wanted, "path": str(runtime_root)}
+
+    def _install_linux_zapret2_release(
+        self,
+        release: dict[str, str],
+        version: str,
+    ) -> dict[str, str]:
+        service = getattr(self, "_linux_zapret2", None)
+        if service is None:
+            return {"status": "error", "error": "Linux Zapret2 service is unavailable"}
+        target = service.discover_root()
+        if target is None:
+            return {"status": "error", "error": "Linux Zapret2 installation was not found"}
+        if not (target / ".zapret-hub-managed").is_file():
+            return {
+                "status": "external",
+                "version": str(self.storage._detect_zapret2_version() or "unknown"),
+                "path": str(target),
+                "error": "Existing Zapret2 installation is not managed by Zapret Hub and was preserved.",
+            }
+
+        helper = self.storage.paths.install_root / "scripts" / "update_linux_zapret2_system.sh"
+        if not helper.is_file():
+            return {"status": "error", "error": f"Linux update helper is missing: {helper}"}
+
+        candidates = list(
+            dict.fromkeys(
+                value
+                for value in (
+                    str(release.get("asset_url") or "").strip(),
+                    str(release.get("source_url") or "").strip(),
+                    str(release.get("zipball_url") or "").strip(),
+                )
+                if value
+            )
+        )
+        if not candidates:
+            return {"status": "error", "error": "No Zapret2 archive URL found"}
+
+        temp_root = Path(tempfile.mkdtemp(prefix="zapret_hub_zapret2_linux_"))
+        try:
+            source_root: Path | None = None
+            last_error = ""
+            for index, archive_url in enumerate(candidates):
+                try:
+                    zip_path = temp_root / f"zapret2_{index}.zip"
+                    self._download_to_file(archive_url, zip_path, timeout=120)
+                    expected_digest = str(release.get("asset_digest") or "").strip().lower()
+                    primary_url = str(release.get("asset_url") or "").strip()
+                    if expected_digest and archive_url == primary_url:
+                        expected_digest = expected_digest.removeprefix("sha256:")
+                        actual_digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+                        if actual_digest != expected_digest:
+                            raise ValueError("SHA-256 of the Zapret2 release archive does not match GitHub metadata")
+                    extract_root = temp_root / f"extract_{index}"
+                    extract_root.mkdir(parents=True, exist_ok=True)
+                    with zipfile.ZipFile(zip_path, "r") as archive:
+                        archive.extractall(extract_root)
+                    source_root = self._find_extracted_linux_zapret2_root(extract_root)
+                    if source_root is not None:
+                        break
+                    last_error = "Downloaded archive has no Linux Zapret2 runtime"
+                except (HTTPError, URLError, TimeoutError, zipfile.BadZipFile, OSError, ValueError) as error:
+                    last_error = str(error)
+                    self.logging.log(
+                        "warning",
+                        "Linux Zapret2 archive download failed",
+                        url=archive_url,
+                        error=last_error,
+                    )
+            if source_root is None:
+                return {"status": "error", "error": last_error or "Invalid Zapret2 archive"}
+
+            command = [
+                "/bin/sh",
+                str(helper),
+                "--source",
+                str(source_root),
+                "--version",
+                version,
+                "--target",
+                str(target),
+            ]
+            geteuid = getattr(os, "geteuid", None)
+            if geteuid is None or geteuid() != 0:
+                pkexec = shutil.which("pkexec")
+                if not pkexec:
+                    return {
+                        "status": "error",
+                        "error": "pkexec was not found; administrator authorization is required",
+                    }
+                command.insert(0, pkexec)
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=360,
+            )
+            if result.returncode != 0:
+                message = (result.stderr or result.stdout or "Zapret2 update helper failed").strip()
+                return {"status": "error", "error": message}
+            installed = str(self.storage._detect_zapret2_version() or "").strip().lstrip("vV")
+            if installed != version:
+                return {
+                    "status": "error",
+                    "error": f"Zapret2 update completed but version {installed or 'unknown'} is installed",
+                }
+            self.logging.log(
+                "info",
+                "Linux Zapret2 updated",
+                version=version,
+                path=str(target),
+            )
+            return {"status": "updated", "version": version, "path": str(target)}
+        except (OSError, subprocess.SubprocessError) as error:
+            return {"status": "error", "error": str(error)}
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+    @staticmethod
+    def _find_extracted_linux_zapret2_root(extract_root: Path) -> Path | None:
+        candidates = [extract_root]
+        try:
+            candidates.extend(path for path in extract_root.iterdir() if path.is_dir())
+        except OSError:
+            pass
+        try:
+            candidates.extend(path for path in extract_root.rglob("*") if path.is_dir())
+        except OSError:
+            pass
+        for candidate in candidates:
+            if not (candidate / "install_bin.sh").is_file():
+                continue
+            if any((candidate / "binaries").glob("linux-*/nfqws2")):
+                return candidate
+            if (candidate / "binaries" / "my" / "nfqws2").is_file():
+                return candidate
+            if (candidate / "nfq2" / "nfqws2").is_file():
+                return candidate
+        return None
 
     def list_tg_ws_proxy_releases(self, *, limit: int = 25) -> list[dict[str, str]]:
         """List Flowseal/tg-ws-proxy GitHub releases (newest first)."""

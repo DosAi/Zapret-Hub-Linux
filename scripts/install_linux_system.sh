@@ -58,6 +58,7 @@ CLASSIC_HELPER="$PROJECT_ROOT/scripts/install_linux_classic_zapret.sh"
 HAPP_HELPER="$PROJECT_ROOT/scripts/install_linux_happ.sh"
 POLKIT_SOURCE="$PROJECT_ROOT/packaging/polkit/49-zapret-hub.rules"
 HOSTLIST_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hosts-user.txt"
+ZAPRET2_UPDATE_HELPER="$PROJECT_ROOT/scripts/update_linux_zapret2_system.sh"
 
 for required in \
     "$ZAPRET_SOURCE/config.default" \
@@ -67,7 +68,8 @@ for required in \
     "$CLASSIC_HELPER" \
     "$HAPP_HELPER" \
     "$POLKIT_SOURCE" \
-    "$HOSTLIST_SOURCE"
+    "$HOSTLIST_SOURCE" \
+    "$ZAPRET2_UPDATE_HELPER"
 do
     [ -r "$required" ] || { echo "Required installation file is missing: $required" >&2; exit 1; }
 done
@@ -131,29 +133,38 @@ ZAPRET_TARGET=/opt/zapret2
 MANAGED_MARKER="$ZAPRET_TARGET/.zapret-hub-managed"
 
 MANAGED_INSTALL=0
-if [ ! -d "$ZAPRET_TARGET" ] || [ -f "$MANAGED_MARKER" ]; then
+ZAPRET2_MANAGED=0
+if [ ! -d "$ZAPRET_TARGET" ]; then
     MANAGED_INSTALL=1
+    ZAPRET2_MANAGED=1
     install -d -o root -g root -m 0755 "$ZAPRET_TARGET"
     cp -a "$ZAPRET_SOURCE/." "$ZAPRET_TARGET/"
     touch "$MANAGED_MARKER"
     chown -R root:root "$ZAPRET_TARGET"
     echo "Installed the bundled Zapret2 backend in $ZAPRET_TARGET."
+elif [ -f "$MANAGED_MARKER" ]; then
+    ZAPRET2_MANAGED=1
+    SOURCE_VERSION=$(cat "$ZAPRET_SOURCE/.zapret-hub-version" 2>/dev/null || echo unknown)
+    INSTALLED_VERSION=$(cat "$ZAPRET_TARGET/.zapret-hub-version" 2>/dev/null || echo unknown)
+    echo "Managed Zapret2 $INSTALLED_VERSION is already installed; preserving its live files (bundled: $SOURCE_VERSION)."
+    echo "Use the Zapret Hub component updater for a transactional version change."
 else
     echo "Existing unmanaged $ZAPRET_TARGET was found; preserving its files and configuration."
 fi
 
-# Git archives do not always preserve the executable bits of the bundled
-# cross-platform release. Make scripts and prebuilt binaries runnable before
-# asking upstream's architecture detector to create nfq2/ip2net/mdig links.
-[ -d "$ZAPRET_TARGET/binaries" ] && find "$ZAPRET_TARGET/binaries" -type f -exec chmod 0755 {} +
-[ -d "$ZAPRET_TARGET/init.d" ] && find "$ZAPRET_TARGET/init.d" -type f -exec chmod 0755 {} +
-[ -d "$ZAPRET_TARGET/ipset" ] && find "$ZAPRET_TARGET/ipset" -type f -name '*.sh' -exec chmod 0755 {} +
-[ -d "$ZAPRET_TARGET/common" ] && find "$ZAPRET_TARGET/common" -type f -name '*.sh' -exec chmod 0755 {} +
-chmod 0755 "$ZAPRET_TARGET/install_bin.sh"
+if [ "$MANAGED_INSTALL" -eq 1 ]; then
+    # Git archives do not always preserve executable bits. Make scripts and
+    # prebuilt binaries runnable before upstream creates architecture links.
+    [ -d "$ZAPRET_TARGET/binaries" ] && find "$ZAPRET_TARGET/binaries" -type f -exec chmod 0755 {} +
+    [ -d "$ZAPRET_TARGET/init.d" ] && find "$ZAPRET_TARGET/init.d" -type f -exec chmod 0755 {} +
+    [ -d "$ZAPRET_TARGET/ipset" ] && find "$ZAPRET_TARGET/ipset" -type f -name '*.sh' -exec chmod 0755 {} +
+    [ -d "$ZAPRET_TARGET/common" ] && find "$ZAPRET_TARGET/common" -type f -name '*.sh' -exec chmod 0755 {} +
+    chmod 0755 "$ZAPRET_TARGET/install_bin.sh"
 
-ZAPRET_BASE="$ZAPRET_TARGET" /bin/sh "$ZAPRET_TARGET/install_bin.sh"
+    ZAPRET_BASE="$ZAPRET_TARGET" /bin/sh "$ZAPRET_TARGET/install_bin.sh"
+fi
 
-if [ ! -f "$ZAPRET_TARGET/config" ]; then
+if [ "$MANAGED_INSTALL" -eq 1 ] && [ ! -f "$ZAPRET_TARGET/config" ]; then
     WAN_INTERFACE=
     for candidate in $(ip -4 route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}'); do
         case "$candidate" in
@@ -187,12 +198,12 @@ if [ ! -f "$ZAPRET_TARGET/config" ]; then
     chmod 0644 "$ZAPRET_TARGET/config"
 fi
 
-if [ ! -f "$ZAPRET_TARGET/ipset/zapret-hosts-user.txt" ]; then
+if [ "$MANAGED_INSTALL" -eq 1 ] && [ ! -f "$ZAPRET_TARGET/ipset/zapret-hosts-user.txt" ]; then
     install -o root -g root -m 0644 "$HOSTLIST_SOURCE" "$ZAPRET_TARGET/ipset/zapret-hosts-user.txt"
 fi
 
 if zh_is_systemd; then
-    if [ "$MANAGED_INSTALL" -eq 1 ] || [ ! -f /etc/systemd/system/zapret2.service ]; then
+    if [ "$ZAPRET2_MANAGED" -eq 1 ] && { [ "$MANAGED_INSTALL" -eq 1 ] || [ ! -f /etc/systemd/system/zapret2.service ]; }; then
         install -o root -g root -m 0644 \
             "$ZAPRET_SOURCE/init.d/systemd/zapret2.service" \
             /etc/systemd/system/zapret2.service

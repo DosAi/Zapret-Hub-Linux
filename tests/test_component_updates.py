@@ -89,6 +89,7 @@ def test_zapret2_release_uses_bol_van_zapret2_tags() -> None:
                             {
                                 "name": "zapret2-v1.0.3.zip",
                                 "browser_download_url": "https://github.com/bol-van/zapret2/releases/download/v1.0.3/zapret2-v1.0.3.zip",
+                                "digest": "sha256:abc123",
                             }
                         ],
                     }
@@ -100,6 +101,7 @@ def test_zapret2_release_uses_bol_van_zapret2_tags() -> None:
     assert release["latest_version"] == "1.0.3"
     assert "bol-van/zapret2" in release["source_url"]
     assert release["source_url"].endswith("zapret2-v1.0.3.zip")
+    assert release["asset_digest"] == "sha256:abc123"
 
 
 def test_zapret2_auto_discord_capture_includes_voice_udp_ranges() -> None:
