@@ -55,6 +55,17 @@ Telegram Desktop по умолчанию **не устанавливается**
 
 ## Обновление приложения и Zapret2
 
+Старые установки до commit `f58af04` не могут получить новый updater через
+старый GUI. Один раз обновите checkout вручную:
+
+```bash
+cd Zapret-Hub-Linux
+git pull --ff-only
+./install.sh --no-launch
+```
+
+После этого дальнейшие обновления доступны из интерфейса.
+
 В **Настройки → Zapret Hub → Проверить обновления** Linux-версия сверяет точный
 commit отслеживаемой GitHub-ветки `origin` (обычно
 `DosAi/Zapret-Hub-Linux:main`). Установка выполняется только для чистого Git

@@ -91,6 +91,16 @@ Existing Happ and third-party Zapret installations are preserved.
 
 ## Linux updates and autostart
 
+Installations older than commit `f58af04` do not have the new self-updater yet.
+Bootstrap it once from the Zapret Hub checkout:
+
+```bash
+git pull --ff-only
+./install.sh --no-launch
+```
+
+Future updates can then be installed from the GUI.
+
 **Settings → Zapret Hub → Check for updates** tracks the exact commit of the
 installed checkout's GitHub upstream branch (normally
 `DosAi/Zapret-Hub-Linux:main`), including commits made between tagged releases.
