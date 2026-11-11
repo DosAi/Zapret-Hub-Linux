@@ -89,6 +89,26 @@ Preview the installation without changing the system:
 The installer does not start, stop or restart existing networking services.
 Existing Happ and third-party Zapret installations are preserved.
 
+## Linux updates and autostart
+
+**Settings → Zapret Hub → Check for updates** tracks the exact commit of the
+installed checkout's GitHub upstream branch (normally
+`DosAi/Zapret-Hub-Linux:main`), including commits made between tagged releases.
+The updater only accepts a clean fast-forward and never overwrites tracked local
+changes. It refreshes the editable Python installation, rebuilds the Web UI and
+restarts the application.
+
+Zapret2 is updated separately from official `bol-van/zapret2` releases. A
+Hub-managed `/opt/zapret2` installation is staged and validated first; its
+configuration and user lists are preserved, the prior tree is kept for rollback,
+and the service is restored to its previous state. The bundled version for new
+installs is **v1.0.7**, and rerunning the installer will not downgrade a newer
+managed copy.
+
+Desktop autostart uses the stable `~/.local/bin/zapret-hub` launcher and validates
+that its executable still exists instead of treating any stale desktop file as
+working autostart.
+
 ## Choosing a strategy
 
 Open **Components** and use the control mode in the Zapret or Zapret 2 card:

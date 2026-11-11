@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import subprocess
 import os
+import shlex
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess
 
 from zapret_hub.services.logging_service import LoggingManager
+from zapret_hub.runtime_env import development_install_root
 
 if sys.platform.startswith("win"):
     import winreg
@@ -25,7 +27,29 @@ class AutostartManager:
 
     def is_enabled(self) -> bool:
         if not sys.platform.startswith("win"):
-            return self._linux_desktop_file().is_file()
+            desktop_file = self._linux_desktop_file()
+            try:
+                content = desktop_file.read_text(encoding="utf-8")
+            except OSError:
+                return False
+            values: dict[str, str] = {}
+            for line in content.splitlines():
+                if "=" not in line or line.lstrip().startswith("#"):
+                    continue
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip()
+            if values.get("Type") != "Application" or values.get("Hidden", "false").lower() == "true":
+                return False
+            if values.get("X-GNOME-Autostart-enabled", "true").lower() == "false":
+                return False
+            try:
+                command = shlex.split(values.get("Exec", ""), posix=True)
+            except ValueError:
+                return False
+            if not command:
+                return False
+            executable = Path(command[0]).expanduser()
+            return executable.is_file() and os.access(executable, os.X_OK)
         return self._task_exists() or self._run_entry_exists()
 
     def set_enabled(self, enabled: bool) -> bool:
@@ -46,10 +70,12 @@ class AutostartManager:
 
     def _set_linux_enabled(self, enabled: bool) -> bool:
         desktop_file = self._linux_desktop_file()
-        command = self._build_linux_command()
+        args = self._build_linux_args()
+        command = " ".join(self._desktop_quote(item) for item in args)
         try:
             if enabled:
                 desktop_file.parent.mkdir(parents=True, exist_ok=True)
+                working_directory = str(development_install_root(__file__))
                 desktop_file.write_text(
                     "\n".join(
                         (
@@ -57,13 +83,19 @@ class AutostartManager:
                             "Type=Application",
                             "Name=Zapret Hub",
                             f"Exec={command}",
+                            f"TryExec={args[0]}",
+                            f"Path={working_directory}",
                             "Terminal=false",
+                            "Hidden=false",
                             "X-GNOME-Autostart-enabled=true",
+                            "X-GNOME-Autostart-Delay=2",
+                            "X-KDE-autostart-after=panel",
                             "",
                         )
                     ),
                     encoding="utf-8",
                 )
+                desktop_file.chmod(0o644)
             else:
                 desktop_file.unlink(missing_ok=True)
         except OSError as error:
@@ -78,13 +110,19 @@ class AutostartManager:
         root = Path(config_home).expanduser() if config_home else Path.home() / ".config"
         return root / "autostart" / "zapret-hub.desktop"
 
-    def _build_linux_command(self) -> str:
+    def _build_linux_args(self) -> tuple[str, ...]:
+        # The installer-owned launcher remains stable when the virtualenv or
+        # Python minor version changes during an application update.
+        launcher = Path.home() / ".local" / "bin" / "zapret-hub"
+        if launcher.is_file() and os.access(launcher, os.X_OK):
+            return (str(launcher), "--autostart-launch")
+        project_launcher = development_install_root(__file__) / "scripts" / "run_linux.sh"
+        if project_launcher.is_file() and os.access(project_launcher, os.X_OK):
+            return (str(project_launcher), "--autostart-launch")
         executable = Path(sys.executable).resolve()
         if executable.name.lower() not in {"python", "python3", "python.exe"} and not executable.name.startswith("python3."):
-            args = (str(executable), "--autostart-launch")
-        else:
-            args = (str(executable), "-m", "zapret_hub.main", "--autostart-launch")
-        return " ".join(self._desktop_quote(item) for item in args)
+            return (str(executable), "--autostart-launch")
+        return (str(executable), "-m", "zapret_hub.main", "--autostart-launch")
 
     @staticmethod
     def _desktop_quote(value: str) -> str:

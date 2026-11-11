@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ROOT_INSTALLER = PROJECT_ROOT / "install.sh"
 USER_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux.sh"
 SYSTEM_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_system.sh"
+ZAPRET2_UPDATE_HELPER = PROJECT_ROOT / "scripts" / "update_linux_zapret2_system.sh"
 HAPP_INSTALLER = PROJECT_ROOT / "scripts" / "install_linux_happ.sh"
 DISTRO_LIB = PROJECT_ROOT / "scripts" / "lib" / "distro.sh"
 ROOT_UNINSTALLER = PROJECT_ROOT / "uninstall.sh"
@@ -135,6 +136,7 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
         ROOT_UNINSTALLER,
         USER_UNINSTALLER,
         SYSTEM_UNINSTALLER,
+        ZAPRET2_UPDATE_HELPER,
         PROJECT_ROOT / "src" / "zapret_hub" / "uninstaller.py",
         PROJECT_ROOT / "web_ui" / "src" / "pages" / "UninstallPage.tsx",
     )
@@ -147,6 +149,7 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
     assert os.access(ROOT_UNINSTALLER, os.X_OK)
     assert os.access(USER_UNINSTALLER, os.X_OK)
     assert os.access(SYSTEM_UNINSTALLER, os.X_OK)
+    assert os.access(ZAPRET2_UPDATE_HELPER, os.X_OK)
 
 
 def test_linux_uninstaller_dry_run_is_safe_and_cross_distro() -> None:
@@ -239,6 +242,20 @@ def test_happ_package_is_pinned_and_verified() -> None:
     assert 'PACKAGE_SUFFIX=.rpm' in helper
     assert 'PACKAGE_SUFFIX=.pkg.tar.zst' in helper
     assert "preserving it without restart or upgrade" in helper
+
+
+def test_zapret2_system_updater_is_transactional_and_managed_only() -> None:
+    helper = ZAPRET2_UPDATE_HELPER.read_text(encoding="utf-8")
+
+    assert ".zapret-hub-managed" in helper
+    assert "Refusing to update unmanaged" in helper
+    assert "zapret-hub-stage" in helper
+    assert "zapret-hub-backup" in helper
+    assert "systemctl is-active" in helper
+    assert "systemctl stop" in helper
+    assert "systemctl start" in helper
+    assert "previous installation was restored" in helper
+    assert 'cp -a -- "$TARGET/config"' in helper
 
 
 def test_network_probes_use_native_linux_arguments() -> None:

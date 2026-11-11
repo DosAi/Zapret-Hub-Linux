@@ -752,6 +752,15 @@ class WebBridge(QObject):
                 for component_id, state in states.items():
                     if str(getattr(state, "status", "") or "").strip().lower() != "running":
                         continue
+                    # Linux network backends are external system services and
+                    # do not lock application files. Keep connectivity online
+                    # while the Git checkout and Web UI are refreshed.
+                    if sys.platform.startswith("linux") and component_id in {
+                        "zapret",
+                        "zapret2",
+                        "goshkow-vpn",
+                    }:
+                        continue
                     try:
                         self.context.processes.stop_component(component_id)
                         stopped.append(component_id)
@@ -3320,7 +3329,19 @@ class WebBridge(QObject):
                 changes["ui_scale"] = "1"
             self.context.settings.update(**changes)
         if "autoStart" in patch:
-            self.context.autostart.set_enabled(bool(patch["autoStart"]))
+            requested_autostart = bool(patch["autoStart"])
+            actual_autostart = bool(self.context.autostart.set_enabled(requested_autostart))
+            # Do not leave the UI claiming autostart is enabled when creating
+            # or validating the desktop entry failed.
+            self.context.settings.update(autostart_windows=actual_autostart)
+            if actual_autostart != requested_autostart:
+                self._emit_toast(
+                    "Не удалось настроить автозапуск. Проверьте журнал приложения."
+                    if self._ru()
+                    else "Could not configure autostart. Check the application log.",
+                    kind="error",
+                    toast_id="autostart-setting",
+                )
         if isinstance(vpn, dict):
             subscription_url = str(vpn.get("subscriptionUrl", "") or "").strip()
             current_vpn = self.context.vpn.state()

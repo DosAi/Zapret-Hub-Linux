@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,8 @@ from zapret_hub.services.storage import StorageManager
 
 class UpdatesManager:
     REPO_URL = "https://github.com/DosAi/Zapret-Hub-Linux"
+    MIRROR_UPDATE_URL = "https://api.github.com/repos/DosAi/Zapret-Hub-Linux/releases"
+    MIRROR_INFO_URL = MIRROR_UPDATE_URL
     _EXE_NAMES = ("zapret_hub.exe", "Zapret_Hub.exe")
     # Hard ceilings so UI never sticks on "Скачиваем обновление…" forever.
     META_DEADLINE_SEC = 10.0
@@ -83,6 +86,10 @@ class UpdatesManager:
         return updates
 
     def fetch_latest_application_release(self, *, force_refresh: bool = False) -> dict[str, str]:
+        if sys.platform.startswith("linux"):
+            branch_status = self._fetch_linux_branch_status()
+            if branch_status is not None:
+                return branch_status
         payload = None if force_refresh else self._read_release_cache(max_age_seconds=600)
         using_fresh_cache = payload is not None
         cache_warning = ""
@@ -118,6 +125,94 @@ class UpdatesManager:
             }
 
         return self._build_application_release_status(payload, using_cache=using_fresh_cache or bool(cache_warning), cache_warning=cache_warning)
+
+    def _fetch_linux_branch_status(self) -> dict[str, str] | None:
+        """Track the GitHub branch used by a Linux source installation.
+
+        Linux installs are editable Git checkouts, while releases historically
+        contained Windows assets only. Comparing the tracked branch commit keeps
+        the fork current even between tagged releases.
+        """
+        checkout = self._linux_git_checkout()
+        if checkout is None:
+            return None
+        root, repository, remote, branch, current_sha = checkout
+        api_url = f"https://api.github.com/repos/{repository}/commits/{urllib.parse.quote(branch, safe='')}"
+        try:
+            payload = self._request_json(api_url, timeout=int(self.META_DEADLINE_SEC))
+        except Exception as error:
+            return {
+                "status": "error",
+                "current_version": f"{__version__} ({current_sha[:8]})",
+                "latest_version": f"{branch}@{current_sha[:8]}",
+                "error": self._friendly_mirror_error(error),
+                "html_url": f"https://github.com/{repository}/tree/{branch}",
+            }
+        if not isinstance(payload, dict):
+            return None
+        remote_sha = str(payload.get("sha") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", remote_sha):
+            return None
+        commit = payload.get("commit") if isinstance(payload.get("commit"), dict) else {}
+        message = str(commit.get("message") or "").strip().splitlines()[0]
+        html_url = str(payload.get("html_url") or f"https://github.com/{repository}/commit/{remote_sha}")
+        available = remote_sha != current_sha.lower()
+        return {
+            "status": "available" if available else "up-to-date",
+            "current_version": f"{__version__} ({current_sha[:8]})",
+            "latest_version": f"{branch}@{remote_sha[:8]}",
+            "body": message or f"Новый commit в {repository}:{branch}",
+            "html_url": html_url,
+            "asset_url": f"git+https://github.com/{repository}.git#{branch}",
+            "asset_name": f"{repository.replace('/', '-')}-{branch}",
+            "update_kind": "linux-git",
+            "repository": repository,
+            "remote": remote,
+            "branch": branch,
+            "remote_sha": remote_sha,
+            "install_root": str(root),
+        }
+
+    def _linux_git_checkout(self) -> tuple[Path, str, str, str, str] | None:
+        if not sys.platform.startswith("linux"):
+            return None
+        try:
+            root = Path(self.storage.paths.install_root).resolve()
+        except Exception:
+            return None
+        if not (root / ".git").exists():
+            return None
+
+        def git(*args: str) -> str:
+            result = subprocess.run(
+                ["git", "-C", str(root), *args],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=12,
+            )
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "git failed").strip())
+            return (result.stdout or "").strip()
+
+        try:
+            current_sha = git("rev-parse", "HEAD").lower()
+            upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+            remote, branch = upstream.split("/", 1)
+            remote_url = git("remote", "get-url", remote)
+        except Exception:
+            return None
+        match = re.search(r"github\.com[/:]([^/\s]+/[^/#\s]+?)(?:\.git)?$", remote_url)
+        if not match:
+            return None
+        repository = match.group(1).removesuffix(".git")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
+            return None
+        if not re.fullmatch(r"[0-9a-f]{40}", current_sha):
+            return None
+        return root, repository, remote, branch, current_sha
 
     def _build_application_release_status(
         self,
@@ -582,6 +677,8 @@ class UpdatesManager:
         *,
         progress_callback: Callable[[str, int, int], None] | None = None,
     ) -> dict[str, str]:
+        if str(release_info.get("update_kind") or "") == "linux-git":
+            return self._prepare_linux_git_update(release_info, progress_callback=progress_callback)
         asset_url = str(release_info.get("asset_url") or "").strip()
         asset_name = str(release_info.get("asset_name") or "").strip() or "update.zip"
         if not asset_url:
@@ -637,6 +734,66 @@ class UpdatesManager:
             "release_updated_at": str(release_info.get("release_updated_at", "")),
         }
 
+    def _prepare_linux_git_update(
+        self,
+        release_info: dict[str, str],
+        *,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+    ) -> dict[str, str]:
+        checkout = self._linux_git_checkout()
+        if checkout is None:
+            raise RuntimeError("Linux installation is not a tracked GitHub checkout.")
+        root, repository, remote, branch, current_sha = checkout
+        wanted_sha = str(release_info.get("remote_sha") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", wanted_sha):
+            raise ValueError("GitHub returned an invalid target commit.")
+        if str(release_info.get("repository") or repository) != repository:
+            raise RuntimeError("The update repository changed during the update check.")
+
+        def run_git(*args: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "-C", str(root), *args],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+
+        dirty = run_git("status", "--porcelain", "--untracked-files=no", timeout=20)
+        if dirty.returncode != 0:
+            raise RuntimeError((dirty.stderr or dirty.stdout or "Cannot inspect Git checkout").strip())
+        if (dirty.stdout or "").strip():
+            raise RuntimeError(
+                "В установке есть локальные изменения. Обновление остановлено, чтобы не перезаписать их."
+            )
+        if progress_callback is not None:
+            progress_callback("download", 0, 1)
+        fetched = run_git("fetch", "--quiet", "--depth=100", remote, branch, timeout=180)
+        if fetched.returncode != 0:
+            raise RuntimeError((fetched.stderr or fetched.stdout or "Git fetch failed").strip())
+        exists = run_git("cat-file", "-e", f"{wanted_sha}^{{commit}}", timeout=20)
+        if exists.returncode != 0:
+            raise RuntimeError("The GitHub target commit was not fetched.")
+        ancestor = run_git("merge-base", "--is-ancestor", current_sha, wanted_sha, timeout=20)
+        if ancestor.returncode != 0:
+            raise RuntimeError(
+                "Удалённая ветка не является fast-forward продолжением установки; автоматическое обновление отменено."
+            )
+        if progress_callback is not None:
+            progress_callback("download", 1, 1)
+            progress_callback("verify", 1, 1)
+            progress_callback("ready", 1, 1)
+        return {
+            "update_kind": "linux-git",
+            "install_root": str(root),
+            "repository": repository,
+            "remote": remote,
+            "branch": branch,
+            "current_sha": current_sha,
+            "remote_sha": wanted_sha,
+            "version": str(release_info.get("latest_version") or f"{branch}@{wanted_sha[:8]}"),
+        }
+
     def _find_payload_exe(self, root: Path) -> Path | None:
         for name in self._EXE_NAMES:
             candidate = root / name
@@ -665,6 +822,9 @@ class UpdatesManager:
         return extract_root
 
     def launch_update(self, prepared_update: dict[str, str]) -> None:
+        if str(prepared_update.get("update_kind") or "") == "linux-git":
+            self._launch_linux_git_update(prepared_update)
+            return
         extract_root = Path(prepared_update["extract_root"])
         install_root = self.storage.paths.install_root
         current_executable = Path(sys.executable).resolve()
@@ -952,6 +1112,83 @@ class UpdatesManager:
             cwd=str(install_root),
         )
         self.logging.log("info", "App update launched", target_version=prepared_update.get("version", ""), source=str(extract_root))
+
+    def _launch_linux_git_update(self, prepared_update: dict[str, str]) -> None:
+        root = Path(str(prepared_update.get("install_root") or "")).resolve()
+        wanted_sha = str(prepared_update.get("remote_sha") or "").strip().lower()
+        if not (root / ".git").exists() or not re.fullmatch(r"[0-9a-f]{40}", wanted_sha):
+            raise RuntimeError("Prepared Linux update is invalid.")
+        script_root = Path(tempfile.gettempdir()) / "zapret_hub_updates"
+        script_root.mkdir(parents=True, exist_ok=True)
+        stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+        script_path = script_root / f"apply_linux_update_{stamp}.sh"
+        log_path = script_root / f"apply_linux_update_{stamp}.log"
+        current_pid = os.getpid()
+        q_root = shlex.quote(str(root))
+        q_sha = shlex.quote(wanted_sha)
+        q_log = shlex.quote(str(log_path))
+        q_script = shlex.quote(str(script_path))
+        script = textwrap.dedent(
+            f"""
+            #!/bin/sh
+            set -u
+            root={q_root}
+            target={q_sha}
+            log={q_log}
+            pid={current_pid}
+            i=0
+            while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 120 ]; do
+                sleep 0.5
+                i=$((i + 1))
+            done
+            apply_update() {{
+                echo "[$(date -Iseconds)] applying $target"
+                cd "$root" || return 1
+                dirty=$(git status --porcelain --untracked-files=no) || return 2
+                if [ -n "$dirty" ]; then
+                    echo "tracked files changed after preparation; update cancelled"
+                    return 2
+                fi
+                git merge --ff-only "$target" || return 3
+                if [ ! -x .venv/bin/python ]; then
+                    python3 -m venv .venv || return 4
+                fi
+                .venv/bin/python -m pip install -e . || return 5
+                if command -v npm >/dev/null 2>&1; then
+                    (cd web_ui && npm ci && npm run build) || return 6
+                elif [ ! -f web_ui/dist/index.html ]; then
+                    echo "npm is required to build the updated interface"
+                    return 7
+                fi
+                nohup "$root/scripts/run_linux.sh" >"$log.launch" 2>&1 &
+                echo "[$(date -Iseconds)] update applied and application relaunched"
+                return 0
+            }}
+            apply_update >>"$log" 2>&1
+            code=$?
+            if [ "$code" -ne 0 ]; then
+                nohup "$root/scripts/run_linux.sh" >"$log.recovery" 2>&1 &
+            fi
+            rm -f -- {q_script}
+            exit "$code"
+            """
+        ).strip() + "\n"
+        script_path.write_text(script, encoding="utf-8")
+        script_path.chmod(0o700)
+        subprocess.Popen(
+            ["/bin/sh", str(script_path)],
+            cwd=str(root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.logging.log(
+            "info",
+            "Linux Git application update launched",
+            target=prepared_update.get("version", wanted_sha[:8]),
+            repository=prepared_update.get("repository", ""),
+        )
 
     def _pick_release_asset(self, assets: list[dict[str, object]]) -> dict[str, object] | None:
         machine = platform.machine().lower()

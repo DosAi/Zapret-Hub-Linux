@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
+import zipfile
 
 from zapret_hub.services.components import ProcessManager
 from zapret_hub.services.linux_zapret2 import LinuxZapret2Service, LinuxZapretService
@@ -199,3 +200,64 @@ def test_storage_reads_version_from_installed_linux_zapret2(
     storage = StorageManager(SimpleNamespace(runtime_dir=tmp_path / "runtime"))
 
     assert storage._detect_zapret2_version() == "2026-07-31 (569297c)"
+
+
+def test_finds_linux_zapret2_release_tree(tmp_path: Path) -> None:
+    root = tmp_path / "zapret2-v1.0.5"
+    binary = root / "binaries" / "linux-x86_64" / "nfqws2"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"binary")
+    (root / "install_bin.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    assert ProcessManager._find_extracted_linux_zapret2_root(tmp_path) == root
+
+
+def test_linux_zapret2_update_uses_privileged_system_helper(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "installed-zapret2"
+    target.mkdir()
+    (target / ".zapret-hub-managed").touch()
+    scripts = tmp_path / "install" / "scripts"
+    scripts.mkdir(parents=True)
+    helper = scripts / "update_linux_zapret2_system.sh"
+    helper.write_text("#!/bin/sh\n", encoding="utf-8")
+    version_file = target / ".zapret-hub-version"
+    version_file.write_text("1.0.3\n", encoding="utf-8")
+
+    class Storage:
+        paths = SimpleNamespace(install_root=tmp_path / "install")
+
+        @staticmethod
+        def _detect_zapret2_version() -> str:
+            return version_file.read_text(encoding="utf-8").strip()
+
+    manager = ProcessManager.__new__(ProcessManager)
+    manager.storage = Storage()
+    manager.logging = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    manager._linux_zapret2 = SimpleNamespace(discover_root=lambda: target)
+
+    def download(_url: str, destination: Path, timeout: int = 60) -> None:
+        del timeout
+        with zipfile.ZipFile(destination, "w") as archive:
+            archive.writestr("zapret2-v1.0.5/install_bin.sh", "#!/bin/sh\n")
+            archive.writestr("zapret2-v1.0.5/binaries/linux-x86_64/nfqws2", b"binary")
+
+    manager._download_to_file = download
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        version_file.write_text("1.0.5\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "updated", "")
+
+    monkeypatch.setattr("zapret_hub.services.components.subprocess.run", run)
+    monkeypatch.setattr("zapret_hub.services.components.os.geteuid", lambda: 0)
+
+    result = manager._install_linux_zapret2_release(
+        {"asset_url": "https://example.test/zapret2-v1.0.5.zip"},
+        "1.0.5",
+    )
+
+    assert result["status"] == "updated"
+    assert result["path"] == str(target)
+    assert commands and str(helper) in commands[0]
+    assert "winws2.exe" not in " ".join(commands[0])

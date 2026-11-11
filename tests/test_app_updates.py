@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from pathlib import Path
+import subprocess
 
 from zapret_hub.services.updates import UpdatesManager
 
@@ -219,3 +221,99 @@ def test_update_helper_uses_fast_literal_copy_and_restart_retries(tmp_path, monk
     assert "Copy-Item -LiteralPath" in script
     assert "$attempt -le 3" in script
     assert "Start-Process -FilePath $launch" in script
+
+
+def test_linux_checkout_tracks_configured_github_upstream(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "test@example.test"], check=True)
+    (tmp_path / "tracked.txt").write_text("ok\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "initial"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "remote", "add", "origin", "https://github.com/DosAi/Zapret-Hub-Linux.git"],
+        check=True,
+    )
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(tmp_path), "update-ref", "refs/remotes/origin/main", head], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "branch", "--set-upstream-to=origin/main"], check=True, capture_output=True)
+    manager = UpdatesManager.__new__(UpdatesManager)
+    manager.storage = SimpleNamespace(paths=SimpleNamespace(install_root=tmp_path))
+
+    checkout = manager._linux_git_checkout()
+
+    assert checkout is not None
+    root, repository, remote, branch, current_sha = checkout
+    assert root == tmp_path
+    assert repository == "DosAi/Zapret-Hub-Linux"
+    assert (remote, branch, current_sha) == ("origin", "main", head)
+
+
+def test_linux_branch_status_reports_new_commit(tmp_path: Path, monkeypatch) -> None:
+    manager = UpdatesManager.__new__(UpdatesManager)
+    manager.META_DEADLINE_SEC = 10
+    manager._linux_git_checkout = lambda: (
+        tmp_path,
+        "DosAi/Zapret-Hub-Linux",
+        "origin",
+        "main",
+        "a" * 40,
+    )
+    manager._request_json = lambda *_args, **_kwargs: {
+        "sha": "b" * 40,
+        "html_url": "https://github.com/DosAi/Zapret-Hub-Linux/commit/" + "b" * 40,
+        "commit": {"message": "FEATURE: Linux updater\n\nDetails"},
+    }
+
+    status = manager._fetch_linux_branch_status()
+
+    assert status is not None
+    assert status["status"] == "available"
+    assert status["update_kind"] == "linux-git"
+    assert status["latest_version"] == "main@bbbbbbbb"
+    assert status["body"] == "FEATURE: Linux updater"
+
+
+def test_linux_update_launcher_uses_fast_forward_and_rebuilds(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "checkout"
+    (root / ".git").mkdir(parents=True)
+    scripts_root = tmp_path / "temp"
+    manager = UpdatesManager.__new__(UpdatesManager)
+    manager.logging = SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    launches: list[list[str]] = []
+    monkeypatch.setattr("zapret_hub.services.updates.tempfile.gettempdir", lambda: str(scripts_root))
+    monkeypatch.setattr(
+        "zapret_hub.services.updates.subprocess.Popen",
+        lambda command, **_kwargs: launches.append(command) or SimpleNamespace(),
+    )
+
+    manager._launch_linux_git_update(
+        {
+            "update_kind": "linux-git",
+            "install_root": str(root),
+            "repository": "DosAi/Zapret-Hub-Linux",
+            "remote_sha": "b" * 40,
+            "version": "main@bbbbbbbb",
+        }
+    )
+
+    generated = list((scripts_root / "zapret_hub_updates").glob("apply_linux_update_*.sh"))
+    assert len(generated) == 1
+    script = generated[0].read_text(encoding="utf-8")
+    assert 'git merge --ff-only "$target"' in script
+    assert ".venv/bin/python -m pip install -e ." in script
+    assert "npm ci && npm run build" in script
+    assert "git reset" not in script
+    assert launches == [["/bin/sh", str(generated[0])]]
+
+
+def test_linux_app_update_keeps_external_network_services_online() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "zapret_hub" / "ui" / "web_window.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'sys.platform.startswith("linux") and component_id in {' in source
+    assert '"zapret2"' in source
+    assert '"goshkow-vpn"' in source
