@@ -152,6 +152,15 @@ def test_clean_checkout_contains_all_installer_payloads() -> None:
     assert os.access(ZAPRET2_UPDATE_HELPER, os.X_OK)
 
 
+def test_application_dependencies_cover_current_tg_ws_proxy_runtime() -> None:
+    pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    # Current upstream TG WS Proxy imports httpx and h2 at module import time.
+    # Keeping the HTTP/2 extra here makes both fresh installs and self-updates
+    # restart the worker successfully.
+    assert '"httpx[http2]==0.28.1"' in pyproject
+
+
 def test_linux_uninstaller_dry_run_is_safe_and_cross_distro() -> None:
     result = subprocess.run(
         [str(ROOT_UNINSTALLER), "--dry-run"],
